@@ -10,10 +10,10 @@ macOS arm64 + static-musl Linux (x86_64, aarch64), plus OxiSH/Graviola
 ```sh
 sh scripts/fetch-sources.sh   # download + verify pins, extract to .work/sources
 make macos                    # macOS client -> dist/macos/bin
-make linux DOCKER_PLATFORM=linux/arm64   # static-musl client via Docker
-sh test/runtime.sh            # functional qualification on final bytes
-sh scripts/qualify-binaries.sh dist/<target>  # linkage/static/hardening gates
-sh scripts/package.sh         # 3 ZIPs + manifest + verified SHA256SUMS
+make linux DOCKER_PLATFORM=linux/arm64   # dist/linux-aarch64/bin (linux/amd64 -> linux-x86_64)
+SSH_BIN_DIR=dist/macos/bin sh test/runtime.sh  # functional qualification on final bytes
+sh scripts/qualify-binaries.sh dist/<target>/bin  # linkage/static/hardening gates
+sh scripts/package.sh         # dist/release: 3 ZIPs + manifests + verified SHA256SUMS
 ```
 
 ## Conventions
@@ -44,4 +44,6 @@ sh scripts/package.sh         # 3 ZIPs + manifest + verified SHA256SUMS
 
 - `sh scripts/fetch-sources.sh` warm (reuse + verify): ≈0.1s.
 - Cold fetch + extract: network-bound, one-time per machine.
-- `make macos` / Docker timings recorded by S1/S2 on first clean run.
+- `test/runtime.sh` must keep `CARGO_HOME`/`RUSTUP_HOME` pointing at the real
+  home: its isolated `HOME` otherwise makes cargo reinstall the toolchain.
+- ZIP size budgets live in `release-budgets.json` and gate `package.sh`.
