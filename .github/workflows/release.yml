@@ -6,8 +6,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: release-${{ github.sha }}
+  group: "${{ github.workflow }}-${{ github.head_ref || github.run_id }}"
   cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
 
 env:
   GIT_TERMINAL_PROMPT: 0
@@ -20,9 +24,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-    defaults:
-      run:
-        shell: bash -euo pipefail {0}
     steps:
       - name: Refuse dispatches off the default branch
         env:
@@ -42,9 +43,6 @@ jobs:
     permissions:
       contents: read
       actions: write
-    defaults:
-      run:
-        shell: bash -euo pipefail {0}
     env:
       GH_TOKEN: ${{ github.token }}
     strategy:
@@ -127,9 +125,6 @@ jobs:
     permissions:
       contents: write
       actions: read
-    defaults:
-      run:
-        shell: bash -euo pipefail {0}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
