@@ -2,14 +2,33 @@
 
 ## Status
 
-Goal: OpenSSH 10.6p1 client without libcrypto (ssh, ssh-keygen, ssh-agent,
-ssh-add, sftp, scp) for macOS arm64 + static musl Linux (x86_64, aarch64),
-plus OxiSH/Graviola chacha20-poly1305@openssh.com + non-PTY exec for Git.
-Base: `5ec429f` (S0+S4), branch `master`, tree clean.
-Accepted: S0, S4 (interop proven with system ssh; re-run vs S1 client in S3).
-Red: none on the integration branch.
-Next: S1 (macOS client), then S2+S5 in parallel. Resume: pick the next open item in **Sequence**, brief per the
-orchestrate run-a-slice contract, steer after each accept.
+Goal: (1) OpenSSH 10.6p1 client without libcrypto for macOS arm64 + static
+musl Linux (x86_64, aarch64); (2) extension: a minimal Graviola-only OxiSH Git
+server, packaged separately, delegating to the `git-build` binaries.
+Branch `master`; the client workstream is unchanged by the extension.
+
+Reconciled 2026-10-27 against commits and executed tests:
+- S0 pins: done. S1 macOS client: done (`make macos`, qualify green).
+- S2 Linux client: done for both arches (`make linux` arm64 + amd64 green,
+  readelf/arch/PATH-ssh gates run inside the Docker build).
+- S3 `sh test/runtime.sh`: green on macOS bytes and on the extracted macOS
+  ZIP. Defect fixed on the way: sftp/scp had `/usr/local/bin/ssh` compiled in
+  (`SSH_PROGRAM=ssh` now, gated by qualify). Loopback fixture uses
+  `internal-sftp`; exec is proven against the OxiSH server.
+- S4 chacha interop: green (handshake vs the S1 client; 6 chacha unit tests).
+  The ChaCha20/Poly1305 primitives are a hand-maintained copy: transitional,
+  tracked by S13.
+- S5 non-PTY exec: prototype only. `exec_*` tests pass, but the server runs a
+  caller-supplied program path and discards stderr (see S10, S11). Not
+  qualified.
+- S6 packaging: `scripts/package.sh`, `release-budgets.json`, README, and
+  `dl ssh` (in `~/usr`, not in the default set; `dl-test.sh` 54 cases green)
+  are done for the client. Nothing is published; live-GitHub proof remains
+  owner-run.
+- S7 close is reopened: it runs after S8-S19, not before.
+Red: none known. Linux package qualification relies on the Docker build
+(no readelf on the macOS host).
+Next: S8 (vendor provenance), then S9 and S10 per **Sequence**.
 Launch prompt: `Run the next open slice of plan.md in /Users/josh/d/ssh-build;
 brief per orchestrate, land green only, steer after each accept.`
 
@@ -134,6 +153,95 @@ the parent steering checkpoint; red work never lands.
   Accept: no dead vendored/patch paths unreferenced; `ultrareview` P1/P2
   findings fixed; full suite (`test/runtime.sh` + qualify + oxish tests)
   green on the integrated tree.
+
+### Extension: Graviola-only OxiSH Git server (S8-S19)
+
+Status vocabulary: a slice is accepted only when its acceptance command ran
+green on the integrated tree. Implementation files existing is not
+acceptance. The server stays labelled experimental until S18 passes and the
+owner agrees.
+
+Architecture: two independent distributions. The client ZIPs (`ssh-*.zip`)
+are unchanged. The server ZIPs (`oxish-<triple>.zip`) carry `bin/oxish-server`,
+`bin/oxish-session`, licenses, and provenance; no Git. The server resolves
+Git from an explicitly configured, trusted `git-build` directory and never
+from `PATH` or from client input. No source is shared with `git-build`.
+
+- S8 — Vendor provenance. Owns: `scripts/vendor-oxish.sh`, `patches/oxish/`,
+  `vendor/oxish/{LICENSE-*,fuzz,deny.toml,UPSTREAM}`. Prereq: none. Accept:
+  `sh scripts/vendor-oxish.sh verify` clones/fetches the pinned rev
+  fail-closed, rebuilds the tree from upstream + patches in `.work/`, and
+  diffs it against `vendor/oxish` with no difference; licenses and the fuzz
+  harness are present. (PAR: none)
+- S9 — Graviola-only closure. Owns: `vendor/oxish/Cargo.toml`, deletion of
+  `oxish-aws-lc`, `scripts/check-crypto-graph.sh`. Prereq: S8. Accept:
+  `cargo tree --locked -e normal,build` over the server packages contains no
+  `aws-lc*`, `openssl*`, `boringssl*`, `libressl*`, `ring`; the script fails
+  on a seeded prohibited dependency; no AWS-LC feature or code remains.
+  (PAR: S10)
+- S10 — Git execution policy. Owns: new `vendor/oxish/oxish/src/git/`
+  (command parse, repo confinement, binary dir, permissions), server config.
+  Prereq: S8. Accept: `cargo test -p oxish git_policy` covers executable
+  paths, quoting, injection, traversal, symlink escape, option-like repos,
+  read-only vs push keys, forced commands (rejected or policy-validated), and
+  a policy test per fixed vulnerability; no client-supplied path is ever
+  executed. (PAR: S9)
+- S11 — Channel streaming and lifecycle. Owns: `unix/exec.rs`,
+  `session/connections.rs`. Prereq: S10. Accept: `cargo test -p oxish
+  channel_` covers stderr as extended data type 1, stdout/stderr ordering
+  before EOF, window/packet limits, half-close, partial writes, full pipes,
+  slow readers, bidirectional traffic, early disconnect, exit status and exit
+  signal, child reaping with no leaked processes. (PAR: none)
+- S12 — Auth and runtime hardening. Owns: `authentication.rs`, `server.rs`,
+  `bin/oxish-server.rs`. Prereq: S10, S11. Accept: Git-only default rejects
+  pty/shell/subsystem/forwarding/agent/X11 explicitly; public-key only;
+  root rejected; authorized-keys option parser fails closed on unknown or
+  duplicate options; attempt/connection/idle limits enforced; permission and
+  symlink checks on key files; tests per item. (PAR: none)
+- S13 — Crypto consolidation. Owns: `vendor/oxish/oxish-graviola`, optional
+  pinned Graviola patch. Prereq: S9. Accept: either (a) the SSH chacha
+  construction runs on Graviola primitives with no hand-written ChaCha20 or
+  Poly1305 left, plus KATs, OpenSSH differential test, tag-failure, counter
+  boundary tests and a fuzz target; or (b) a written, gated transitional
+  exception in AGENTS.md/README with the investigation evidence. Never
+  claims (a) without it. (PAR: S10-S12)
+- S14 — Git protocol v2. Owns: env handling in policy/exec. Prereq: S10,
+  S11. Accept: only `GIT_PROTOCOL=version=2` (and absence) pass; a test with
+  packet trace (`GIT_TRACE_PACKET`) asserts v2 on ls-remote, clone, fetch.
+  (PAR: none)
+- S15 — End-to-end harness on released bytes. Owns: `test/e2e-git.sh`,
+  `git-build.lock.json`. Prereq: S12, S14, S1. Accept: with this repo's
+  `ssh`, the server binaries, and checksum-verified `git-build` binaries
+  (explicit path or pinned prerelease; never system ssh/git): auth, hybrid
+  KEX, explicit cipher, v2 negotiation, clone/fetch/push, large pack
+  byte-exact, stderr diagnostics, nonzero exit, graceful shutdown; negatives:
+  malicious paths, injection, traversal, symlink escape, unapproved push,
+  bad signature, unknown host key (pinned known_hosts, never
+  `StrictHostKeyChecking=no`), malformed packets, unsupported requests,
+  disconnect mid-transfer with no leaked children or temp state. (PAR: none)
+- S16 — Native builds and final-byte qualification. Owns: `Dockerfile.oxish`,
+  `scripts/build-oxish-macos.sh`, `scripts/qualify-oxish.sh`, Makefile
+  targets. Prereq: S9. Accept: static-PIE musl (x86_64, aarch64) and macOS
+  arm64 builds with locked deps, LTO, no `-march=native`; ELF/Mach-O checks
+  on final bytes; documented Graviola CPU floor with a startup check that
+  refuses incompatible hardware. (PAR: S10-S12)
+- S17 — Server packaging. Owns: `scripts/package-oxish.sh`,
+  `release-budgets.json` entries. Prereq: S15, S16. Accept: three
+  `oxish-<triple>.zip` + manifests with OxiSH rev, Graviola version, patch
+  identity, toolchain, commit, target; consolidated verified `SHA256SUMS`;
+  `test/e2e-git.sh` green against the extracted macOS ZIP. (PAR: none)
+- S18 — Security review. Owns: `SECURITY.md`. Prereq: S12-S17. Accept: the
+  attack-surface list of the extension brief is reviewed with findings,
+  mitigations, and regression tests recorded; fuzz targets run for a bounded
+  time with the result recorded; remaining blockers listed. Status stays
+  experimental.
+- S19 — Close the extension: `dl oxish` in `~/usr` (opt-in, not default),
+  README server section, dead-code deletion, final report. Prereq: S18.
+  Accept: full suite green on the integrated tree; `dl-test.sh` green.
+
+Boundaries for the extension: no push, no release, no tags, no listening on
+non-loopback addresses, no host-key installs outside `.work/`. Read-only
+`gh release download` of `git-build` assets into `.work/` is authorized.
 
 ## Acceptance
 
