@@ -501,7 +501,7 @@ mod tests {
         let outside = f.root.parent().unwrap().join("outside.git");
         bare_repo(&outside);
         symlink(&outside, f.root.join("link.git")).unwrap();
-        symlink(&f.root.join("a.git"), f.root.join("alias.git")).unwrap();
+        symlink(f.root.join("a.git"), f.root.join("alias.git")).unwrap();
         mkdir(&f.root.join("team2"));
         symlink(&outside, f.root.join("team2").join("c.git")).unwrap();
         symlink(f.root.parent().unwrap(), f.root.join("up")).unwrap();

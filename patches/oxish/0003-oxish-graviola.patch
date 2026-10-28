@@ -1,8 +1,10 @@
 diff --git a/oxish-graviola/src/lib.rs b/oxish-graviola/src/lib.rs
-index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..5f20ddd56854ee3fdaef21f7dcbaea59721c977e 100644
+index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..beac1d2c5753f71f91c63f7aec68edca2a691568 100644
 --- a/oxish-graviola/src/lib.rs
 +++ b/oxish-graviola/src/lib.rs
-@@ -1,7 +1,7 @@
+@@ -1,7 +1,9 @@
++#![forbid(unsafe_code)]
++
  use std::sync::Arc;
  
  use graviola::{
@@ -11,7 +13,7 @@ index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..5f20ddd56854ee3fdaef21f7dcbaea59
      hashing::{Hash as GHash, HashContext as GHashContext, Sha256 as GSha256},
      key_agreement::{mlkem768, p256::StaticPrivateKey, x25519},
      random,
-@@ -103,6 +103,9 @@ impl CryptoProvider for Provider {
+@@ -103,6 +105,9 @@ impl CryptoProvider for Provider {
              EncryptionAlgorithm::Aes128Gcm => {
                  Ok(Box::new(Aes128GcmOpener(GcmState::new(counter, source)?)))
              }
@@ -21,7 +23,7 @@ index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..5f20ddd56854ee3fdaef21f7dcbaea59
              _ => Err(CryptoError::UnknownAlgorithm),
          }
      }
-@@ -116,6 +119,9 @@ impl CryptoProvider for Provider {
+@@ -116,6 +121,9 @@ impl CryptoProvider for Provider {
              EncryptionAlgorithm::Aes128Gcm => {
                  Ok(Box::new(Aes128GcmSealer(GcmState::new(counter, source)?)))
              }
@@ -31,7 +33,7 @@ index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..5f20ddd56854ee3fdaef21f7dcbaea59
              _ => Err(CryptoError::UnknownAlgorithm),
          }
      }
-@@ -150,7 +156,10 @@ impl CryptoProvider for Provider {
+@@ -150,7 +158,10 @@ impl CryptoProvider for Provider {
                  PublicKeyAlgorithm::EcdsaSha2Nistp256,
                  PublicKeyAlgorithm::Ed25519,
              ],
@@ -43,7 +45,7 @@ index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..5f20ddd56854ee3fdaef21f7dcbaea59
              mac: &[MacAlgorithm::None],
          }
      }
-@@ -228,6 +237,107 @@ impl OpeningKey for Aes128GcmOpener {
+@@ -228,6 +239,107 @@ impl OpeningKey for Aes128GcmOpener {
  const TAG_LEN: usize = 16;
  const NONCE_LEN: usize = 12;
  

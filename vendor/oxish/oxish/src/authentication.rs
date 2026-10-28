@@ -441,6 +441,7 @@ const SUPPORTED_METHODS: &[MethodName<'_>] = &[MethodName::PublicKey];
 mod tests {
     use super::*;
     use crate::DEFAULT_PROVIDER;
+    use proto::{Encode as _, auth::SignatureData};
 
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMPdEXeWrpzl1Lgk7akX7+7x4B1eoyV5tyD6674DIh3R user@host";
 
@@ -505,6 +506,77 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let name = Username::try_from("git".to_owned()).unwrap();
         assert!(Account::from_file(name, &path, DEFAULT_PROVIDER).is_err());
+    }
+
+    /// An Ed25519 key pair and the authorized-key entry that accepts it
+    fn key_pair() -> (Box<dyn proto::crypto::SigningKey>, Vec<u8>, AuthorizedKey) {
+        let (signing, _) = DEFAULT_PROVIDER
+            .generate_signing_key(&PublicKeyAlgorithm::Ed25519)
+            .unwrap();
+        let mut blob = Vec::new();
+        b"ssh-ed25519".as_slice().encode(&mut blob);
+        signing.public_key().encode(&mut blob);
+        let line = format!(
+            "git-access=\"read\" ssh-ed25519 {}",
+            data_encoding::BASE64.encode(&blob)
+        );
+        let key = AuthorizedKey::from_str(&line, DEFAULT_PROVIDER).unwrap();
+        (signing, blob, key)
+    }
+
+    fn signed_by(signing: &dyn proto::crypto::SigningKey, session: &[u8], user: &str, blob: &[u8]) -> Result<Vec<u8>, ()> {
+        let message = SignatureData {
+            session_id: session,
+            user_name: user,
+            service_name: ServiceName::Connection,
+            algorithm: PublicKeyAlgorithm::Ed25519,
+            public_key: blob,
+        }
+        .encode();
+        Ok(signing.sign(message.as_bytes()))
+    }
+
+    fn verifies(key: &AuthorizedKey, signature: &[u8], session: &[u8], user: &str, blob: &[u8]) -> bool {
+        let message = SignatureData {
+            session_id: session,
+            user_name: user,
+            service_name: ServiceName::Connection,
+            algorithm: PublicKeyAlgorithm::Ed25519,
+            public_key: blob,
+        }
+        .encode();
+        let signature = proto::auth::Signature {
+            algorithm: PublicKeyAlgorithm::Ed25519,
+            signature_blob: signature,
+        }
+        .encode()
+        .unwrap();
+        key.verify(message, signature).is_ok()
+    }
+
+    #[test]
+    fn forged_or_replayed_signatures_do_not_verify() {
+        let (signing, blob, key) = key_pair();
+        let genuine = signed_by(&*signing, b"session-1", "git", &blob).unwrap();
+        assert!(verifies(&key, &genuine, b"session-1", "git", &blob));
+
+        // Replayed on another session or for another user: the signed data differs.
+        assert!(!verifies(&key, &genuine, b"session-2", "git", &blob));
+        assert!(!verifies(&key, &genuine, b"session-1", "root", &blob));
+
+        // A different key's signature over the same data.
+        let (other, _, _) = key_pair();
+        let forged = signed_by(&*other, b"session-1", "git", &blob).unwrap();
+        assert!(!verifies(&key, &forged, b"session-1", "git", &blob));
+
+        // Flipped bits and truncation.
+        for index in 0..genuine.len() {
+            let mut tampered = genuine.clone();
+            tampered[index] ^= 0x01;
+            assert!(!verifies(&key, &tampered, b"session-1", "git", &blob), "byte {index}");
+        }
+        assert!(!verifies(&key, &genuine[..genuine.len() - 1], b"session-1", "git", &blob));
+        assert!(!verifies(&key, &[], b"session-1", "git", &blob));
     }
 
     #[test]

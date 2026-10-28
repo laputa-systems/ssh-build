@@ -45,13 +45,19 @@ it at, and never looks them up on `PATH` or takes a program from a client.
 [git-build]: https://github.com/laputa-systems/git-build
 
 ```sh
-oxish-server --generate-host-key host_key          # refuses to overwrite; rotate by adding a second key
+oxish-server --generate-host-key host_key          # never overwrites an existing file
 oxish-server --port 2222 \
     --host-key-file host_key \
     --repo-root /srv/git \
     --git-dir ~/.local/share/git/current \
     --authorized-keys authorized_keys
 ```
+
+Host keys: `--host-key-file` may be repeated. The server presents the first key of each algorithm
+(a second Ed25519 key is loaded but never offered), so a rotation is: generate the new key, list
+it first, hand clients the new public key, restart. A server never creates or replaces a host key
+by itself, and an unreadable, malformed, or loosely permissioned key file stops startup rather than
+being skipped, so the identity is always the one configured.
 
 Run it as a dedicated unprivileged account (it refuses root). It binds `127.0.0.1` unless you
 pass `--bind`; it can also take a socket from `LISTEN_FDS`, so an existing supervisor or socket

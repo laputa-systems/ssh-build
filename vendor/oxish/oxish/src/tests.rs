@@ -428,6 +428,34 @@ async fn channel_stderr_arrives_on_stderr_with_exit_status() {
 }
 
 #[tokio::test]
+async fn channel_command_killed_by_a_signal_is_reported_after_its_output() {
+    let world = script_world("echo before; echo diagnostics >&2; kill -9 $$").await;
+    world.bare_repo("a.git").await.unwrap();
+    let (client, _guard) = world
+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
+        .await
+        .unwrap();
+    let run = client.run(Some(SERVICE), b"").await.unwrap();
+    assert_eq!(run.stdout(), "before\n", "output written before the signal must arrive");
+    assert!(run.stderr.contains("diagnostics"), "{}", run.stderr);
+    assert!(!run.status.success(), "a signaled command must not look successful");
+}
+
+#[tokio::test]
+async fn channel_half_close_still_delivers_later_output() {
+    // The command reads until the client's EOF, keeps running, and only then answers.
+    let world = script_world("PATH=/usr/bin:/bin; wc -c | tr -d ' '; sleep 1; echo after-eof").await;
+    world.bare_repo("a.git").await.unwrap();
+    let (client, _guard) = world
+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
+        .await
+        .unwrap();
+    let run = client.run(Some(SERVICE), b"12345").await.unwrap();
+    assert!(run.status.success(), "{}", run.stderr);
+    assert_eq!(run.stdout(), "5\nafter-eof\n");
+}
+
+#[tokio::test]
 async fn channel_stdout_and_stderr_both_drain_completely() {
     let world = script_world(
         "PATH=/usr/bin:/bin; (head -c 3000000 /dev/zero | tr '\\0' 'o') & (head -c 2000000 /dev/zero | tr '\\0' 'e' >&2) & wait; exit 5",
@@ -736,7 +764,7 @@ async fn only_validated_git_protocol_reaches_the_command() {
     }
 }
 
-fn commit_args<'a>(message: &'a str) -> Vec<&'a str> {
+fn commit_args(message: &str) -> Vec<&str> {
     vec![
         "-c",
         "user.name=oxish-e2e",

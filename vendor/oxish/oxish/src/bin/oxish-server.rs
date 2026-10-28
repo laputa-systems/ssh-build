@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[cfg(unix)]

@@ -648,6 +648,13 @@ impl<'a> SignatureData<'a> {
 /// Constructed by [`SignatureData::encode()`].
 pub struct SignatureInput(Vec<u8>);
 
+impl SignatureInput {
+    /// The bytes a client signs
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// The `SSH_MSG_SERVICE_ACCEPT` message
 ///
 /// See <https://www.rfc-editor.org/rfc/rfc4253#section-10>.

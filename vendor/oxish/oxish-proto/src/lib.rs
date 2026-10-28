@@ -3,7 +3,8 @@
 //! Message types and state machines for the SSH protocol as specified in RFC 4250 through 4254 and
 //! related documents.
 
-#![warn(missing_docs, unsafe_code)]
+#![warn(missing_docs)]
+#![forbid(unsafe_code)]
 
 use core::{fmt, str};
 

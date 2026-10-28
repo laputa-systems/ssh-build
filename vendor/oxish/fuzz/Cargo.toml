@@ -20,6 +20,9 @@ path = "../oxish-proto"
 package = "oxish-graviola"
 path = "../oxish-graviola"
 
+[dependencies.oxish]
+path = "../oxish"
+
 [patch.crates-io]
 graviola = { path = "../../graviola" }
 
@@ -40,6 +43,20 @@ bench = false
 [[bin]]
 name = "ssh_chacha_roundtrip"
 path = "fuzz_targets/ssh_chacha_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "authorized_key"
+path = "fuzz_targets/authorized_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_command"
+path = "fuzz_targets/git_command.rs"
 test = false
 doc = false
 bench = false

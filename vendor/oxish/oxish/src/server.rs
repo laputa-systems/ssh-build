@@ -150,12 +150,9 @@ impl Server {
             return Err(anyhow::anyhow!("too many sessions from this address"));
         };
 
-        let _session = match self.sessions.try_acquire() {
-            Ok(permit) => permit,
-            Err(_) => {
-                warn!(%addr, "too many concurrent sessions; closing connection");
-                return Err(anyhow::anyhow!("too many concurrent sessions"));
-            }
+        let Ok(_session) = self.sessions.try_acquire() else {
+            warn!(%addr, "too many concurrent sessions; closing connection");
+            return Err(anyhow::anyhow!("too many concurrent sessions"));
         };
 
         let Connection {

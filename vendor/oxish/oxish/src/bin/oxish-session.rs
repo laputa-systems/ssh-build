@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::{env, path::PathBuf};
 
 use anyhow::Context as _;

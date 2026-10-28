@@ -1,6 +1,7 @@
 //! OxiSH: a modern, memory-safe SSH server implementation
 
 #![warn(missing_docs)]
+#![forbid(unsafe_code)]
 
 use core::{fmt, future, net::SocketAddr, pin::Pin, str::FromStr};
 use std::{io, str, task::ready};

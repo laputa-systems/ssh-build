@@ -1,5 +1,5 @@
 diff --git a/oxish-proto/src/auth.rs b/oxish-proto/src/auth.rs
-index dab51789c0e6f43d2c649ab208638e363994ae5c..97a4dd615af78b14c8e1eb96eb0052064b3175a3 100644
+index dab51789c0e6f43d2c649ab208638e363994ae5c..1a1b8feb33f7399fe593c3815eeaca20f13bbaa3 100644
 --- a/oxish-proto/src/auth.rs
 +++ b/oxish-proto/src/auth.rs
 @@ -132,6 +132,11 @@ impl AuthorizedKey {
@@ -121,7 +121,21 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..97a4dd615af78b14c8e1eb96eb005206
              next,
          })
      }
-@@ -676,31 +698,31 @@ mod tests {
+@@ -626,6 +648,13 @@ impl<'a> SignatureData<'a> {
+ /// Constructed by [`SignatureData::encode()`].
+ pub struct SignatureInput(Vec<u8>);
+ 
++impl SignatureInput {
++    /// The bytes a client signs
++    pub fn as_bytes(&self) -> &[u8] {
++        &self.0
++    }
++}
++
+ /// The `SSH_MSG_SERVICE_ACCEPT` message
+ ///
+ /// See <https://www.rfc-editor.org/rfc/rfc4253#section-10>.
+@@ -676,31 +705,31 @@ mod tests {
  
      #[test]
      fn key_options() {
@@ -176,7 +190,7 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..97a4dd615af78b14c8e1eb96eb005206
          ];
  
          for (options, expected) in cases {
-@@ -711,18 +733,30 @@ mod tests {
+@@ -711,18 +740,30 @@ mod tests {
  
              let (parsed, key_type, rest) = KeyOptions::parse(&line);
              let parsed = match (key_type, rest) {
@@ -362,10 +376,20 @@ index a8b133756294bb31f21a09eba8263f90b73db249..0ba082e2bd8ed766c94a47ba014308fb
                  *self = Self::AwaitingEcdhInit {
                      kx,
 diff --git a/oxish-proto/src/lib.rs b/oxish-proto/src/lib.rs
-index ea2e4f793afdb925cad8192d28ba79048ac91e06..ab4828701eb2b3ed6b576c392e155f939a481a87 100644
+index ea2e4f793afdb925cad8192d28ba79048ac91e06..734c70613e6e9cc99a74b56496432e6e923f1a23 100644
 --- a/oxish-proto/src/lib.rs
 +++ b/oxish-proto/src/lib.rs
-@@ -48,7 +48,13 @@ pub struct Identification<'a> {
+@@ -3,7 +3,8 @@
+ //! Message types and state machines for the SSH protocol as specified in RFC 4250 through 4254 and
+ //! related documents.
+ 
+-#![warn(missing_docs, unsafe_code)]
++#![warn(missing_docs)]
++#![forbid(unsafe_code)]
+ 
+ use core::{fmt, str};
+ 
+@@ -48,7 +49,13 @@ pub struct Identification<'a> {
  impl<'a> Identification<'a> {
      /// Decode an identification string from the start of `bytes`
      pub fn decode(bytes: &'a [u8]) -> Result<Completion<Decoded<'a, Self>>, ProtoError> {
@@ -380,7 +404,7 @@ index ea2e4f793afdb925cad8192d28ba79048ac91e06..ab4828701eb2b3ed6b576c392e155f93
              return Err(IdentificationError::InvalidUtf8.into());
          };
  
-@@ -80,9 +86,10 @@ impl<'a> Identification<'a> {
+@@ -80,9 +87,10 @@ impl<'a> Identification<'a> {
              comments,
          };
  
@@ -392,7 +416,7 @@ index ea2e4f793afdb925cad8192d28ba79048ac91e06..ab4828701eb2b3ed6b576c392e155f93
          }))
      }
  }
-@@ -747,3 +754,31 @@ pub const MAX_PACKET_LEN: u32 = 64 * 1024;
+@@ -747,3 +755,31 @@ pub const MAX_PACKET_LEN: u32 = 64 * 1024;
  ///
  /// See <https://www.rfc-editor.org/rfc/rfc4253#section-4.2>.
  pub const PROTOCOL: &str = "2.0";
