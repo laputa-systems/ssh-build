@@ -60,3 +60,10 @@ path = "fuzz_targets/git_command.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "channel_state"
+path = "fuzz_targets/channel_state.rs"
+test = false
+doc = false
+bench = false

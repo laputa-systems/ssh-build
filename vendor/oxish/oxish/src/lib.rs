@@ -34,6 +34,8 @@ mod authentication;
 pub use authentication::{Account, AuthError, Username};
 mod session;
 pub use session::Session;
+#[doc(hidden)]
+pub use session::fuzz_channel_state;
 mod server;
 pub use server::{Config, Server};
 #[cfg(unix)]

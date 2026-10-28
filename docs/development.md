@@ -77,7 +77,9 @@ Both are `Apache-2.0 OR MIT` or `Apache-2.0 OR ISC OR MIT-0` (SPDX headers and `
 - `vendor/oxish/oxish-graviola/tests/openssh-chachapoly.vectors` holds packets sealed by OpenSSH's
   own `chachapoly_crypt`; `sh scripts/gen-chachapoly-vectors.sh` regenerates them from the pinned
   OpenSSH build (`make macos` first).
-- Fuzz targets live in `vendor/oxish/fuzz` (`cargo fuzz run <target>`).
+- Fuzz targets live in `vendor/oxish/fuzz` (`cargo fuzz run <target>`); `channel_state`
+  drives the channel state machine via the hidden `oxish::fuzz_channel_state` entry.
+  `.github/workflows/fuzz.yml` runs all six targets on pull requests, pushes, and nightly.
 
 ## CI and releases
 

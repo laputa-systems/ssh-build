@@ -848,10 +848,10 @@ index fcfdaedd66e7d26a54d071aa7155f017dd64624c..faa022d17ed6377bbe5828cce5e1df22
  name = "zeroize"
  version = "1.9.0"
 diff --git a/fuzz/Cargo.toml b/fuzz/Cargo.toml
-index a1f389e044467224dab9fbcf1778ebcb6b59edaf..6cf3df27697ed1ad0d367458d57bde349cd54cba 100644
+index a1f389e044467224dab9fbcf1778ebcb6b59edaf..7e10c671a10bbf8c7cdb2208d4bdd52cb948bec0 100644
 --- a/fuzz/Cargo.toml
 +++ b/fuzz/Cargo.toml
-@@ -16,9 +16,47 @@ libfuzzer-sys = "0.4"
+@@ -16,9 +16,54 @@ libfuzzer-sys = "0.4"
  package = "oxish-proto"
  path = "../oxish-proto"
  
@@ -899,6 +899,13 @@ index a1f389e044467224dab9fbcf1778ebcb6b59edaf..6cf3df27697ed1ad0d367458d57bde34
 +test = false
 +doc = false
 +bench = false
++
++[[bin]]
++name = "channel_state"
++path = "fuzz_targets/channel_state.rs"
++test = false
++doc = false
++bench = false
 diff --git a/fuzz/fuzz_targets/authorized_key.rs b/fuzz/fuzz_targets/authorized_key.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..7d6e1227b5aa12e3ca456d6385fad1f8a523f28a
@@ -919,6 +926,19 @@ index 0000000000000000000000000000000000000000..7d6e1227b5aa12e3ca456d6385fad1f8
 +        let _ = key.options.git_access;
 +        assert!(key.same_key(&key));
 +    }
++});
+diff --git a/fuzz/fuzz_targets/channel_state.rs b/fuzz/fuzz_targets/channel_state.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..385d9f4804a871ee1680c15bf3d3255330d24d55
+--- /dev/null
++++ b/fuzz/fuzz_targets/channel_state.rs
+@@ -0,0 +1,7 @@
++#![no_main]
++
++use libfuzzer_sys::fuzz_target;
++
++fuzz_target!(|data: &[u8]| {
++    oxish::fuzz_channel_state(data);
 +});
 diff --git a/fuzz/fuzz_targets/git_command.rs b/fuzz/fuzz_targets/git_command.rs
 new file mode 100644

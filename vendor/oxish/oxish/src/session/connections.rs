@@ -9,12 +9,12 @@ use std::{collections::BTreeMap, os::unix::process::ExitStatusExt as _, sync::Ar
 
 use proto::{
     IncomingPacket, MAX_PACKET_LEN, MessageType, ProtoError, WriteState,
-    auth::KeyOptions,
+    auth::{GitAccess, KeyOptions},
     channels::{
         ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelOpen,
         ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest, ChannelRequestFailure,
-        ChannelRequestSuccess, ChannelRequestType, ChannelWindowAdjust, EXTENDED_DATA_STDERR,
-        ExitSignal,
+        ChannelRequestSuccess, ChannelRequestType, ChannelWindowAdjust, EXTENDED_DATA_STDERR, Env,
+        Exec, ExitSignal,
     },
     named::ChannelType,
 };
@@ -25,7 +25,7 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    Error, GitPolicy, PolicyError, validate_protocol,
+    DEFAULT_PROVIDER, Error, GitPolicy, PolicyError, validate_protocol,
     platform::{GitProcess, Output},
 };
 
@@ -677,6 +677,207 @@ const MAX_PROCESSES: usize = 4;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// How long output pipes may stay open after Git itself exited
 const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
+
+/// Drive the channel open/request/data/window/eof/close state machine without spawning commands.
+///
+/// Hidden entry for the `channel_state` libFuzzer target. Uses an empty repository root so
+/// `authorize` never succeeds and no child process is spawned, then asserts the structural
+/// invariants from the review findings: channel cap, exact packet-size honoring, unknown-ID
+/// rejection, close removal, and no permit leak.
+pub fn fuzz_channel_state(data: &[u8]) {
+    let fixture = fuzz_fixture();
+    let options = KeyOptions {
+        git_access: Some(GitAccess::Read),
+    };
+    let grant = Grant {
+        policy: &fixture.policy,
+        options: &options,
+    };
+    let mut channels = Channels::default();
+    let mut write = WriteState::new(DEFAULT_PROVIDER.secure_random());
+    let mut input = data;
+    while input.len() >= 2 {
+        let op = input[0] % 6;
+        input = &input[1..];
+        match op {
+            0 => {
+                if input.len() < 13 {
+                    break;
+                }
+                let sender = u32::from_be_bytes(input[0..4].try_into().unwrap());
+                let window = u32::from_be_bytes(input[4..8].try_into().unwrap());
+                let max = u32::from_be_bytes(input[8..12].try_into().unwrap());
+                let typ = input[12];
+                input = &input[13..];
+                let before_len = channels.channels.len();
+                let before_next = channels.next_id;
+                let r#type = match typ % 2 {
+                    0 => ChannelType::Session,
+                    _ => ChannelType::Unknown("x"),
+                };
+                let open = ChannelOpen {
+                    r#type,
+                    sender_channel: sender,
+                    initial_window_size: window,
+                    maximum_packet_size: max,
+                };
+                let _ = channels.open(open, &mut write);
+                assert!(channels.channels.len() <= MAX_CHANNELS);
+                for channel in channels.channels.values() {
+                    assert!(channel.maximum_packet_size >= MIN_PACKET_SIZE);
+                }
+                if channels.channels.len() == before_len + 1 {
+                    let channel = channels
+                        .channels
+                        .get(&before_next)
+                        .expect("new channel at expected id");
+                    assert_eq!(channel.maximum_packet_size, max);
+                    assert_eq!(channel.send_window, window);
+                    assert_eq!(channel.receive_window, INITIAL_WINDOW_SIZE);
+                }
+                assert_eq!(channels.processes.available_permits(), MAX_PROCESSES);
+            }
+            1 => {
+                if input.len() < 7 {
+                    break;
+                }
+                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
+                let kind = input[4];
+                let want_reply = input[5] % 2 == 1;
+                let cmd_len = input[6] as usize;
+                input = &input[7..];
+                let take = core::cmp::min(cmd_len, input.len());
+                let (command, rest) = input.split_at(take);
+                input = rest;
+                let known = channels.channels.contains_key(&recipient);
+                let r#type = match kind % 5 {
+                    0 => ChannelRequestType::Env(Env {
+                        name: "GIT_PROTOCOL",
+                        value: "version=2",
+                    }),
+                    1 => ChannelRequestType::Env(Env {
+                        name: "FOO",
+                        value: "bar",
+                    }),
+                    2 => ChannelRequestType::Shell,
+                    3 => ChannelRequestType::Exec(Exec { command }),
+                    _ => ChannelRequestType::Unknown("x-req"),
+                };
+                let request = ChannelRequest {
+                    recipient_channel: recipient,
+                    r#type,
+                    want_reply,
+                };
+                let result = channels.request(request, &mut write, &grant);
+                if !known {
+                    assert!(result.is_err());
+                }
+                assert!(channels.channels.len() <= MAX_CHANNELS);
+                assert_eq!(channels.processes.available_permits(), MAX_PROCESSES);
+            }
+            2 => {
+                if input.len() < 6 {
+                    break;
+                }
+                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
+                let len = u16::from_be_bytes(input[4..6].try_into().unwrap()) as usize;
+                input = &input[6..];
+                let take = core::cmp::min(len, input.len());
+                let (bytes, rest) = input.split_at(take);
+                input = rest;
+                let known = channels.channels.contains_key(&recipient);
+                let data = ChannelData {
+                    recipient_channel: recipient,
+                    data: std::borrow::Cow::Borrowed(bytes),
+                };
+                let result = channels.data(&data);
+                if !known {
+                    assert!(result.is_err());
+                }
+                for channel in channels.channels.values() {
+                    assert!(channel.receive_window <= INITIAL_WINDOW_SIZE);
+                }
+            }
+            3 => {
+                if input.len() < 8 {
+                    break;
+                }
+                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
+                let bytes_to_add = u32::from_be_bytes(input[4..8].try_into().unwrap());
+                input = &input[8..];
+                let known = channels.channels.contains_key(&recipient);
+                let adjust = ChannelWindowAdjust {
+                    recipient_channel: recipient,
+                    bytes_to_add,
+                };
+                let result = channels.adjust_window(&adjust);
+                if !known {
+                    assert!(result.is_err());
+                }
+            }
+            4 => {
+                if input.len() < 4 {
+                    break;
+                }
+                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
+                input = &input[4..];
+                let known = channels.channels.contains_key(&recipient);
+                let result = channels.eof(&ChannelEof {
+                    recipient_channel: recipient,
+                });
+                if !known {
+                    assert!(result.is_err());
+                }
+            }
+            _ => {
+                if input.len() < 4 {
+                    break;
+                }
+                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
+                input = &input[4..];
+                let known = channels.channels.contains_key(&recipient);
+                let result = channels.close(
+                    &ChannelClose {
+                        recipient_channel: recipient,
+                    },
+                    &mut write,
+                );
+                assert!(result.is_ok());
+                if known {
+                    assert!(!channels.channels.contains_key(&recipient));
+                }
+                assert!(channels.channels.len() <= MAX_CHANNELS);
+            }
+        }
+    }
+}
+
+struct FuzzFixture {
+    policy: GitPolicy,
+}
+
+static FUZZ_FIXTURE: std::sync::OnceLock<FuzzFixture> = std::sync::OnceLock::new();
+
+fn fuzz_fixture() -> &'static FuzzFixture {
+    use std::os::unix::fs::PermissionsExt as _;
+    FUZZ_FIXTURE.get_or_init(|| {
+        let base = std::env::temp_dir().join(format!("oxish-fuzz-channels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let (root, bin) = (base.join("repos"), base.join("bin"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bin.join("git"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("git", bin.join("git-upload-pack")).unwrap();
+        std::os::unix::fs::symlink("git", bin.join("git-receive-pack")).unwrap();
+        let policy = GitPolicy::new(&root, &bin).unwrap();
+        FuzzFixture { policy }
+    })
+}
 
 #[cfg(test)]
 mod tests {

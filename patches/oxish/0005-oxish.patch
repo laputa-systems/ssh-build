@@ -1585,7 +1585,7 @@ index 0000000000000000000000000000000000000000..0dda74162fe1a89d34e0c5c039091f62
 +    }
 +}
 diff --git a/oxish/src/lib.rs b/oxish/src/lib.rs
-index af3a4a7fdb54654311788861d9f8d8e68df8668b..2b7d894268524a9848bd9d525b5166963c8af988 100644
+index af3a4a7fdb54654311788861d9f8d8e68df8668b..fcf86035ff0e5f93c59de4842eeff37a7cd96d7b 100644
 --- a/oxish/src/lib.rs
 +++ b/oxish/src/lib.rs
 @@ -1,6 +1,7 @@
@@ -1596,7 +1596,7 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..2b7d894268524a9848bd9d525b516696
  
  use core::{fmt, future, net::SocketAddr, pin::Pin, str::FromStr};
  use std::{io, str, task::ready};
-@@ -20,32 +21,24 @@ use thiserror::Error;
+@@ -20,32 +21,26 @@ use thiserror::Error;
  use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
  use tracing::{debug, trace, warn};
  
@@ -1629,6 +1629,8 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..2b7d894268524a9848bd9d525b516696
 +pub use authentication::{Account, AuthError, Username};
  mod session;
  pub use session::Session;
++#[doc(hidden)]
++pub use session::fuzz_channel_state;
  mod server;
 -pub use server::{Config, RootPolicy, Server};
 +pub use server::{Config, Server};
@@ -1925,7 +1927,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..f9f7dbf6b522b8eae488bd5ac3c8bd75
 +    }
  }
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..cdd00d5e7a4874ea2776b93df13481b00c5a9d19 100644
+index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..61c2fc71e897c0718e7bdc96bf30597656f82689 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
 @@ -1,38 +1,69 @@
@@ -1946,15 +1948,16 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..cdd00d5e7a4874ea2776b93df13481b0
  
  use proto::{
      IncomingPacket, MAX_PACKET_LEN, MessageType, ProtoError, WriteState,
-     auth::KeyOptions,
+-    auth::KeyOptions,
++    auth::{GitAccess, KeyOptions},
      channels::{
 -        ChannelClose, ChannelData, ChannelEof, ChannelOpen, ChannelOpenConfirmation,
 -        ChannelOpenFailure, ChannelRequest, ChannelRequestFailure, ChannelRequestSuccess,
 -        ChannelRequestType, ChannelWindowAdjust, PtyReq,
 +        ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelOpen,
 +        ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest, ChannelRequestFailure,
-+        ChannelRequestSuccess, ChannelRequestType, ChannelWindowAdjust, EXTENDED_DATA_STDERR,
-+        ExitSignal,
++        ChannelRequestSuccess, ChannelRequestType, ChannelWindowAdjust, EXTENDED_DATA_STDERR, Env,
++        Exec, ExitSignal,
      },
      named::ChannelType,
  };
@@ -1966,7 +1969,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..cdd00d5e7a4874ea2776b93df13481b0
  
 -use crate::{Error, platform::Terminal};
 +use crate::{
-+    Error, GitPolicy, PolicyError, validate_protocol,
++    DEFAULT_PROVIDER, Error, GitPolicy, PolicyError, validate_protocol,
 +    platform::{GitProcess, Output},
 +};
  
@@ -2912,7 +2915,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..cdd00d5e7a4874ea2776b93df13481b0
      }
  }
  
-@@ -567,7 +663,109 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
+@@ -567,7 +663,310 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
      }
  }
  
@@ -2933,6 +2936,207 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..cdd00d5e7a4874ea2776b93df13481b0
 +const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 +/// How long output pipes may stay open after Git itself exited
 +const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
++
++/// Drive the channel open/request/data/window/eof/close state machine without spawning commands.
++///
++/// Hidden entry for the `channel_state` libFuzzer target. Uses an empty repository root so
++/// `authorize` never succeeds and no child process is spawned, then asserts the structural
++/// invariants from the review findings: channel cap, exact packet-size honoring, unknown-ID
++/// rejection, close removal, and no permit leak.
++pub fn fuzz_channel_state(data: &[u8]) {
++    let fixture = fuzz_fixture();
++    let options = KeyOptions {
++        git_access: Some(GitAccess::Read),
++    };
++    let grant = Grant {
++        policy: &fixture.policy,
++        options: &options,
++    };
++    let mut channels = Channels::default();
++    let mut write = WriteState::new(DEFAULT_PROVIDER.secure_random());
++    let mut input = data;
++    while input.len() >= 2 {
++        let op = input[0] % 6;
++        input = &input[1..];
++        match op {
++            0 => {
++                if input.len() < 13 {
++                    break;
++                }
++                let sender = u32::from_be_bytes(input[0..4].try_into().unwrap());
++                let window = u32::from_be_bytes(input[4..8].try_into().unwrap());
++                let max = u32::from_be_bytes(input[8..12].try_into().unwrap());
++                let typ = input[12];
++                input = &input[13..];
++                let before_len = channels.channels.len();
++                let before_next = channels.next_id;
++                let r#type = match typ % 2 {
++                    0 => ChannelType::Session,
++                    _ => ChannelType::Unknown("x"),
++                };
++                let open = ChannelOpen {
++                    r#type,
++                    sender_channel: sender,
++                    initial_window_size: window,
++                    maximum_packet_size: max,
++                };
++                let _ = channels.open(open, &mut write);
++                assert!(channels.channels.len() <= MAX_CHANNELS);
++                for channel in channels.channels.values() {
++                    assert!(channel.maximum_packet_size >= MIN_PACKET_SIZE);
++                }
++                if channels.channels.len() == before_len + 1 {
++                    let channel = channels
++                        .channels
++                        .get(&before_next)
++                        .expect("new channel at expected id");
++                    assert_eq!(channel.maximum_packet_size, max);
++                    assert_eq!(channel.send_window, window);
++                    assert_eq!(channel.receive_window, INITIAL_WINDOW_SIZE);
++                }
++                assert_eq!(channels.processes.available_permits(), MAX_PROCESSES);
++            }
++            1 => {
++                if input.len() < 7 {
++                    break;
++                }
++                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
++                let kind = input[4];
++                let want_reply = input[5] % 2 == 1;
++                let cmd_len = input[6] as usize;
++                input = &input[7..];
++                let take = core::cmp::min(cmd_len, input.len());
++                let (command, rest) = input.split_at(take);
++                input = rest;
++                let known = channels.channels.contains_key(&recipient);
++                let r#type = match kind % 5 {
++                    0 => ChannelRequestType::Env(Env {
++                        name: "GIT_PROTOCOL",
++                        value: "version=2",
++                    }),
++                    1 => ChannelRequestType::Env(Env {
++                        name: "FOO",
++                        value: "bar",
++                    }),
++                    2 => ChannelRequestType::Shell,
++                    3 => ChannelRequestType::Exec(Exec { command }),
++                    _ => ChannelRequestType::Unknown("x-req"),
++                };
++                let request = ChannelRequest {
++                    recipient_channel: recipient,
++                    r#type,
++                    want_reply,
++                };
++                let result = channels.request(request, &mut write, &grant);
++                if !known {
++                    assert!(result.is_err());
++                }
++                assert!(channels.channels.len() <= MAX_CHANNELS);
++                assert_eq!(channels.processes.available_permits(), MAX_PROCESSES);
++            }
++            2 => {
++                if input.len() < 6 {
++                    break;
++                }
++                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
++                let len = u16::from_be_bytes(input[4..6].try_into().unwrap()) as usize;
++                input = &input[6..];
++                let take = core::cmp::min(len, input.len());
++                let (bytes, rest) = input.split_at(take);
++                input = rest;
++                let known = channels.channels.contains_key(&recipient);
++                let data = ChannelData {
++                    recipient_channel: recipient,
++                    data: std::borrow::Cow::Borrowed(bytes),
++                };
++                let result = channels.data(&data);
++                if !known {
++                    assert!(result.is_err());
++                }
++                for channel in channels.channels.values() {
++                    assert!(channel.receive_window <= INITIAL_WINDOW_SIZE);
++                }
++            }
++            3 => {
++                if input.len() < 8 {
++                    break;
++                }
++                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
++                let bytes_to_add = u32::from_be_bytes(input[4..8].try_into().unwrap());
++                input = &input[8..];
++                let known = channels.channels.contains_key(&recipient);
++                let adjust = ChannelWindowAdjust {
++                    recipient_channel: recipient,
++                    bytes_to_add,
++                };
++                let result = channels.adjust_window(&adjust);
++                if !known {
++                    assert!(result.is_err());
++                }
++            }
++            4 => {
++                if input.len() < 4 {
++                    break;
++                }
++                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
++                input = &input[4..];
++                let known = channels.channels.contains_key(&recipient);
++                let result = channels.eof(&ChannelEof {
++                    recipient_channel: recipient,
++                });
++                if !known {
++                    assert!(result.is_err());
++                }
++            }
++            _ => {
++                if input.len() < 4 {
++                    break;
++                }
++                let recipient = u32::from_be_bytes(input[0..4].try_into().unwrap());
++                input = &input[4..];
++                let known = channels.channels.contains_key(&recipient);
++                let result = channels.close(
++                    &ChannelClose {
++                        recipient_channel: recipient,
++                    },
++                    &mut write,
++                );
++                assert!(result.is_ok());
++                if known {
++                    assert!(!channels.channels.contains_key(&recipient));
++                }
++                assert!(channels.channels.len() <= MAX_CHANNELS);
++            }
++        }
++    }
++}
++
++struct FuzzFixture {
++    policy: GitPolicy,
++}
++
++static FUZZ_FIXTURE: std::sync::OnceLock<FuzzFixture> = std::sync::OnceLock::new();
++
++fn fuzz_fixture() -> &'static FuzzFixture {
++    use std::os::unix::fs::PermissionsExt as _;
++    FUZZ_FIXTURE.get_or_init(|| {
++        let base = std::env::temp_dir().join(format!("oxish-fuzz-channels-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&base);
++        std::fs::create_dir_all(&base).unwrap();
++        let base = std::fs::canonicalize(&base).unwrap();
++        let (root, bin) = (base.join("repos"), base.join("bin"));
++        std::fs::create_dir_all(&root).unwrap();
++        std::fs::create_dir_all(&bin).unwrap();
++        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
++        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
++        std::fs::write(bin.join("git"), "#!/bin/sh\n").unwrap();
++        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
++        std::os::unix::fs::symlink("git", bin.join("git-upload-pack")).unwrap();
++        std::os::unix::fs::symlink("git", bin.join("git-receive-pack")).unwrap();
++        let policy = GitPolicy::new(&root, &bin).unwrap();
++        FuzzFixture { policy }
++    })
++}
 +
 +#[cfg(test)]
 +mod tests {
@@ -3026,10 +3230,10 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..cdd00d5e7a4874ea2776b93df13481b0
 +    }
 +}
 diff --git a/oxish/src/session/mod.rs b/oxish/src/session/mod.rs
-index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc8f405be5 100644
+index 22f5fe06e48722edacf5b980413230640f864dd3..d198cb073ab73b412a3bdae078d1cc893b3adb76 100644
 --- a/oxish/src/session/mod.rs
 +++ b/oxish/src/session/mod.rs
-@@ -1,24 +1,22 @@
+@@ -1,24 +1,23 @@
 -use core::str::{self, FromStr};
 +use core::time::Duration;
  
@@ -3057,11 +3261,12 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc
  mod connections;
  pub(crate) use connections::Channels;
 -use connections::{IncomingChannelMessage, TerminalsFuture};
++pub use connections::fuzz_channel_state;
 +use connections::{ChannelsFuture, Grant, IncomingChannelMessage};
  
  /// A single SSH session's state
  ///
-@@ -30,39 +28,41 @@ pub struct Session<T> {
+@@ -30,39 +29,41 @@ pub struct Session<T> {
      pub(crate) channels: Channels,
      pub(crate) post_quantum_kx: bool,
      pub(crate) options: KeyOptions,
@@ -3125,7 +3330,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc
                      let packet = result?;
                      let kx = packet.message_type == MessageType::KeyExchangeInit
                          || self.kx.in_progress();
-@@ -85,7 +85,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+@@ -85,7 +86,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                                  self.post_quantum_kx = post_quantum_kx;
                                  debug!("completed client-initiated rekey");
                              }
@@ -3134,7 +3339,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc
                              continue;
                          }
                          MessageType::GlobalRequest => {
-@@ -93,7 +93,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+@@ -93,7 +94,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                              debug!(name = %String::from_utf8_lossy(request.name), "refusing unsupported global request");
                              if request.want_reply {
                                  self.conn.write.encode(&MessageType::RequestFailure)?;
@@ -3143,7 +3348,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc
                              }
                              continue;
                          }
-@@ -109,148 +109,34 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+@@ -109,148 +110,34 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                      match channel_message {
                          IncomingChannelMessage::Open(open) => self.channels.open(open, &mut self.conn.write),
                          IncomingChannelMessage::Request(request) => {

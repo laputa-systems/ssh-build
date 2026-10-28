@@ -97,9 +97,11 @@ maintainers.
 - Hooks and Git config in repositories are trusted code. A push cannot change them, but anyone
   who can write the repository directory on disk can run code as the server user.
 - Fuzzing covers packet decoding (6.4 M executions in 4 minutes), the chacha construction, the
-  authorized_keys line parser (12 M in 2 minutes), and the Git command policy (5.8 M in 2
-  minutes, asserting the program and repository stay inside the trusted directories). The channel
-  state machine is covered by tests, not fuzzing.
+  authorized_keys line parser (12 M in 2 minutes), the Git command policy (5.8 M in 2
+  minutes, asserting the program and repository stay inside the trusted directories), and the
+  channel open/request/data/window/eof/close state machine (asserting the channel cap, exact
+  packet-size honoring, unknown-ID rejection, close removal, and no permit leak).
+  `.github/workflows/fuzz.yml` runs all six targets on pull requests, pushes, and nightly.
 - No sanitizer run: the server crates contain no `unsafe` (`#![forbid(unsafe_code)]`); all
   `unsafe` is in Graviola, which is upstream's to test. An AddressSanitizer build on macOS arm64
   failed to link under the local toolchain.
@@ -107,9 +109,8 @@ maintainers.
 ## Blockers before calling it production-ready
 
 1. External review of the server and of the Graviola patch.
-2. Continuous fuzzing, including the channel state machine, in CI.
-3. A deployment guide for supervision, log handling, and key rotation, tested on a real host.
-4. A first run of `release.yml` on GitHub (the workflow is written and checked locally but has
+2. A deployment guide for supervision, log handling, and key rotation, tested on a real host.
+3. A first run of `release.yml` on GitHub (the workflow is written and checked locally but has
    never run), and signed releases; nothing has been published.
 
 ## Evidence

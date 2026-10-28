@@ -16,6 +16,7 @@ use crate::{Connection, Error, GitPolicy, receive};
 
 mod connections;
 pub(crate) use connections::Channels;
+pub use connections::fuzz_channel_state;
 use connections::{ChannelsFuture, Grant, IncomingChannelMessage};
 
 /// A single SSH session's state
