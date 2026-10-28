@@ -70,9 +70,11 @@ hooks run as the server user); keep `--repo-root` and `--git-dir` writable only 
 Git protocol v2 is supported (`GIT_PROTOCOL=version=2` is the only value accepted); v0 still
 works.
 
-Limits: 32 unauthenticated connections, 32 authenticated sessions (`max-sessions` in `--config`),
-8 channels and 4 commands per connection, 30 s to key exchange, 60 s to authenticate, 5 min idle
-with no running command, 1 MiB of buffered input per channel.
+Limits: 32 unauthenticated connections (4 per source address), 32 authenticated sessions (8 per
+address; `max-sessions` and friends in `--config`), 8 channels and 4 commands per connection,
+15 s to key exchange, 30 s to authenticate, 5 min idle with no running command (1 h when one is
+running), 60 s for a peer that stops reading, TCP keepalive 60/15/4 s, 1 MiB of buffered input per
+channel.
 
 Hardware: Graviola needs x86-64 Broadwell-class cores (AES-NI, PCLMULQDQ, BMI1, ADX, AVX2) or
 aarch64 with NEON, AES, PMULL and SHA2. Both executables check this at startup and exit with a
