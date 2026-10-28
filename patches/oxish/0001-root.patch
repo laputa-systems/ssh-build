@@ -343,7 +343,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  name = "utf8parse"
  version = "0.2.2"
 diff --git a/Cargo.toml b/Cargo.toml
-index 3c82432e458aee44ed5188f96164529a567d2243..0e9895ab0e430f6af0461c86eef71398607bd86e 100644
+index 3c82432e458aee44ed5188f96164529a567d2243..862afeeeefc0d7ff6fe24b2dc9fd18121f74496c 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -1,5 +1,5 @@
@@ -361,3 +361,18 @@ index 3c82432e458aee44ed5188f96164529a567d2243..0e9895ab0e430f6af0461c86eef71398
  bitflags = "2"
  clap = { version = "4.5.24", features = ["derive"] }
  data-encoding = "2.10"
+@@ -47,7 +46,10 @@ undocumented_unsafe_blocks = "warn"
+ upper_case_acronyms = "warn"
+ use_self = "warn"
+ 
+-# The profile that 'dist' will build with
+-[profile.dist]
+-inherits = "release"
+-lto = "thin"
++[profile.release]
++opt-level = 3
++lto = "fat"
++codegen-units = 1
++panic = "abort"
++strip = "symbols"
++debug = false
