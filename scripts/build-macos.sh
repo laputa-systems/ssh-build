@@ -20,7 +20,7 @@ if [ ! -f "$build_dir/config.status" ]; then
         --with-mantype=doc --disable-strip)
 fi
 rm -f "$build_dir/sftp.o" "$build_dir/scp.o"
-make -C "$build_dir" -j"$(sysctl -n hw.ncpu)" SSH_PROGRAM=ssh ssh ssh-keygen ssh-agent ssh-add sftp scp ssh-keyscan
+make -C "$build_dir" -j"$(sysctl -n hw.ncpu)" SSH_PROGRAM=ssh ssh ssh-keygen ssh-agent ssh-add sftp scp
 
 for b in ssh ssh-keygen ssh-agent ssh-add sftp scp; do
     test -x "$build_dir/$b"
