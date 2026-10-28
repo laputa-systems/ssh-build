@@ -10,13 +10,13 @@ OPENSSH_TARBALL=openssh-${OPENSSH_VERSION}.tar.gz
 OXISH_REV=d81b20b7ea494b6aa4cadea179699adbae9bb374
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$script_dir/sha256.sh"
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 work_dir=${SOURCES_DIR:-$root_dir/.work/sources}
 mkdir -p "$work_dir"
 
 fail() { echo "fetch-sources: $*" >&2; exit 1; }
 
-command -v shasum >/dev/null 2>&1 || fail "shasum not found"
 command -v curl >/dev/null 2>&1 || fail "curl not found"
 
 archive=$work_dir/$OPENSSH_TARBALL
@@ -37,7 +37,7 @@ else
     echo "reusing $archive"
 fi
 
-actual=$(shasum -a 256 "$archive" | awk '{ print $1 }')
+actual=$(sha256 "$archive" | awk '{ print $1 }')
 [ "$actual" = "$OPENSSH_SHA256" ] || \
     fail "SHA-256 mismatch for $OPENSSH_TARBALL: got $actual want $OPENSSH_SHA256"
 echo "verified $OPENSSH_TARBALL $actual"

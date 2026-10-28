@@ -9,11 +9,12 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$script_dir/sha256.sh"
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 budgets=$repo_root/release-budgets.json
 out_dir=${1:-$repo_root/dist/release}
 
-for tool in zip shasum jaq file; do
+for tool in zip jaq file; do
     command -v "$tool" >/dev/null || { echo "package-oxish: $tool is required" >&2; exit 1; }
 done
 fail() { echo "package-oxish: $*" >&2; exit 1; }
@@ -25,7 +26,7 @@ sh "$script_dir/check-crypto-graph.sh" >/dev/null
 oxish_rev=$(sed -n 's/^OXISH_REV=//p' "$script_dir/fetch-sources.sh")
 graviola_version=$(jaq -r '.graviola.version' "$repo_root/sources.lock.json")
 graviola_sha256=$(jaq -r '.graviola.checksum' "$repo_root/sources.lock.json")
-patch_sha256=$(cat "$repo_root"/patches/oxish/*.patch "$repo_root"/patches/graviola/*.patch | shasum -a 256 | awk '{ print $1 }')
+patch_sha256=$(cat "$repo_root"/patches/oxish/*.patch "$repo_root"/patches/graviola/*.patch | sha256 | awk '{ print $1 }')
 build_commit=$(git -C "$repo_root" rev-parse HEAD)
 build_dirty=false
 if git -C "$repo_root" status --short | grep -q .; then build_dirty=true; fi
@@ -78,8 +79,8 @@ package_target() {
   (MIT or Apache-2.0).
 EOF
 
-    server_sha256=$(shasum -a 256 "$stage/bin/oxish-server" | awk '{ print $1 }')
-    session_sha256=$(shasum -a 256 "$stage/bin/oxish-session" | awk '{ print $1 }')
+    server_sha256=$(sha256 "$stage/bin/oxish-server" | awk '{ print $1 }')
+    session_sha256=$(sha256 "$stage/bin/oxish-session" | awk '{ print $1 }')
     jaq -n \
         --arg target "$triple" --arg oxish_rev "$oxish_rev" --arg graviola "$graviola_version" \
         --arg graviola_sha256 "$graviola_sha256" --arg patch_sha256 "$patch_sha256" \

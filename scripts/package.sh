@@ -15,7 +15,7 @@ budgets=$repo_root/release-budgets.json
 dockerfile=$repo_root/Dockerfile
 out_dir=${1:-$repo_root/dist/release}
 
-for tool in zip shasum jaq file; do
+for tool in zip jaq file; do
     command -v "$tool" >/dev/null || { echo "package: $tool is required" >&2; exit 1; }
 done
 

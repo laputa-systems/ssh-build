@@ -6,6 +6,7 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$script_dir/sha256.sh"
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 work_dir=$root_dir/.work
 patch_dir=$root_dir/patches/graviola
@@ -24,7 +25,7 @@ fetch() {
         curl -fsSL -o "$crate.tmp" "https://static.crates.io/crates/graviola/graviola-$version.crate"
         mv "$crate.tmp" "$crate"
     fi
-    got=$(shasum -a 256 "$crate" | awk '{ print $1 }')
+    got=$(sha256 "$crate" | awk '{ print $1 }')
     [ "$got" = "$checksum" ] || fail "graviola-$version.crate sha256 $got does not match the pin $checksum"
 }
 

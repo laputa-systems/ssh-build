@@ -5,6 +5,7 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$script_dir/sha256.sh"
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 lock=$root_dir/git-build.lock.json
 
@@ -12,7 +13,6 @@ fail() { echo "fetch-git-build: $*" >&2; exit 1; }
 
 command -v gh >/dev/null || fail "gh not found"
 command -v jaq >/dev/null || fail "jaq not found"
-command -v shasum >/dev/null || fail "shasum not found"
 
 triple=${1:-}
 if [ -z "$triple" ]; then
@@ -36,7 +36,7 @@ if [ ! -x "$dest/git" ]; then
     rm -rf "$stage" "$dest"
     mkdir -p "$stage"
     gh release download "$tag" -R "$repo" -p "$asset" -p SHA256SUMS -D "$stage" >/dev/null
-    got=$(shasum -a 256 "$stage/$asset" | awk '{ print $1 }')
+    got=$(sha256 "$stage/$asset" | awk '{ print $1 }')
     [ "$got" = "$want" ] || fail "$asset sha256 $got does not match the pin $want"
     listed=$(awk -v a="$asset" '$2 == a { print $1 }' "$stage/SHA256SUMS")
     [ "$listed" = "$want" ] || fail "release SHA256SUMS lists $listed for $asset, pin is $want"
