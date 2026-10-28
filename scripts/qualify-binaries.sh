@@ -25,6 +25,12 @@ for b in $bins; do
     f=$dir/$b
     test -x "$f" || { echo "FAIL: $f missing or not executable" >&2; fails=$((fails + 1)); continue; }
 
+    case $b in
+        sftp|scp)
+            ! LC_ALL=C grep -aqE '/bin/ssh($|[^-a-z])' "$f"; chk $? "$b: finds ssh through PATH, no absolute path"
+            ;;
+    esac
+
     # No libcrypto/libssl linkage or symbols in any artifact.
     if [ "$flavour" = "macos" ]; then
         non_sys=$(otool -L "$f" | sed '1d' | awk '$1 !~ /^\/(usr\/lib|System\/Library)\// { print $1 }')

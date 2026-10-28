@@ -19,7 +19,8 @@ if [ ! -f "$build_dir/config.status" ]; then
     (cd "$build_dir" && "$src_dir/configure" --without-openssl \
         --with-mantype=doc --disable-strip)
 fi
-make -C "$build_dir" -j"$(sysctl -n hw.ncpu)" ssh ssh-keygen ssh-agent ssh-add sftp scp ssh-keyscan
+rm -f "$build_dir/sftp.o" "$build_dir/scp.o"
+make -C "$build_dir" -j"$(sysctl -n hw.ncpu)" SSH_PROGRAM=ssh ssh ssh-keygen ssh-agent ssh-add sftp scp ssh-keyscan
 
 for b in ssh ssh-keygen ssh-agent ssh-add sftp scp; do
     test -x "$build_dir/$b"

@@ -8,9 +8,14 @@ bin_dir=${SSH_BIN_DIR:-dist/macos/bin}
 work=${TEST_WORK:-.work/test-runtime}
 export CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
+case $bin_dir in
+    /*) abs_bin_dir=$bin_dir ;;
+    *) abs_bin_dir=$PWD/$bin_dir ;;
+esac
 rm -rf "$work"
 mkdir -p "$work/home/.ssh"
 export HOME=$work/home
+export PATH=$abs_bin_dir:$PATH
 
 ssh=$bin_dir/ssh
 keygen=$bin_dir/ssh-keygen
@@ -71,9 +76,6 @@ echo "ok: ssh-agent add + list"
 sshd_bin=$(command -v sshd || true)
 [ -z "$sshd_bin" ] && sshd_bin=/usr/sbin/sshd
 test -x "$sshd_bin" || { echo "FAIL: no sshd fixture available" >&2; exit 1; }
-sftp_server=$(command -v sftp-server || true)
-[ -z "$sftp_server" ] && sftp_server=/usr/libexec/sftp-server
-test -x "$sftp_server" || { echo "FAIL: no sftp-server fixture available" >&2; exit 1; }
 
 "$keygen" -q -t ed25519 -N "" -f "$work/ssh_host_ed25519_key"
 cp "$work/id_plain.pub" "$work/authorized_keys"
@@ -89,7 +91,7 @@ PubkeyAuthentication yes
 ChallengeResponseAuthentication no
 UsePAM no
 PidFile $abs_work/sshd.pid
-Subsystem sftp $sftp_server
+Subsystem sftp internal-sftp
 EOF
 "$sshd_bin" -f "$abs_work/sshd_config" -E "$abs_work/sshd.log"
 trap '$add -k >/dev/null 2>&1 || true; kill $SSH_AGENT_PID 2>/dev/null || true; kill $(cat $work/sshd.pid) 2>/dev/null || true' EXIT

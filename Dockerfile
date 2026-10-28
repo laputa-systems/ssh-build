@@ -34,7 +34,7 @@ WORKDIR /src/openssh-${OPENSSH_VERSION}
 
 RUN set -eux; \
     ./configure --without-openssl --with-ldflags="-static" --disable-strip; \
-    make -j"$(getconf _NPROCESSORS_ONLN)" ssh ssh-keygen ssh-agent ssh-add sftp scp; \
+    make -j"$(getconf _NPROCESSORS_ONLN)" SSH_PROGRAM=ssh ssh ssh-keygen ssh-agent ssh-add sftp scp; \
     ./ssh -V 2>&1; \
     strip ssh ssh-keygen ssh-agent ssh-add sftp scp; \
     mkdir /out; \
