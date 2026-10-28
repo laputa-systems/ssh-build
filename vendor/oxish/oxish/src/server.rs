@@ -29,6 +29,7 @@ pub struct Server {
     pub(crate) account: Account,
     pub(crate) policy: GitPolicy,
     pub(crate) authenticating: Semaphore,
+    sessions: Semaphore,
     config: Config,
 }
 
@@ -54,13 +55,15 @@ impl Server {
             session,
             account,
             policy,
-            authenticating: Semaphore::new(32),
+            authenticating: Semaphore::new(MAX_UNAUTHENTICATED),
+            sessions: Semaphore::new(Config::default().max_sessions),
             config: Config::default(),
         })
     }
 
     /// Set additional server configuration
     pub fn with_config(mut self, config: Config) -> Self {
+        self.sessions = Semaphore::new(config.max_sessions);
         self.config = config;
         self
     }
@@ -88,6 +91,9 @@ impl Server {
                 debug!(%addr, "accepted connection");
                 if let Err(err) = stream.set_nodelay(true) {
                     warn!(%addr, %err, "failed to set TCP_NODELAY on connection");
+                }
+                if let Err(err) = rustix::net::sockopt::set_socket_keepalive(&stream, true) {
+                    warn!(%addr, %err, "failed to enable TCP keepalive on connection");
                 }
 
                 let _ = server.accept(stream, addr).await;
@@ -131,6 +137,14 @@ impl Server {
         .await
         .context("authentication failed")?;
         drop(authenticating);
+
+        let _session = match self.sessions.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                warn!(%addr, "too many concurrent sessions; closing connection");
+                return Err(anyhow::anyhow!("too many concurrent sessions"));
+            }
+        };
 
         #[cfg(debug_assertions)]
         if !self.config.spawn {
@@ -203,6 +217,8 @@ pub struct Config {
     /// Whether to spawn a child process for each authenticated session
     #[cfg(debug_assertions)]
     pub spawn: bool,
+    /// Authenticated connections served at once; further ones are closed after authenticating
+    pub max_sessions: usize,
 }
 
 impl Default for Config {
@@ -210,6 +226,10 @@ impl Default for Config {
         Self {
             #[cfg(debug_assertions)]
             spawn: true,
+            max_sessions: 32,
         }
     }
 }
+
+/// Connections allowed to be in key exchange or authentication at once
+const MAX_UNAUTHENTICATED: usize = 32;

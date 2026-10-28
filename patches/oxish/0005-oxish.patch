@@ -1262,7 +1262,7 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..a12c6d127294c9954f7767d53d6510da
  use unix as platform;
  
 diff --git a/oxish/src/server.rs b/oxish/src/server.rs
-index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b56482787709 100644
+index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfddd666bb6 100644
 --- a/oxish/src/server.rs
 +++ b/oxish/src/server.rs
 @@ -16,8 +16,8 @@ use tracing::{debug, instrument, warn};
@@ -1276,7 +1276,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b564
      platform::spawn,
  };
  
-@@ -26,24 +26,34 @@ pub struct Server {
+@@ -26,31 +26,44 @@ pub struct Server {
      pub(crate) provider: &'static dyn CryptoProvider,
      pub(crate) host_keys: HostKeys,
      pub(crate) session: PathBuf,
@@ -1284,6 +1284,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b564
 +    pub(crate) account: Account,
 +    pub(crate) policy: GitPolicy,
      pub(crate) authenticating: Semaphore,
++    sessions: Semaphore,
      config: Config,
  }
  
@@ -1309,12 +1310,32 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b564
              host_keys,
              session,
 -            store,
+-            authenticating: Semaphore::new(32),
 +            account,
 +            policy,
-             authenticating: Semaphore::new(32),
++            authenticating: Semaphore::new(MAX_UNAUTHENTICATED),
++            sessions: Semaphore::new(Config::default().max_sessions),
              config: Config::default(),
          })
-@@ -112,11 +122,10 @@ impl Server {
+     }
+ 
+     /// Set additional server configuration
+     pub fn with_config(mut self, config: Config) -> Self {
++        self.sessions = Semaphore::new(config.max_sessions);
+         self.config = config;
+         self
+     }
+@@ -79,6 +92,9 @@ impl Server {
+                 if let Err(err) = stream.set_nodelay(true) {
+                     warn!(%addr, %err, "failed to set TCP_NODELAY on connection");
+                 }
++                if let Err(err) = rustix::net::sockopt::set_socket_keepalive(&stream, true) {
++                    warn!(%addr, %err, "failed to enable TCP keepalive on connection");
++                }
+ 
+                 let _ = server.accept(stream, addr).await;
+             });
+@@ -112,20 +128,27 @@ impl Server {
              Err(_) => return Err(anyhow::anyhow!("key exchange timed out")),
          };
  
@@ -1328,8 +1349,17 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b564
              self.provider,
          )
          .await
-@@ -125,7 +134,7 @@ impl Server {
+         .context("authentication failed")?;
+         drop(authenticating);
  
++        let _session = match self.sessions.try_acquire() {
++            Ok(permit) => permit,
++            Err(_) => {
++                warn!(%addr, "too many concurrent sessions; closing connection");
++                return Err(anyhow::anyhow!("too many concurrent sessions"));
++            }
++        };
++
          #[cfg(debug_assertions)]
          if !self.config.spawn {
 -            let session = Session::new(kx, conn, self.provider, options)?;
@@ -1337,7 +1367,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b564
              return session.run().await.context("session failed");
          }
  
-@@ -169,7 +178,7 @@ impl Server {
+@@ -169,7 +192,7 @@ impl Server {
              options,
          };
  
@@ -1346,24 +1376,27 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b564
              .await
              .context("failed to spawn session process")?;
  
-@@ -194,8 +203,6 @@ pub struct Config {
+@@ -194,8 +217,8 @@ pub struct Config {
      /// Whether to spawn a child process for each authenticated session
      #[cfg(debug_assertions)]
      pub spawn: bool,
 -    /// Policy for authenticating as the root user
 -    pub root_policy: RootPolicy,
++    /// Authenticated connections served at once; further ones are closed after authenticating
++    pub max_sessions: usize,
  }
  
  impl Default for Config {
-@@ -203,18 +210,6 @@ impl Default for Config {
+@@ -203,18 +226,10 @@ impl Default for Config {
          Self {
              #[cfg(debug_assertions)]
              spawn: true,
 -            root_policy: RootPolicy::default(),
++            max_sessions: 32,
          }
      }
  }
--
+ 
 -/// Policy for authenticating as the root user
 -#[non_exhaustive]
 -#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -1374,6 +1407,8 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b564
 -    #[default]
 -    Deny,
 -}
++/// Connections allowed to be in key exchange or authentication at once
++const MAX_UNAUTHENTICATED: usize = 32;
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
 index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..7c58bfb17dde5ea650e142bcb096d219db5f699e 100644
 --- a/oxish/src/session/connections.rs
@@ -2610,7 +2645,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6
 +/// How long a connection with no running command may stay silent
 +const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ada8b0bdf001b8137205bf2bde3796fd417b2698 100644
+index 151147cfbfaf967cbbea73dbd209ff50a17105cd..608b6144ce71cfb22eb48c24d4ebb24ffbdd7869 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
 @@ -1,20 +1,17 @@
@@ -2986,7 +3021,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ada8b0bdf001b8137205bf2bde3796fd
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -134,323 +382,525 @@ async fn handshake_ed25519_graviola() {
+@@ -134,323 +382,549 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -3361,6 +3396,30 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ada8b0bdf001b8137205bf2bde3796fd
 +        tokio::time::sleep(Duration::from_millis(100)).await;
 +    }
 +    panic!("the command was killed without a chance to clean up");
++}
++
++#[tokio::test]
++async fn sessions_beyond_the_limit_are_refused() {
++    let world = script_world("PATH=/usr/bin:/bin; sleep 4; echo FIRST").await;
++    world.bare_repo("a.git").await.unwrap();
++    let config = crate::Config {
++        max_sessions: 1,
++        ..crate::Config::default()
++    };
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++
++    let addr = client.addr;
++    let key = client.key.clone();
++    let first = tokio::spawn(async move { client.run(Some(SERVICE), b"").await });
++    tokio::time::sleep(Duration::from_secs(1)).await;
++    let second = CliClient::new(addr, &key).run(Some(SERVICE), b"").await.unwrap();
++    assert!(!second.status.success(), "a second session was served: {}", second.stdout());
++    let first = first.await.unwrap().unwrap();
++    assert!(first.status.success(), "{}", first.stderr);
++    assert_eq!(first.stdout(), "FIRST\n");
 +}
 +
 +#[tokio::test]
@@ -3791,7 +3850,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ada8b0bdf001b8137205bf2bde3796fd
  #[tokio::test]
  async fn host_keys_from_files_graviola() {
      host_keys_from_files(graviola::DEFAULT_PROVIDER)
-@@ -493,9 +943,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+@@ -493,9 +967,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
  #[tokio::test]
  async fn verify_keys() {
      let providers = [
@@ -3801,7 +3860,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ada8b0bdf001b8137205bf2bde3796fd
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -522,130 +969,6 @@ async fn verify_keys() {
+@@ -522,130 +993,6 @@ async fn verify_keys() {
      }
  }
  
@@ -3932,7 +3991,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ada8b0bdf001b8137205bf2bde3796fd
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  
  /// Build and locate the `oxish-session` binary
-@@ -704,8 +1027,3 @@ fn subscribe() {
+@@ -704,8 +1051,3 @@ fn subscribe() {
      });
  }
  

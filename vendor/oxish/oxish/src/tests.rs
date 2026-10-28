@@ -574,6 +574,30 @@ async fn channel_disconnect_asks_the_command_to_stop_before_killing_it() {
 }
 
 #[tokio::test]
+async fn sessions_beyond_the_limit_are_refused() {
+    let world = script_world("PATH=/usr/bin:/bin; sleep 4; echo FIRST").await;
+    world.bare_repo("a.git").await.unwrap();
+    let config = crate::Config {
+        max_sessions: 1,
+        ..crate::Config::default()
+    };
+    let (client, _guard) = world
+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
+        .await
+        .unwrap();
+
+    let addr = client.addr;
+    let key = client.key.clone();
+    let first = tokio::spawn(async move { client.run(Some(SERVICE), b"").await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let second = CliClient::new(addr, &key).run(Some(SERVICE), b"").await.unwrap();
+    assert!(!second.status.success(), "a second session was served: {}", second.stdout());
+    let first = first.await.unwrap().unwrap();
+    assert!(first.status.success(), "{}", first.stderr);
+    assert_eq!(first.stdout(), "FIRST\n");
+}
+
+#[tokio::test]
 async fn exec_rejects_non_git_commands() {
     let world = script_world("echo SHOULD-NOT-RUN").await;
     world.bare_repo("a.git").await.unwrap();
