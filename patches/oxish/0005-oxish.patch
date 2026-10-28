@@ -1375,7 +1375,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..efc7d3ce26fc3d6391e97fac5767b564
 -    Deny,
 -}
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..a4b24d4eda78cdbefae8be95947ffff2b69a9165 100644
+index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..7c58bfb17dde5ea650e142bcb096d219db5f699e 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
 @@ -1,38 +1,54 @@
@@ -1748,7 +1748,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..a4b24d4eda78cdbefae8be95947ffff2
          if !channel.close_sent {
              channel.close_sent = true;
              write.encode(&ChannelClose {
-@@ -250,272 +253,333 @@ impl Channels {
+@@ -250,272 +253,351 @@ impl Channels {
              })?;
          }
  
@@ -1816,6 +1816,24 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..a4b24d4eda78cdbefae8be95947ffff2
 +        match wrote {
 +            true => Poll::Ready(Ok(())),
 +            false => Poll::Pending,
++        }
++    }
++
++    /// Stop every running command: ask politely, then kill whatever is left after the grace period
++    pub(crate) async fn shutdown(&mut self) {
++        let deadline = Instant::now() + SHUTDOWN_GRACE;
++        let mut processes = Vec::new();
++        for channel in self.channels.values_mut() {
++            if let Run::Active(active) = &mut channel.run {
++                if let Some(mut process) = active.process.take() {
++                    process.request_stop();
++                    processes.push(process);
++                }
++            }
++        }
++
++        for process in &mut processes {
++            process.finish_stopping(deadline).await;
 +        }
 +    }
 +
@@ -2331,7 +2349,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..a4b24d4eda78cdbefae8be95947ffff2
      }
  }
  
-@@ -567,7 +631,15 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
+@@ -567,7 +649,17 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
      }
  }
  
@@ -2348,10 +2366,12 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..a4b24d4eda78cdbefae8be95947ffff2
 +const MAX_CHANNELS: usize = 8;
 +/// Git commands one connection may run at once
 +const MAX_PROCESSES: usize = 4;
++/// How long commands get to exit after a stop request when the connection ends
++const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 +/// How long output pipes may stay open after Git itself exited
 +const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
 diff --git a/oxish/src/session/mod.rs b/oxish/src/session/mod.rs
-index 22f5fe06e48722edacf5b980413230640f864dd3..aef6554738e841e6ccd0cbb3ed62b3459adcd524 100644
+index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6f08956c0 100644
 --- a/oxish/src/session/mod.rs
 +++ b/oxish/src/session/mod.rs
 @@ -1,24 +1,26 @@
@@ -2410,10 +2430,16 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..aef6554738e841e6ccd0cbb3ed62b345
          })
      }
  
-@@ -60,9 +65,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+@@ -60,9 +65,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
      /// This function never returns unless the connection is closed or an error occurs.
      #[instrument(name = "connection", skip(self), fields(addr = %self.conn.addr))]
      pub async fn run(mut self) -> Result<(), Error> {
++        let result = self.serve().await;
++        self.channels.shutdown().await;
++        result
++    }
++
++    async fn serve(&mut self) -> Result<(), Error> {
 +        let idle = sleep(IDLE_TIMEOUT);
 +        tokio::pin!(idle);
          loop {
@@ -2423,7 +2449,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..aef6554738e841e6ccd0cbb3ed62b345
                      let packet = result?;
                      let kx = packet.message_type == MessageType::KeyExchangeInit
                          || self.kx.in_progress();
-@@ -109,17 +117,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+@@ -109,17 +123,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                      match channel_message {
                          IncomingChannelMessage::Open(open) => self.channels.open(open, &mut self.conn.write),
                          IncomingChannelMessage::Request(request) => {
@@ -2444,7 +2470,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..aef6554738e841e6ccd0cbb3ed62b345
                          IncomingChannelMessage::WindowAdjust(adjust) => self.channels.adjust_window(&adjust).map_err(Into::into),
                          IncomingChannelMessage::Eof(eof) => self.channels.eof(&eof).map_err(Into::into),
                          IncomingChannelMessage::Close(close) => self.channels.close(&close, &mut self.conn.write),
-@@ -127,130 +128,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+@@ -127,130 +134,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
  
                      self.conn.flush().await?;
                  }
@@ -2584,7 +2610,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..aef6554738e841e6ccd0cbb3ed62b345
 +/// How long a connection with no running command may stay silent
 +const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2aafb78a8d3ab75f989caffcea0e58173831e5ae 100644
+index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ada8b0bdf001b8137205bf2bde3796fd417b2698 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
 @@ -1,20 +1,17 @@
@@ -2960,7 +2986,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2aafb78a8d3ab75f989caffcea0e5817
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -134,323 +382,486 @@ async fn handshake_ed25519_graviola() {
+@@ -134,323 +382,525 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -3296,6 +3322,45 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2aafb78a8d3ab75f989caffcea0e5817
 +    let pid = pid.expect("the command never started");
 +    child.kill().await.unwrap();
 +    assert!(pid_is_gone(pid).await, "command {pid} outlived its connection");
++}
++
++#[tokio::test]
++async fn channel_disconnect_asks_the_command_to_stop_before_killing_it() {
++    let world = script_world(
++        "PATH=/usr/bin:/bin; d=\"$(dirname \"$0\")/..\"; trap 'echo term > \"$d/term\"; exit 0' TERM; echo ready > \"$d/ready\"; sleep 120 & wait",
++    )
++    .await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let mut cmd = client.cmd;
++    cmd.args(["-o", "LogLevel=ERROR"]);
++    cmd.arg(format!("{USER}@{}", client.addr.ip())).arg("git-receive-pack 'a.git'");
++    let mut child = cmd
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .kill_on_drop(true)
++        .spawn()
++        .unwrap();
++
++    for _ in 0..100 {
++        if world.base().join("ready").exists() {
++            break;
++        }
++        tokio::time::sleep(Duration::from_millis(100)).await;
++    }
++    assert!(world.base().join("ready").exists(), "the command never started");
++    child.kill().await.unwrap();
++    for _ in 0..50 {
++        if world.base().join("term").exists() {
++            return;
++        }
++        tokio::time::sleep(Duration::from_millis(100)).await;
++    }
++    panic!("the command was killed without a chance to clean up");
 +}
 +
 +#[tokio::test]
@@ -3726,7 +3791,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2aafb78a8d3ab75f989caffcea0e5817
  #[tokio::test]
  async fn host_keys_from_files_graviola() {
      host_keys_from_files(graviola::DEFAULT_PROVIDER)
-@@ -493,9 +904,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+@@ -493,9 +943,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
  #[tokio::test]
  async fn verify_keys() {
      let providers = [
@@ -3736,7 +3801,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2aafb78a8d3ab75f989caffcea0e5817
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -522,130 +930,6 @@ async fn verify_keys() {
+@@ -522,130 +969,6 @@ async fn verify_keys() {
      }
  }
  
@@ -3867,7 +3932,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2aafb78a8d3ab75f989caffcea0e5817
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  
  /// Build and locate the `oxish-session` binary
-@@ -704,8 +988,3 @@ fn subscribe() {
+@@ -704,8 +1027,3 @@ fn subscribe() {
      });
  }
  
@@ -3878,10 +3943,10 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2aafb78a8d3ab75f989caffcea0e5817
 -const KX_WARNING_MARKER: &str = "post-quantum secure";
 diff --git a/oxish/src/unix/exec.rs b/oxish/src/unix/exec.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..603e45c72232a555e59e5466e7a89d2d76de24fa
+index 0000000000000000000000000000000000000000..cee354dfcc200e9cf9350d4f6edf44ca7089abe6
 --- /dev/null
 +++ b/oxish/src/unix/exec.rs
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,285 @@
 +use core::{
 +    pin::Pin,
 +    task::{Context, Poll},
@@ -3897,7 +3962,7 @@ index 0000000000000000000000000000000000000000..603e45c72232a555e59e5466e7a89d2d
 +    io::{AsyncRead, AsyncWrite, ReadBuf},
 +    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 +};
-+use tracing::{debug, warn};
++use tracing::debug;
 +
 +use crate::GitCommand;
 +
@@ -3908,7 +3973,7 @@ index 0000000000000000000000000000000000000000..603e45c72232a555e59e5466e7a89d2d
 +/// are read only when the caller has window to send. The child runs in its own process group so
 +/// that it and anything it spawned can be killed together.
 +pub(crate) struct GitProcess {
-+    child: Child,
++    child: Option<Child>,
 +    group: Option<Pid>,
 +    stdin: Option<ChildStdin>,
 +    queue: VecDeque<u8>,
@@ -3952,7 +4017,7 @@ index 0000000000000000000000000000000000000000..603e45c72232a555e59e5466e7a89d2d
 +            stdin: Some(child.stdin.take().ok_or_else(|| missing("stdin"))?),
 +            stdout: Some(child.stdout.take().ok_or_else(|| missing("stdout"))?),
 +            stderr: Some(child.stderr.take().ok_or_else(|| missing("stderr"))?),
-+            child,
++            child: Some(child),
 +            group,
 +            queue: VecDeque::new(),
 +            stdin_closing: false,
@@ -4082,7 +4147,11 @@ index 0000000000000000000000000000000000000000..603e45c72232a555e59e5466e7a89d2d
 +            return Poll::Ready(Ok(status));
 +        }
 +
-+        let mut wait = core::pin::pin!(self.child.wait());
++        let Some(child) = self.child.as_mut() else {
++            return Poll::Ready(Err(io::Error::other("git process already released")));
++        };
++
++        let mut wait = core::pin::pin!(child.wait());
 +        match wait.as_mut().poll(cx) {
 +            Poll::Ready(Ok(status)) => {
 +                self.status = Some(status);
@@ -4093,27 +4162,74 @@ index 0000000000000000000000000000000000000000..603e45c72232a555e59e5466e7a89d2d
 +        }
 +    }
 +
-+    /// Kill the child and everything in its process group
-+    pub(crate) fn kill(&mut self) {
++    /// Send `SIGTERM` to the process group of a child that has not exited
++    pub(crate) fn request_stop(&mut self) {
 +        if self.status.is_some() {
 +            return;
 +        }
 +
 +        if let Some(group) = self.group {
-+            if let Err(error) = kill_process_group(group, Signal::KILL) {
-+                warn!(%error, "error killing git process group");
++            if let Err(error) = kill_process_group(group, Signal::TERM) {
++                debug!(%error, "error terminating git process group");
++            }
++        }
++    }
++
++    /// Wait for the child to exit after [`Self::request_stop`], killing it at the deadline
++    pub(crate) async fn finish_stopping(&mut self, deadline: tokio::time::Instant) {
++        let Some(mut child) = self.child.take() else {
++            return;
++        };
++
++        if tokio::time::timeout_at(deadline, child.wait()).await.is_err() {
++            if let Some(group) = self.group {
++                let _ = kill_process_group(group, Signal::KILL);
++            }
++            let _ = child.kill().await;
++        }
++        self.status = Some(ExitStatus::default());
++    }
++
++    /// Ask the child and its process group to stop, then kill them if they linger
++    ///
++    /// `SIGTERM` first lets Git remove the quarantine directory of an interrupted push; the
++    /// reaper task owns the child, so the `SIGKILL` can never hit a recycled process ID.
++    pub(crate) fn terminate(&mut self) {
++        if self.status.is_some() {
++            return;
++        }
++
++        if let Some(group) = self.group {
++            if let Err(error) = kill_process_group(group, Signal::TERM) {
++                debug!(%error, "error terminating git process group");
 +            }
 +        }
 +
-+        if let Err(error) = self.child.start_kill() {
-+            debug!(%error, "error killing git process");
-+        }
++        let Some(mut child) = self.child.take() else {
++            return;
++        };
++        let group = self.group;
++        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
++            let _ = child.start_kill();
++            return;
++        };
++        runtime.spawn(async move {
++            if tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err() {
++                if let Some(group) = group {
++                    let _ = kill_process_group(group, Signal::KILL);
++                }
++                let _ = child.kill().await;
++            }
++        });
 +    }
 +}
 +
++/// How long a terminated command may take to exit before it is killed
++const TERMINATE_GRACE: core::time::Duration = core::time::Duration::from_secs(3);
++
 +impl Drop for GitProcess {
 +    fn drop(&mut self) {
-+        self.kill();
++        self.terminate();
 +    }
 +}
 diff --git a/oxish/src/unix/mod.rs b/oxish/src/unix/mod.rs

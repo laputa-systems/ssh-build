@@ -13,7 +13,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::GitCommand;
 
@@ -24,7 +24,7 @@ use crate::GitCommand;
 /// are read only when the caller has window to send. The child runs in its own process group so
 /// that it and anything it spawned can be killed together.
 pub(crate) struct GitProcess {
-    child: Child,
+    child: Option<Child>,
     group: Option<Pid>,
     stdin: Option<ChildStdin>,
     queue: VecDeque<u8>,
@@ -68,7 +68,7 @@ impl GitProcess {
             stdin: Some(child.stdin.take().ok_or_else(|| missing("stdin"))?),
             stdout: Some(child.stdout.take().ok_or_else(|| missing("stdout"))?),
             stderr: Some(child.stderr.take().ok_or_else(|| missing("stderr"))?),
-            child,
+            child: Some(child),
             group,
             queue: VecDeque::new(),
             stdin_closing: false,
@@ -198,7 +198,11 @@ impl GitProcess {
             return Poll::Ready(Ok(status));
         }
 
-        let mut wait = core::pin::pin!(self.child.wait());
+        let Some(child) = self.child.as_mut() else {
+            return Poll::Ready(Err(io::Error::other("git process already released")));
+        };
+
+        let mut wait = core::pin::pin!(child.wait());
         match wait.as_mut().poll(cx) {
             Poll::Ready(Ok(status)) => {
                 self.status = Some(status);
@@ -209,26 +213,73 @@ impl GitProcess {
         }
     }
 
-    /// Kill the child and everything in its process group
-    pub(crate) fn kill(&mut self) {
+    /// Send `SIGTERM` to the process group of a child that has not exited
+    pub(crate) fn request_stop(&mut self) {
         if self.status.is_some() {
             return;
         }
 
         if let Some(group) = self.group {
-            if let Err(error) = kill_process_group(group, Signal::KILL) {
-                warn!(%error, "error killing git process group");
+            if let Err(error) = kill_process_group(group, Signal::TERM) {
+                debug!(%error, "error terminating git process group");
+            }
+        }
+    }
+
+    /// Wait for the child to exit after [`Self::request_stop`], killing it at the deadline
+    pub(crate) async fn finish_stopping(&mut self, deadline: tokio::time::Instant) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+
+        if tokio::time::timeout_at(deadline, child.wait()).await.is_err() {
+            if let Some(group) = self.group {
+                let _ = kill_process_group(group, Signal::KILL);
+            }
+            let _ = child.kill().await;
+        }
+        self.status = Some(ExitStatus::default());
+    }
+
+    /// Ask the child and its process group to stop, then kill them if they linger
+    ///
+    /// `SIGTERM` first lets Git remove the quarantine directory of an interrupted push; the
+    /// reaper task owns the child, so the `SIGKILL` can never hit a recycled process ID.
+    pub(crate) fn terminate(&mut self) {
+        if self.status.is_some() {
+            return;
+        }
+
+        if let Some(group) = self.group {
+            if let Err(error) = kill_process_group(group, Signal::TERM) {
+                debug!(%error, "error terminating git process group");
             }
         }
 
-        if let Err(error) = self.child.start_kill() {
-            debug!(%error, "error killing git process");
-        }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let group = self.group;
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            let _ = child.start_kill();
+            return;
+        };
+        runtime.spawn(async move {
+            if tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err() {
+                if let Some(group) = group {
+                    let _ = kill_process_group(group, Signal::KILL);
+                }
+                let _ = child.kill().await;
+            }
+        });
     }
 }
 
+/// How long a terminated command may take to exit before it is killed
+const TERMINATE_GRACE: core::time::Duration = core::time::Duration::from_secs(3);
+
 impl Drop for GitProcess {
     fn drop(&mut self) {
-        self.kill();
+        self.terminate();
     }
 }

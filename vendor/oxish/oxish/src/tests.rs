@@ -535,6 +535,45 @@ async fn channel_early_disconnect_kills_the_command() {
 }
 
 #[tokio::test]
+async fn channel_disconnect_asks_the_command_to_stop_before_killing_it() {
+    let world = script_world(
+        "PATH=/usr/bin:/bin; d=\"$(dirname \"$0\")/..\"; trap 'echo term > \"$d/term\"; exit 0' TERM; echo ready > \"$d/ready\"; sleep 120 & wait",
+    )
+    .await;
+    world.bare_repo("a.git").await.unwrap();
+    let (client, _guard) = world
+        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
+        .await
+        .unwrap();
+    let mut cmd = client.cmd;
+    cmd.args(["-o", "LogLevel=ERROR"]);
+    cmd.arg(format!("{USER}@{}", client.addr.ip())).arg("git-receive-pack 'a.git'");
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    for _ in 0..100 {
+        if world.base().join("ready").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(world.base().join("ready").exists(), "the command never started");
+    child.kill().await.unwrap();
+    for _ in 0..50 {
+        if world.base().join("term").exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the command was killed without a chance to clean up");
+}
+
+#[tokio::test]
 async fn exec_rejects_non_git_commands() {
     let world = script_world("echo SHOULD-NOT-RUN").await;
     world.bare_repo("a.git").await.unwrap();

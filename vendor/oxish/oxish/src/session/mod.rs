@@ -65,6 +65,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
     /// This function never returns unless the connection is closed or an error occurs.
     #[instrument(name = "connection", skip(self), fields(addr = %self.conn.addr))]
     pub async fn run(mut self) -> Result<(), Error> {
+        let result = self.serve().await;
+        self.channels.shutdown().await;
+        result
+    }
+
+    async fn serve(&mut self) -> Result<(), Error> {
         let idle = sleep(IDLE_TIMEOUT);
         tokio::pin!(idle);
         loop {

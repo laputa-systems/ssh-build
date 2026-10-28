@@ -1,0 +1,10 @@
+{
+  "repo": "laputa-systems/git-build",
+  "tag": "release-0c10dd48ff70b43cef1e4d7d65f655b25c8dfb22",
+  "git_version": "2.56.0",
+  "assets": {
+    "aarch64-apple-darwin": "e172d605c1477e0acb30ee97f824784ebd2f4d0d57455571201ceb7677b51563",
+    "aarch64-unknown-linux-musl": "8b9815d625c4f84ea2c750ce019f0aa09fd0662b6d665f16959fd9577e96a15d",
+    "x86_64-unknown-linux-musl": "0e2ce49d12d5c451c55b18d4c7a4532d6bb7d504bc75cce897f9ce436aadcdd6"
+  }
+}

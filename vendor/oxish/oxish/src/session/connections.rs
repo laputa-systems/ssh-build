@@ -290,6 +290,24 @@ impl Channels {
         }
     }
 
+    /// Stop every running command: ask politely, then kill whatever is left after the grace period
+    pub(crate) async fn shutdown(&mut self) {
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        let mut processes = Vec::new();
+        for channel in self.channels.values_mut() {
+            if let Run::Active(active) = &mut channel.run {
+                if let Some(mut process) = active.process.take() {
+                    process.request_stop();
+                    processes.push(process);
+                }
+            }
+        }
+
+        for process in &mut processes {
+            process.finish_stopping(deadline).await;
+        }
+    }
+
     fn busy_count(&self) -> usize {
         self.channels
             .values()
@@ -641,5 +659,7 @@ const MAX_PACKETS_PER_POLL: usize = 16;
 const MAX_CHANNELS: usize = 8;
 /// Git commands one connection may run at once
 const MAX_PROCESSES: usize = 4;
+/// How long commands get to exit after a stop request when the connection ends
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// How long output pipes may stay open after Git itself exited
 const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
