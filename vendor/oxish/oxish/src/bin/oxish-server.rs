@@ -1,0 +1,171 @@
+use core::net::{Ipv4Addr, SocketAddr};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::{
+    env,
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::PathBuf,
+    sync::Arc,
+};
+
+use anyhow::Context as _;
+#[cfg(debug_assertions)]
+use clap::ArgAction;
+use clap::Parser;
+#[cfg(target_os = "linux")]
+use listenfd::ListenFd;
+use oxish::{Config, DEFAULT_PROVIDER, DefaultStore, Server};
+use proto::{
+    HostKeys, OpenSshKeyV1, SshPrivateKey,
+    named::{Named, PublicKeyAlgorithm},
+    pem_encode,
+};
+use tokio::net::TcpListener;
+use tracing::info;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let provider = DEFAULT_PROVIDER;
+    let args = Args::parse();
+
+    if let Some(path) = &args.generate_host_key {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path);
+
+        return match file {
+            Ok(mut host_key_file) => {
+                let Ok((signing_key, pkcs8)) = provider.generate_signing_key(&args.host_key_type)
+                else {
+                    anyhow::bail!("failed to generate host key");
+                };
+
+                let single = SshPrivateKey::from_pkcs8(&pkcs8, &*signing_key)?;
+                let openssh = OpenSshKeyV1::new([single]).context("no host key to encode")?;
+                let pem = pem_encode("OPENSSH PRIVATE KEY", &openssh.to_bytes(provider)?);
+                let result = host_key_file.write_all(pem.as_bytes());
+                result?;
+
+                eprintln!("generated host key at {}", path.display());
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(anyhow::anyhow!(
+                "host key file `{}` already exists",
+                path.display()
+            )),
+            Err(err) => Err(err.into()),
+        };
+    }
+
+    let host_keys = match HostKeys::from_files(args.host_key_file.into_iter(), provider) {
+        Ok(host_keys) => host_keys,
+        Err(e) => anyhow::bail!("{e} (try RUST_LOG=warn for more information)"),
+    };
+    info!(len = host_keys.len(), "loaded host keys");
+
+    let session_bin = match args.session_bin {
+        Some(path) => path,
+        None => {
+            let exe = env::current_exe()?;
+            let Some(dir) = exe.parent() else {
+                anyhow::bail!("cannot determine directory of current executable");
+            };
+            dir.join("oxish-session")
+        }
+    };
+
+    if !session_bin.is_file() {
+        anyhow::bail!("session binary `{}` not found", session_bin.display());
+    }
+
+    #[cfg(target_os = "linux")]
+    let listener = match (ListenFd::from_env().take_tcp_listener(0)?, args.port) {
+        (Some(listener), None) => {
+            listener.set_nonblocking(true)?;
+            TcpListener::from_std(listener)?
+        }
+        (None, Some(port)) => {
+            let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+            TcpListener::bind(addr).await?
+        }
+        (Some(_), Some(_)) => anyhow::bail!("LISTEN_FDS and --port conflict with each other"),
+        (None, None) => anyhow::bail!("unless LISTEN_FDS is set, --port is required"),
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let listener = match args.port {
+        Some(port) => {
+            let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+            TcpListener::bind(addr).await?
+        }
+        None => anyhow::bail!("--port is required"),
+    };
+
+    #[cfg_attr(not(debug_assertions), expect(unused_mut))]
+    let mut config = match &args.config {
+        Some(path) => {
+            let s = fs::read_to_string(path)
+                .with_context(|| format!("failed to read config file `{}`", path.display()))?;
+            toml::from_str::<Config>(&s)
+                .with_context(|| format!("failed to parse config file `{}`", path.display()))?
+        }
+        None => Config::default(),
+    };
+    #[cfg(debug_assertions)]
+    {
+        config.spawn = args.spawn;
+    }
+
+    info!(addr = %listener.local_addr()?, "listening for connections");
+    Arc::new(
+        Server::new(
+            DefaultStore::new(provider)?,
+            host_keys,
+            session_bin,
+            provider,
+        )?
+        .with_config(config),
+    )
+    .run(listener)
+    .await
+}
+
+#[derive(Debug, Parser)]
+struct Args {
+    #[clap(short, long)]
+    port: Option<u16>,
+    #[clap(short, long)]
+    config: Option<PathBuf>,
+    #[clap(long, default_values = DEFAULT_HOST_KEY_FILES)]
+    host_key_file: Vec<PathBuf>,
+    #[clap(long)]
+    generate_host_key: Option<PathBuf>,
+    #[clap(long, value_parser = host_key_type, default_value = "ssh-ed25519")]
+    host_key_type: PublicKeyAlgorithm<'static>,
+    /// Path to the `oxish-session` binary (defaults to a sibling of this executable)
+    #[clap(long)]
+    session_bin: Option<PathBuf>,
+    #[cfg(debug_assertions)]
+    #[clap(long, action = ArgAction::Set, default_value_t = true)]
+    spawn: bool,
+}
+
+fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
+    match PublicKeyAlgorithm::typed(name) {
+        PublicKeyAlgorithm::Unknown(_) => Err(format!("unsupported host key type `{name}`")),
+        algorithm => Ok(algorithm.to_owned()),
+    }
+}
+
+const DEFAULT_HOST_KEY_FILES: &[&str] = &[
+    "/etc/ssh/ssh_host_ed25519_key",
+    "/etc/ssh/ssh_host_ecdsa_key",
+];
