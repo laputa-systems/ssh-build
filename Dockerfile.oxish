@@ -39,8 +39,11 @@ RUN rustup-init -y --no-modify-path --profile minimal --default-toolchain none \
 COPY vendor/oxish /src/vendor/oxish
 COPY vendor/graviola /src/vendor/graviola
 
+# Static-PIE needs the system musl start files (rcrt1.o), which Rust's bundled ones are not, so the
+# link uses Alpine's gcc and musl; libgcc_eh provides the _Unwind_* symbols Rust asks libunwind for.
 # An explicit --target keeps these flags off build scripts and proc macros, which must stay dynamic.
-ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=pic -C link-arg=-static-pie"
+RUN mkdir /opt/unwind-shim && ln -s "$(gcc -print-file-name=libgcc_eh.a)" /opt/unwind-shim/libunwind.a
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=pic -C link-self-contained=no -C link-arg=-static-pie -L /opt/unwind-shim"
 RUN triple="$(uname -m)-unknown-linux-musl" \
     && cargo build --locked --release --target "$triple" --manifest-path vendor/oxish/Cargo.toml -p oxish --bins \
     && mkdir /out \

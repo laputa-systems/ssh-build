@@ -7,7 +7,7 @@
 //!
 //! Trust boundary: the repository root and the Git binary directory must be owned by the
 //! server's user and must not be writable by anyone else, and so must every repository
-//! directory below the root. Repositories are trusted (their config and hooks run as the
+//! directory below the root (a repository that fails this is reported as not found). Repositories are trusted (their config and hooks run as the
 //! server's user); a push cannot change them. Repository names are resolved component by
 //! component without following symlinks, then the result is checked against the canonical
 //! root. A writer who can replace a directory between that check and Git opening it is
@@ -186,20 +186,26 @@ impl GitPolicy {
 
     fn resolve(&self, name: &str) -> Result<PathBuf, PolicyError> {
         let mut path = self.repo_root.clone();
-        for component in name.split('/') {
+        let components: Vec<&str> = name.split('/').collect();
+        for (index, component) in components.iter().enumerate() {
             path.push(component);
             let meta = fs::symlink_metadata(&path).map_err(not_found)?;
             if !meta.file_type().is_dir() {
                 return Err(PolicyError::NotFound);
             }
-        }
-
-        for (entry, want_dir) in [("HEAD", false), ("objects", true), ("refs", true)] {
-            let meta = fs::symlink_metadata(path.join(entry)).map_err(not_found)?;
-            let kind = meta.file_type();
-            if kind.is_symlink() || kind.is_dir() != want_dir {
+            // A directory inside a repository is not a repository: refs named like
+            // `x/HEAD`, `x/objects/y`, `x/refs/z` would otherwise fake one.
+            if index + 1 < components.len() && looks_like_repository(&path) {
                 return Err(PolicyError::NotFound);
             }
+        }
+
+        if !looks_like_repository(&path) {
+            return Err(PolicyError::NotFound);
+        }
+        let meta = fs::symlink_metadata(&path).map_err(not_found)?;
+        if meta.uid() != rustix::process::geteuid().as_raw() || meta.permissions().mode() & 0o022 != 0 {
+            return Err(PolicyError::NotFound);
         }
 
         let canonical = fs::canonicalize(&path).map_err(not_found)?;
@@ -299,6 +305,18 @@ fn normalize_name(argument: &str) -> Result<String, PolicyError> {
         true => Ok(name.to_owned()),
         false => Err(PolicyError::Name),
     }
+}
+
+/// A bare repository has a `HEAD` file and `objects` and `refs` directories, none of them symlinks
+fn looks_like_repository(path: &Path) -> bool {
+    [("HEAD", false), ("objects", true), ("refs", true)]
+        .iter()
+        .all(|(entry, want_dir)| {
+            fs::symlink_metadata(path.join(entry)).is_ok_and(|meta| {
+                let kind = meta.file_type();
+                !kind.is_symlink() && kind.is_dir() == *want_dir
+            })
+        })
 }
 
 fn trusted_dir(path: &Path, what: &str) -> Result<PathBuf, PolicyError> {
@@ -502,6 +520,29 @@ mod tests {
         ] {
             assert_eq!(authorize(&f, command, GitAccess::Read), Err(PolicyError::NotFound), "{command:?}");
         }
+    }
+
+    #[test]
+    fn directories_inside_a_repository_are_not_repositories() {
+        let f = fixture();
+        let fake = f.root.join("a.git").join("refs").join("heads").join("x");
+        bare_repo(&fake);
+        let nested = f.root.join("a.git").join("refs").join("heads");
+        assert!(nested.is_dir());
+        for command in [
+            "git-upload-pack 'a.git/refs/heads/x'",
+            "git-upload-pack 'team/b.git/refs'",
+        ] {
+            assert_eq!(authorize(&f, command, GitAccess::Read), Err(PolicyError::NotFound), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn repositories_writable_by_others_are_refused() {
+        let f = fixture();
+        bare_repo(&f.root.join("loose.git"));
+        fs::set_permissions(f.root.join("loose.git"), fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(authorize(&f, "git-upload-pack 'loose.git'", GitAccess::Read), Err(PolicyError::NotFound));
     }
 
     #[test]

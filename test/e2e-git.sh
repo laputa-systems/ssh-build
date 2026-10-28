@@ -106,11 +106,16 @@ g() {
         GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$(ssh_opts "$key")" ${TRACE:+GIT_TRACE_PACKET="$TRACE"} \
         "$git_dir/git" "$@"
 }
+# Local repository setup with the product git and a PATH that resolves its helpers first.
+lg() {
+    env -i HOME="$work/home" PATH="$git_dir:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        "$git_dir/git" "$@"
+}
 url() { echo "ssh://git@127.0.0.1:$port/$1"; }
 
 # --- Seed: product git creates a bare repository, a push over SSH fills it.
-"$git_dir/git" init -q --bare -b main "$work/repos/a.git"
-"$git_dir/git" init -q --bare -b main "$work/repos/big.git"
+lg init -q --bare -b main "$work/repos/a.git"
+lg init -q --bare -b main "$work/repos/big.git"
 seed=$work/seed
 mkdir "$seed"
 g rw -C "$seed" init -q -b main
@@ -169,8 +174,8 @@ rssh ro "git-upload-pack 'missing.git'" < /dev/null > "$work/last.out" 2> "$work
 [ "$git_status" -eq 1 ] || fail "missing repository exit status was $git_status, wanted 1"
 grep -q 'not found' "$work/last.err" || fail "missing repository did not say so"
 ok "missing repository: stderr diagnostic and exit status 1"
-"$git_dir/git" clone -q "$work/repos/a.git" "$work/clients/diverge"
-(cd "$work/clients/diverge" && "$git_dir/git" -c user.name=e2e -c user.email=e2e@example.invalid commit -q --allow-empty -m diverge)
+lg clone -q "$work/repos/a.git" "$work/clients/diverge"
+(cd "$work/clients/diverge" && lg -c user.name=e2e -c user.email=e2e@example.invalid commit -q --allow-empty -m diverge)
 g rw -C "$work/clients/diverge" remote set-url origin "$(url a.git)"
 g rw -C "$seed" checkout -q main
 g rw -C "$seed" -c user.name=e2e -c user.email=e2e@example.invalid commit -q --allow-empty -m "moves main on"
@@ -182,7 +187,7 @@ ok "rejected push relays git's diagnostic and exit status"
 # --- Negative cases.
 ls "$work/repos" > "$work/repos.before"
 mkdir -p "$work/outside"
-"$git_dir/git" init -q --bare "$work/outside/escape.git"
+lg init -q --bare "$work/outside/escape.git"
 ln -s "$work/outside/escape.git" "$work/repos/link.git"
 for command in \
     "rm -rf $work/repos" \

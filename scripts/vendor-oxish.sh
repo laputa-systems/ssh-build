@@ -68,7 +68,7 @@ case ${1:-} in
             head -n 20 "$work_dir/vendor-check.diff" >&2
             fail "vendor/oxish differs from upstream $rev plus patches/oxish; run export if the change is intended"
         fi
-        echo "vendor/oxish == upstream $rev + $(ls "$patch_dir" | wc -l | tr -d ' ') patches"
+        echo "vendor/oxish == upstream $rev + $(ls "$patch_dir"/*.patch | wc -l | tr -d ' ') patches"
         ;;
     export)
         checkout
@@ -87,7 +87,7 @@ case ${1:-} in
             git -C "$base" diff --cached --binary --full-index --no-color -- "$(pathspec "$group")" > "$out"
             [ -s "$out" ] && n=$((n + 1)) || rm -f "$out"
         done
-        echo "wrote $(ls "$patch_dir" | wc -l | tr -d ' ') patches to $patch_dir"
+        echo "wrote $(ls "$patch_dir"/*.patch | wc -l | tr -d ' ') patches to $patch_dir"
         ;;
     *) fail "usage: vendor-oxish.sh verify|export" ;;
 esac

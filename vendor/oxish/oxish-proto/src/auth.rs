@@ -132,6 +132,11 @@ impl AuthorizedKey {
         self.algorithm == public_key.algorithm && self.blob.as_slice() == public_key.key_blob
     }
 
+    /// Whether two authorized keys hold the same public key, whatever their options
+    pub fn same_key(&self, other: &Self) -> bool {
+        self.algorithm == other.algorithm && self.blob == other.blob
+    }
+
     /// Get the public key algorithm for this authorized key
     pub fn algorithm(&self) -> &PublicKeyAlgorithm<'_> {
         &self.algorithm

@@ -598,6 +598,42 @@ async fn sessions_beyond_the_limit_are_refused() {
 }
 
 #[tokio::test]
+async fn idle_connections_from_one_address_cannot_lock_out_logins() {
+    let world = script_world("echo OK").await;
+    world.bare_repo("a.git").await.unwrap();
+    let config = crate::Config {
+        max_unauthenticated_per_ip: 2,
+        ..crate::Config::default()
+    };
+    let (client, _guard) = world
+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
+        .await
+        .unwrap();
+
+    let addr = client.addr;
+    let key = client.key.clone();
+    let idle: Vec<_> = futures_idle(addr, 2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let refused = client.run(Some(SERVICE), b"").await.unwrap();
+    assert!(!refused.status.success(), "a third pre-auth connection was served: {}", refused.stdout());
+
+    drop(idle);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let served = CliClient::new(addr, &key).run(Some(SERVICE), b"").await.unwrap();
+    assert!(served.status.success(), "{}", served.stderr);
+    assert_eq!(served.stdout(), "OK\n");
+}
+
+/// Open `count` TCP connections that never send anything
+async fn futures_idle(addr: SocketAddr, count: usize) -> Vec<tokio::net::TcpStream> {
+    let mut streams = Vec::new();
+    for _ in 0..count {
+        streams.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+    }
+    streams
+}
+
+#[tokio::test]
 async fn exec_rejects_non_git_commands() {
     let world = script_world("echo SHOULD-NOT-RUN").await;
     world.bare_repo("a.git").await.unwrap();

@@ -48,7 +48,13 @@ pub struct Identification<'a> {
 impl<'a> Identification<'a> {
     /// Decode an identification string from the start of `bytes`
     pub fn decode(bytes: &'a [u8]) -> Result<Completion<Decoded<'a, Self>>, ProtoError> {
-        let Ok(message) = str::from_utf8(bytes) else {
+        // The client may send its first key exchange packet in the same segment, so only the
+        // identification line itself (up to the first CRLF) has to be text.
+        let line_end = bytes
+            .windows(2)
+            .position(|pair| pair == b"\r\n")
+            .map_or(bytes.len(), |index| index + 2);
+        let Ok(message) = str::from_utf8(&bytes[..line_end]) else {
             return Err(IdentificationError::InvalidUtf8.into());
         };
 
@@ -80,9 +86,10 @@ impl<'a> Identification<'a> {
             comments,
         };
 
+        debug_assert!(next.is_empty());
         Ok(Completion::Complete(Decoded {
             value: out,
-            next: next.as_bytes(),
+            next: &bytes[line_end..],
         }))
     }
 }
@@ -747,3 +754,31 @@ pub const MAX_PACKET_LEN: u32 = 64 * 1024;
 ///
 /// See <https://www.rfc-editor.org/rfc/rfc4253#section-4.2>.
 pub const PROTOCOL: &str = "2.0";
+
+#[cfg(test)]
+mod identification_tests {
+    use super::*;
+
+    #[test]
+    fn binary_data_may_follow_the_identification_line() {
+        let mut bytes = b"SSH-2.0-OpenSSH_10.6 comment\r\n".to_vec();
+        bytes.extend_from_slice(&[0, 0, 4, 12, 0xff, 0xfe, 0x80]);
+        let Ok(Completion::Complete(decoded)) = Identification::decode(&bytes) else {
+            panic!("identification with trailing packet bytes was not decoded");
+        };
+        assert_eq!(decoded.value.software, "OpenSSH_10.6");
+        assert_eq!(decoded.value.comments, "comment");
+        assert_eq!(decoded.next, [0, 0, 4, 12, 0xff, 0xfe, 0x80]);
+    }
+
+    #[test]
+    fn partial_and_invalid_lines_are_still_handled() {
+        assert!(matches!(
+            Identification::decode(b"SSH-2.0-op"),
+            Ok(Completion::Incomplete(_))
+        ));
+        assert!(Identification::decode(b"SSH-2.0-\xff\xfe\r\n").is_err());
+        assert!(Identification::decode(&[b'a'; 300]).is_err());
+        assert!(Identification::decode(b"HTTP/1.1 200\r\n").is_err());
+    }
+}

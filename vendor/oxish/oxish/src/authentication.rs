@@ -50,7 +50,7 @@ pub(crate) async fn authenticate<T: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
-    let (error, disconnect) = match timeout(Duration::from_secs(60), future).await {
+    let (error, disconnect) = match timeout(AUTHENTICATION_TIMEOUT, future).await {
         Ok(Ok(auth)) => return Ok(auth),
         Ok(Err(error)) => {
             let disconnect = match &error {
@@ -173,10 +173,10 @@ impl AuthenticationState {
                     true => account.keys.iter().find(|key| key.matches(&public_key)),
                     false => None,
                 };
-                let (sig, authorized_key) = match (public_key.signature, authorized_key) {
+                let (sig, authorized_key, genuine) = match (public_key.signature, authorized_key) {
                     // Signature, authorized key => verify signature
                     (Some(sig), Some(key)) if &sig.algorithm == key.algorithm() => {
-                        (sig, key.clone())
+                        (sig, key.clone(), true)
                     }
                     // Signature, no authorized key => verify signature against fake key
                     (Some(sig), None) => (
@@ -189,6 +189,7 @@ impl AuthenticationState {
                                 return Ok(Self::AwaitAuthRequest { attempts });
                             }
                         },
+                        false,
                     ),
                     // Signature, authorized key but mismatched algorithms => fail authentication without verifying signature
                     (Some(_), Some(_)) => {
@@ -236,7 +237,9 @@ impl AuthenticationState {
 
                 let options = authorized_key.options.clone();
                 match spawn_blocking(move || authorized_key.verify(message, signature)).await {
-                    Ok(Ok(())) => {
+                    // The fake key only equalizes timing; a signature that verifies against it must
+                    // never log anyone in.
+                    Ok(Ok(())) if genuine => {
                         info!(user = %account.name, "authentication successful");
 
                         write.encode(&MessageType::UserAuthSuccess)?;
@@ -363,6 +366,11 @@ impl Account {
                 "{}:{number}: missing git-access option",
                 path.display()
             );
+            anyhow::ensure!(
+                !keys.iter().any(|existing: &AuthorizedKey| existing.same_key(&key)),
+                "{}:{number}: duplicate key (a key may appear once, with one git-access)",
+                path.display()
+            );
             keys.push(key);
         }
         anyhow::ensure!(!keys.is_empty(), "{} contains no keys", path.display());
@@ -422,6 +430,8 @@ pub enum AuthError {
 /// Authentication requests allowed per connection, including probes without a signature
 const MAX_ATTEMPTS: u8 = 6;
 
+/// Time from the end of key exchange to a successful public-key login
+const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_KEY_FILE_BYTES: u64 = 1 << 20;
 const MAX_KEYS: usize = 1024;
 
@@ -449,8 +459,11 @@ mod tests {
     #[test]
     fn authorized_keys_require_an_explicit_git_access() {
         assert_eq!(load(&format!("git-access=\"read\" {KEY}\n"), 0o600).unwrap().keys.len(), 1);
-        let two = format!("# comment\n\ngit-access=\"read\" {KEY}\ngit-access=\"write\" {KEY}\n");
+        const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDX+GNCeikghR3A2bLB0KmlovqxdC+BUHAfYhYGcUJxA other@host";
+        let two = format!("# comment\n\ngit-access=\"read\" {KEY}\ngit-access=\"write\" {OTHER}\n");
         assert_eq!(load(&two, 0o600).unwrap().keys.len(), 2);
+        let duplicate = format!("git-access=\"read\" {KEY}\ngit-access=\"write\" {KEY}\n");
+        assert!(load(&duplicate, 0o600).is_err());
         for bad in [
             format!("{KEY}\n"),
             format!("command=\"id\" {KEY}\n"),

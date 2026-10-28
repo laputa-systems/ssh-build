@@ -11,14 +11,12 @@ use std::{
 };
 
 use anyhow::Context as _;
-#[cfg(debug_assertions)]
-use clap::ArgAction;
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use listenfd::ListenFd;
 use oxish::{Account, Config, DEFAULT_PROVIDER, GitPolicy, Server, Username, load_host_keys, require_supported_cpu};
 use proto::{
-    HostKeys, OpenSshKeyV1, SshPrivateKey,
+    OpenSshKeyV1, SshPrivateKey,
     named::{Named, PublicKeyAlgorithm},
     pem_encode,
 };
@@ -105,8 +103,7 @@ async fn main() -> anyhow::Result<()> {
         None => anyhow::bail!("--port is required"),
     };
 
-    #[cfg_attr(not(debug_assertions), expect(unused_mut))]
-    let mut config = match &args.config {
+    let config = match &args.config {
         Some(path) => {
             let s = fs::read_to_string(path)
                 .with_context(|| format!("failed to read config file `{}`", path.display()))?;
@@ -115,10 +112,6 @@ async fn main() -> anyhow::Result<()> {
         }
         None => Config::default(),
     };
-    #[cfg(debug_assertions)]
-    {
-        config.spawn = args.spawn;
-    }
 
     let (Some(repo_root), Some(git_dir), Some(authorized_keys)) =
         (&args.repo_root, &args.git_dir, &args.authorized_keys)
@@ -172,9 +165,6 @@ struct Args {
     /// The one SSH user name clients must use
     #[clap(long, default_value = "git")]
     user: String,
-    #[cfg(debug_assertions)]
-    #[clap(long, action = ArgAction::Set, default_value_t = true)]
-    spawn: bool,
 }
 
 fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {

@@ -24,7 +24,7 @@ index aa1cd85cf95f5198c12b7c12302b7fcff449e7f8..1b25c9e013146253bc437695bc51b354
  serde = { workspace = true }
  thiserror = { workspace = true }
 diff --git a/oxish/src/authentication.rs b/oxish/src/authentication.rs
-index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa424e433a2d 100644
+index 405574e23aa021bed75a5aacbeea82a32e6d8e58..2ce36ce321f2ee15db7114bbd6d1da5edbbb6e86 100644
 --- a/oxish/src/authentication.rs
 +++ b/oxish/src/authentication.rs
 @@ -1,5 +1,7 @@
@@ -64,6 +64,15 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
                      provider,
                  )
                  .await;
+@@ -50,7 +50,7 @@ pub(crate) async fn authenticate<T: AsyncRead + AsyncWrite + Unpin>(
+         }
+     };
+ 
+-    let (error, disconnect) = match timeout(Duration::from_secs(60), future).await {
++    let (error, disconnect) = match timeout(AUTHENTICATION_TIMEOUT, future).await {
+         Ok(Ok(auth)) => return Ok(auth),
+         Ok(Err(error)) => {
+             let disconnect = match &error {
 @@ -97,7 +97,6 @@ enum AuthenticationState {
      #[default]
      AwaitServiceRequest,
@@ -106,7 +115,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
                  MessageType::UserAuthRequest,
              ) => {
                  attempts -= 1;
-@@ -169,29 +161,18 @@ impl AuthenticationState {
+@@ -169,33 +161,22 @@ impl AuthenticationState {
                          "unsupported authentication method requested"
                      );
                      send_auth_failed(write)?;
@@ -141,10 +150,16 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
                  };
 -
 -                let authorized_key = user.keys.iter().find(|key| key.matches(&public_key));
-                 let (sig, authorized_key) = match (public_key.signature, authorized_key) {
+-                let (sig, authorized_key) = match (public_key.signature, authorized_key) {
++                let (sig, authorized_key, genuine) = match (public_key.signature, authorized_key) {
                      // Signature, authorized key => verify signature
                      (Some(sig), Some(key)) if &sig.algorithm == key.algorithm() => {
-@@ -205,7 +186,7 @@ impl AuthenticationState {
+-                        (sig, key.clone())
++                        (sig, key.clone(), true)
+                     }
+                     // Signature, no authorized key => verify signature against fake key
+                     (Some(sig), None) => (
+@@ -205,9 +186,10 @@ impl AuthenticationState {
                              Err(_) => {
                                  warn!(algorithm = ?public_key.algorithm, "unsupported public key algorithm");
                                  send_auth_failed(write)?;
@@ -152,8 +167,11 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
 +                                return Ok(Self::AwaitAuthRequest { attempts });
                              }
                          },
++                        false,
                      ),
-@@ -216,7 +197,7 @@ impl AuthenticationState {
+                     // Signature, authorized key but mismatched algorithms => fail authentication without verifying signature
+                     (Some(_), Some(_)) => {
+@@ -216,7 +198,7 @@ impl AuthenticationState {
                              "mismatched signature algorithm in authentication request"
                          );
                          send_auth_failed(write)?;
@@ -162,7 +180,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
                      }
                      // No signature, authorized key => send pk-ok and wait for signature
                      (None, Some(_)) => {
-@@ -226,18 +207,18 @@ impl AuthenticationState {
+@@ -226,18 +208,18 @@ impl AuthenticationState {
                          };
                          debug!(ok = ?pk_ok, "sending pk-ok for user");
                          write.encode(&pk_ok)?;
@@ -184,7 +202,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
                      service_name: user_auth_request.service_name,
                      algorithm: public_key.algorithm,
                      public_key: public_key.key_blob,
-@@ -249,27 +230,21 @@ impl AuthenticationState {
+@@ -249,27 +231,23 @@ impl AuthenticationState {
                      Err(error) => {
                          debug!(%error, "failed to encode signature");
                          send_auth_failed(write)?;
@@ -195,11 +213,14 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
  
                  let options = authorized_key.options.clone();
                  match spawn_blocking(move || authorized_key.verify(message, signature)).await {
-                     Ok(Ok(())) => {
+-                    Ok(Ok(())) => {
 -                        let Some(user) = cached else {
 -                            return Err(ProtoError::Unreachable("must have cached user").into());
 -                        };
 -                        info!(user = %user.data.name, "authentication successful");
++                    // The fake key only equalizes timing; a signature that verifies against it must
++                    // never log anyone in.
++                    Ok(Ok(())) if genuine => {
 +                        info!(user = %account.name, "authentication successful");
  
                          write.encode(&MessageType::UserAuthSuccess)?;
@@ -216,7 +237,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
                      }
                  }
              }
-@@ -315,79 +290,91 @@ fn send_auth_failed(write: &mut WriteState) -> Result<(), ProtoError> {
+@@ -315,79 +293,96 @@ fn send_auth_failed(write: &mut WriteState) -> Result<(), ProtoError> {
      })
  }
  
@@ -347,6 +368,11 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
 +                "{}:{number}: missing git-access option",
 +                path.display()
 +            );
++            anyhow::ensure!(
++                !keys.iter().any(|existing: &AuthorizedKey| existing.same_key(&key)),
++                "{}:{number}: duplicate key (a key may appear once, with one git-access)",
++                path.display()
++            );
 +            keys.push(key);
 +        }
 +        anyhow::ensure!(!keys.is_empty(), "{} contains no keys", path.display());
@@ -376,7 +402,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
  }
  
  /// A validated username
-@@ -396,29 +383,11 @@ pub struct User {
+@@ -396,29 +391,11 @@ pub struct User {
  #[derive(Clone, Debug, PartialEq, Eq)]
  pub struct Username(String);
  
@@ -407,20 +433,22 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
              true => Err(Error::InvalidUsername),
              false => Ok(Self(value)),
          }
-@@ -450,6 +419,12 @@ pub enum AuthError {
+@@ -450,6 +427,14 @@ pub enum AuthError {
      TooManyAttempts,
  }
  
 +/// Authentication requests allowed per connection, including probes without a signature
 +const MAX_ATTEMPTS: u8 = 6;
 +
++/// Time from the end of key exchange to a successful public-key login
++const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(30);
 +const MAX_KEY_FILE_BYTES: u64 = 1 << 20;
 +const MAX_KEYS: usize = 1024;
 +
  const SUPPORTED_METHODS: &[MethodName<'_>] = &[MethodName::PublicKey];
  
  #[cfg(test)]
-@@ -457,6 +432,76 @@ mod tests {
+@@ -457,6 +442,79 @@ mod tests {
      use super::*;
      use crate::DEFAULT_PROVIDER;
  
@@ -441,8 +469,11 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
 +    #[test]
 +    fn authorized_keys_require_an_explicit_git_access() {
 +        assert_eq!(load(&format!("git-access=\"read\" {KEY}\n"), 0o600).unwrap().keys.len(), 1);
-+        let two = format!("# comment\n\ngit-access=\"read\" {KEY}\ngit-access=\"write\" {KEY}\n");
++        const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDX+GNCeikghR3A2bLB0KmlovqxdC+BUHAfYhYGcUJxA other@host";
++        let two = format!("# comment\n\ngit-access=\"read\" {KEY}\ngit-access=\"write\" {OTHER}\n");
 +        assert_eq!(load(&two, 0o600).unwrap().keys.len(), 2);
++        let duplicate = format!("git-access=\"read\" {KEY}\ngit-access=\"write\" {KEY}\n");
++        assert!(load(&duplicate, 0o600).is_err());
 +        for bad in [
 +            format!("{KEY}\n"),
 +            format!("command=\"id\" {KEY}\n"),
@@ -498,7 +529,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
      fn parse_fake_keys() {
          fake_key(&PublicKeyAlgorithm::EcdsaSha2Nistp256, DEFAULT_PROVIDER).unwrap();
 diff --git a/oxish/src/bin/oxish-server.rs b/oxish/src/bin/oxish-server.rs
-index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025a027e2bf 100644
+index 858a38b98838c22b0e471c65185fa9f9d3d338d6..28543d22649986583a38549ece0a10ba1938a728 100644
 --- a/oxish/src/bin/oxish-server.rs
 +++ b/oxish/src/bin/oxish-server.rs
 @@ -1,4 +1,4 @@
@@ -507,16 +538,24 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025
  
  #[cfg(unix)]
  use std::os::unix::fs::OpenOptionsExt;
-@@ -16,7 +16,7 @@ use clap::ArgAction;
+@@ -11,14 +11,12 @@ use std::{
+ };
+ 
+ use anyhow::Context as _;
+-#[cfg(debug_assertions)]
+-use clap::ArgAction;
  use clap::Parser;
  #[cfg(target_os = "linux")]
  use listenfd::ListenFd;
 -use oxish::{Config, DEFAULT_PROVIDER, DefaultStore, Server};
 +use oxish::{Account, Config, DEFAULT_PROVIDER, GitPolicy, Server, Username, load_host_keys, require_supported_cpu};
  use proto::{
-     HostKeys, OpenSshKeyV1, SshPrivateKey,
+-    HostKeys, OpenSshKeyV1, SshPrivateKey,
++    OpenSshKeyV1, SshPrivateKey,
      named::{Named, PublicKeyAlgorithm},
-@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
+     pem_encode,
+ };
+@@ -31,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
          .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
          .init();
  
@@ -524,7 +563,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025
      let provider = DEFAULT_PROVIDER;
      let args = Args::parse();
  
-@@ -65,10 +66,11 @@ async fn main() -> anyhow::Result<()> {
+@@ -65,10 +64,11 @@ async fn main() -> anyhow::Result<()> {
          };
      }
  
@@ -540,7 +579,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025
      info!(len = host_keys.len(), "loaded host keys");
  
      let session_bin = match args.session_bin {
-@@ -92,20 +94,14 @@ async fn main() -> anyhow::Result<()> {
+@@ -92,25 +92,18 @@ async fn main() -> anyhow::Result<()> {
              listener.set_nonblocking(true)?;
              TcpListener::from_std(listener)?
          }
@@ -563,10 +602,21 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025
          None => anyhow::bail!("--port is required"),
      };
  
-@@ -124,28 +120,39 @@ async fn main() -> anyhow::Result<()> {
-         config.spawn = args.spawn;
-     }
- 
+-    #[cfg_attr(not(debug_assertions), expect(unused_mut))]
+-    let mut config = match &args.config {
++    let config = match &args.config {
+         Some(path) => {
+             let s = fs::read_to_string(path)
+                 .with_context(|| format!("failed to read config file `{}`", path.display()))?;
+@@ -119,33 +112,40 @@ async fn main() -> anyhow::Result<()> {
+         }
+         None => Config::default(),
+     };
+-    #[cfg(debug_assertions)]
+-    {
+-        config.spawn = args.spawn;
+-    }
++
 +    let (Some(repo_root), Some(git_dir), Some(authorized_keys)) =
 +        (&args.repo_root, &args.git_dir, &args.authorized_keys)
 +    else {
@@ -575,7 +625,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025
 +    let policy = GitPolicy::new(repo_root, git_dir).context("unsafe git configuration")?;
 +    let name = Username::try_from(args.user).context("invalid --user")?;
 +    let account = Account::from_file(name, authorized_keys, provider)?;
-+
+ 
      info!(addr = %listener.local_addr()?, "listening for connections");
      Arc::new(
 -        Server::new(
@@ -611,10 +661,13 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025
      #[clap(long)]
      generate_host_key: Option<PathBuf>,
      #[clap(long, value_parser = host_key_type, default_value = "ssh-ed25519")]
-@@ -153,6 +160,18 @@ struct Args {
+@@ -153,9 +153,18 @@ struct Args {
      /// Path to the `oxish-session` binary (defaults to a sibling of this executable)
      #[clap(long)]
      session_bin: Option<PathBuf>,
+-    #[cfg(debug_assertions)]
+-    #[clap(long, action = ArgAction::Set, default_value_t = true)]
+-    spawn: bool,
 +    /// Directory holding all Git repositories clients may name
 +    #[clap(long, required_unless_present = "generate_host_key")]
 +    repo_root: Option<PathBuf>,
@@ -627,10 +680,10 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025
 +    /// The one SSH user name clients must use
 +    #[clap(long, default_value = "git")]
 +    user: String,
-     #[cfg(debug_assertions)]
-     #[clap(long, action = ArgAction::Set, default_value_t = true)]
-     spawn: bool,
-@@ -164,8 +183,3 @@ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
+ }
+ 
+ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
+@@ -164,8 +173,3 @@ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
          algorithm => Ok(algorithm.to_owned()),
      }
  }
@@ -740,10 +793,10 @@ index 0000000000000000000000000000000000000000..eb55526409382b11d01de53fb19a5c23
 +}
 diff --git a/oxish/src/git.rs b/oxish/src/git.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c5f8a93a8ff6f0e68d5ab8d9b1e3c7c7eb942cde
+index 0000000000000000000000000000000000000000..fdd792f041e4e049710a8fec02bdba6980a394cb
 --- /dev/null
 +++ b/oxish/src/git.rs
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,600 @@
 +//! Git-only command policy
 +//!
 +//! Turns the command string of an SSH `exec` request into a fixed argument vector for one of
@@ -753,7 +806,7 @@ index 0000000000000000000000000000000000000000..c5f8a93a8ff6f0e68d5ab8d9b1e3c7c7
 +//!
 +//! Trust boundary: the repository root and the Git binary directory must be owned by the
 +//! server's user and must not be writable by anyone else, and so must every repository
-+//! directory below the root. Repositories are trusted (their config and hooks run as the
++//! directory below the root (a repository that fails this is reported as not found). Repositories are trusted (their config and hooks run as the
 +//! server's user); a push cannot change them. Repository names are resolved component by
 +//! component without following symlinks, then the result is checked against the canonical
 +//! root. A writer who can replace a directory between that check and Git opening it is
@@ -932,20 +985,26 @@ index 0000000000000000000000000000000000000000..c5f8a93a8ff6f0e68d5ab8d9b1e3c7c7
 +
 +    fn resolve(&self, name: &str) -> Result<PathBuf, PolicyError> {
 +        let mut path = self.repo_root.clone();
-+        for component in name.split('/') {
++        let components: Vec<&str> = name.split('/').collect();
++        for (index, component) in components.iter().enumerate() {
 +            path.push(component);
 +            let meta = fs::symlink_metadata(&path).map_err(not_found)?;
 +            if !meta.file_type().is_dir() {
 +                return Err(PolicyError::NotFound);
 +            }
-+        }
-+
-+        for (entry, want_dir) in [("HEAD", false), ("objects", true), ("refs", true)] {
-+            let meta = fs::symlink_metadata(path.join(entry)).map_err(not_found)?;
-+            let kind = meta.file_type();
-+            if kind.is_symlink() || kind.is_dir() != want_dir {
++            // A directory inside a repository is not a repository: refs named like
++            // `x/HEAD`, `x/objects/y`, `x/refs/z` would otherwise fake one.
++            if index + 1 < components.len() && looks_like_repository(&path) {
 +                return Err(PolicyError::NotFound);
 +            }
++        }
++
++        if !looks_like_repository(&path) {
++            return Err(PolicyError::NotFound);
++        }
++        let meta = fs::symlink_metadata(&path).map_err(not_found)?;
++        if meta.uid() != rustix::process::geteuid().as_raw() || meta.permissions().mode() & 0o022 != 0 {
++            return Err(PolicyError::NotFound);
 +        }
 +
 +        let canonical = fs::canonicalize(&path).map_err(not_found)?;
@@ -1045,6 +1104,18 @@ index 0000000000000000000000000000000000000000..c5f8a93a8ff6f0e68d5ab8d9b1e3c7c7
 +        true => Ok(name.to_owned()),
 +        false => Err(PolicyError::Name),
 +    }
++}
++
++/// A bare repository has a `HEAD` file and `objects` and `refs` directories, none of them symlinks
++fn looks_like_repository(path: &Path) -> bool {
++    [("HEAD", false), ("objects", true), ("refs", true)]
++        .iter()
++        .all(|(entry, want_dir)| {
++            fs::symlink_metadata(path.join(entry)).is_ok_and(|meta| {
++                let kind = meta.file_type();
++                !kind.is_symlink() && kind.is_dir() == *want_dir
++            })
++        })
 +}
 +
 +fn trusted_dir(path: &Path, what: &str) -> Result<PathBuf, PolicyError> {
@@ -1251,6 +1322,29 @@ index 0000000000000000000000000000000000000000..c5f8a93a8ff6f0e68d5ab8d9b1e3c7c7
 +    }
 +
 +    #[test]
++    fn directories_inside_a_repository_are_not_repositories() {
++        let f = fixture();
++        let fake = f.root.join("a.git").join("refs").join("heads").join("x");
++        bare_repo(&fake);
++        let nested = f.root.join("a.git").join("refs").join("heads");
++        assert!(nested.is_dir());
++        for command in [
++            "git-upload-pack 'a.git/refs/heads/x'",
++            "git-upload-pack 'team/b.git/refs'",
++        ] {
++            assert_eq!(authorize(&f, command, GitAccess::Read), Err(PolicyError::NotFound), "{command:?}");
++        }
++    }
++
++    #[test]
++    fn repositories_writable_by_others_are_refused() {
++        let f = fixture();
++        bare_repo(&f.root.join("loose.git"));
++        fs::set_permissions(f.root.join("loose.git"), fs::Permissions::from_mode(0o775)).unwrap();
++        assert_eq!(authorize(&f, "git-upload-pack 'loose.git'", GitAccess::Read), Err(PolicyError::NotFound));
++    }
++
++    #[test]
 +    fn read_access_cannot_push() {
 +        let f = fixture();
 +        assert_eq!(authorize(&f, "git-receive-pack 'a.git'", GitAccess::Read), Err(PolicyError::Denied));
@@ -1305,7 +1399,7 @@ index 0000000000000000000000000000000000000000..c5f8a93a8ff6f0e68d5ab8d9b1e3c7c7
 +}
 diff --git a/oxish/src/host_keys.rs b/oxish/src/host_keys.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b307dba03913a22103407245c54e6b854694368
+index 0000000000000000000000000000000000000000..0dda74162fe1a89d34e0c5c039091f62443437f2
 --- /dev/null
 +++ b/oxish/src/host_keys.rs
 @@ -0,0 +1,111 @@
@@ -1324,7 +1418,7 @@ index 0000000000000000000000000000000000000000..5b307dba03913a22103407245c54e6b8
 +};
 +
 +use anyhow::Context as _;
-+use proto::{HostKeys, OpenSshKeyV1, SshPrivateKey, crypto::CryptoProvider};
++use proto::{HostKeys, OpenSshKeyV1, crypto::CryptoProvider};
 +use zeroize::Zeroizing;
 +
 +/// Largest host key file accepted, in bytes
@@ -1376,7 +1470,7 @@ index 0000000000000000000000000000000000000000..5b307dba03913a22103407245c54e6b8
 +        os::unix::fs::{PermissionsExt as _, symlink},
 +    };
 +
-+    use proto::{named::PublicKeyAlgorithm, pem_encode};
++    use proto::{SshPrivateKey, named::PublicKeyAlgorithm, pem_encode};
 +
 +    use super::*;
 +    use crate::DEFAULT_PROVIDER;
@@ -1468,12 +1562,25 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..4eb0ef90f4796e3085068827cc602ad0
  use unix as platform;
  
 diff --git a/oxish/src/server.rs b/oxish/src/server.rs
-index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfddd666bb6 100644
+index 7f807df2cd33360f8aaaccda043dbc85f34becbf..34c4d88efbbd52f1e3809651c2359beb4d95e5e7 100644
 --- a/oxish/src/server.rs
 +++ b/oxish/src/server.rs
-@@ -16,8 +16,8 @@ use tracing::{debug, instrument, warn};
- #[cfg(debug_assertions)]
- use crate::Session;
+@@ -1,7 +1,7 @@
+-use core::{mem, net::SocketAddr, time::Duration};
++use core::{mem, net::{IpAddr, SocketAddr}, time::Duration};
+ #[cfg(coverage)]
+ use std::env;
+-use std::{path::PathBuf, sync::Arc};
++use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
+ 
+ use anyhow::Context as _;
+ use proto::{HostKeys, ReadState, WriteState, crypto::CryptoProvider};
+@@ -13,11 +13,9 @@ use tokio::{
+ };
+ use tracing::{debug, instrument, warn};
+ 
+-#[cfg(debug_assertions)]
+-use crate::Session;
  use crate::{
 -    Connection, Error, SessionState, SideState,
 -    authentication::{Authenticated, UserStore, authenticate},
@@ -1482,7 +1589,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfd
      platform::spawn,
  };
  
-@@ -26,31 +26,44 @@ pub struct Server {
+@@ -26,31 +24,50 @@ pub struct Server {
      pub(crate) provider: &'static dyn CryptoProvider,
      pub(crate) host_keys: HostKeys,
      pub(crate) session: PathBuf,
@@ -1491,6 +1598,8 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfd
 +    pub(crate) policy: GitPolicy,
      pub(crate) authenticating: Semaphore,
 +    sessions: Semaphore,
++    pre_auth_by_ip: Arc<PerIp>,
++    sessions_by_ip: Arc<PerIp>,
      config: Config,
  }
  
@@ -1521,6 +1630,8 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfd
 +            policy,
 +            authenticating: Semaphore::new(MAX_UNAUTHENTICATED),
 +            sessions: Semaphore::new(Config::default().max_sessions),
++            pre_auth_by_ip: Arc::new(PerIp::new(Config::default().max_unauthenticated_per_ip)),
++            sessions_by_ip: Arc::new(PerIp::new(Config::default().max_sessions_per_ip)),
              config: Config::default(),
          })
      }
@@ -1528,20 +1639,51 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfd
      /// Set additional server configuration
      pub fn with_config(mut self, config: Config) -> Self {
 +        self.sessions = Semaphore::new(config.max_sessions);
++        self.pre_auth_by_ip = Arc::new(PerIp::new(config.max_unauthenticated_per_ip));
++        self.sessions_by_ip = Arc::new(PerIp::new(config.max_sessions_per_ip));
          self.config = config;
          self
      }
-@@ -79,6 +92,9 @@ impl Server {
+@@ -58,9 +75,7 @@ impl Server {
+     /// Run the server, accepting connections on the given listener
+     ///
+     /// Accepts connections from the `listener` and spawns a task for each accepted connection.
+-    /// If [`Config::spawn`] is `true` (the default), the server will spawn a child process to
+-    /// serve the connected client after authentication. When [`Config::spawn`] is `false`,
+-    /// the session will continue running in the server process.
++    /// After authentication the server hands the connection to a session process.
+     ///
+     /// This function never returns unless the listener is closed or an error occurs.
+     pub async fn run(self: &Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
+@@ -79,6 +94,9 @@ impl Server {
                  if let Err(err) = stream.set_nodelay(true) {
                      warn!(%addr, %err, "failed to set TCP_NODELAY on connection");
                  }
-+                if let Err(err) = rustix::net::sockopt::set_socket_keepalive(&stream, true) {
++                if let Err(err) = enable_keepalive(&stream) {
 +                    warn!(%addr, %err, "failed to enable TCP keepalive on connection");
 +                }
  
                  let _ = server.accept(stream, addr).await;
              });
-@@ -112,20 +128,27 @@ impl Server {
+@@ -87,6 +105,11 @@ impl Server {
+ 
+     #[instrument(name = "handshake", skip(self, stream, addr), fields(addr = %addr))]
+     pub(crate) async fn accept(&self, stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
++        let Some(_pre_auth_ip) = PerIp::acquire(&self.pre_auth_by_ip, addr.ip()) else {
++            warn!(%addr, "too many unauthenticated connections from this address");
++            return Err(anyhow::anyhow!("too many unauthenticated connections from this address"));
++        };
++
+         let authenticating = match self.authenticating.try_acquire() {
+             Ok(permit) => permit,
+             Err(TryAcquireError::NoPermits) => {
+@@ -107,27 +130,33 @@ impl Server {
+         };
+ 
+         let future = conn.exchange_keys(&self.host_keys, self.provider);
+-        let kx = match timeout(Duration::from_secs(30), future).await {
++        let kx = match timeout(KEY_EXCHANGE_TIMEOUT, future).await {
+             Ok(result) => result.context("key exchange failed")?,
              Err(_) => return Err(anyhow::anyhow!("key exchange timed out")),
          };
  
@@ -1558,6 +1700,16 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfd
          .context("authentication failed")?;
          drop(authenticating);
  
+-        #[cfg(debug_assertions)]
+-        if !self.config.spawn {
+-            let session = Session::new(kx, conn, self.provider, options)?;
+-            return session.run().await.context("session failed");
+-        }
++        let Some(_session_ip) = PerIp::acquire(&self.sessions_by_ip, addr.ip()) else {
++            warn!(%addr, "too many sessions from this address; closing connection");
++            return Err(anyhow::anyhow!("too many sessions from this address"));
++        };
++
 +        let _session = match self.sessions.try_acquire() {
 +            Ok(permit) => permit,
 +            Err(_) => {
@@ -1565,15 +1717,10 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfd
 +                return Err(anyhow::anyhow!("too many concurrent sessions"));
 +            }
 +        };
-+
-         #[cfg(debug_assertions)]
-         if !self.config.spawn {
--            let session = Session::new(kx, conn, self.provider, options)?;
-+            let session = Session::new(kx, conn, self.provider, options, self.policy.clone())?;
-             return session.run().await.context("session failed");
-         }
  
-@@ -169,7 +192,7 @@ impl Server {
+         let Connection {
+             stream,
+@@ -169,7 +198,7 @@ impl Server {
              options,
          };
  
@@ -1582,23 +1729,32 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfd
              .await
              .context("failed to spawn session process")?;
  
-@@ -194,8 +217,8 @@ pub struct Config {
-     /// Whether to spawn a child process for each authenticated session
-     #[cfg(debug_assertions)]
-     pub spawn: bool,
+@@ -191,30 +220,101 @@ impl Server {
+ #[derive(Debug, Deserialize)]
+ #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+ pub struct Config {
+-    /// Whether to spawn a child process for each authenticated session
+-    #[cfg(debug_assertions)]
+-    pub spawn: bool,
 -    /// Policy for authenticating as the root user
 -    pub root_policy: RootPolicy,
 +    /// Authenticated connections served at once; further ones are closed after authenticating
 +    pub max_sessions: usize,
++    /// Connections one source address may hold in key exchange or authentication at once
++    pub max_unauthenticated_per_ip: usize,
++    /// Authenticated connections one source address may hold at once
++    pub max_sessions_per_ip: usize,
  }
  
  impl Default for Config {
-@@ -203,18 +226,10 @@ impl Default for Config {
+     fn default() -> Self {
          Self {
-             #[cfg(debug_assertions)]
-             spawn: true,
+-            #[cfg(debug_assertions)]
+-            spawn: true,
 -            root_policy: RootPolicy::default(),
 +            max_sessions: 32,
++            max_unauthenticated_per_ip: 4,
++            max_sessions_per_ip: 8,
          }
      }
  }
@@ -1612,11 +1768,88 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..dc9f7891718af82e7bb5ffd5fec6adfd
 -    /// Refuse authentication as root
 -    #[default]
 -    Deny,
--}
 +/// Connections allowed to be in key exchange or authentication at once
 +const MAX_UNAUTHENTICATED: usize = 32;
++
++/// Time to read the identification string and finish key exchange
++const KEY_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
++
++/// Counts live connections per source address and refuses more than a fixed number
++struct PerIp {
++    limit: usize,
++    counts: Mutex<HashMap<IpAddr, usize>>,
++}
++
++/// Releases one slot of [`PerIp`] when dropped
++struct PerIpGuard {
++    owner: Arc<PerIp>,
++    ip: IpAddr,
++}
++
++impl PerIp {
++    fn new(limit: usize) -> Self {
++        Self {
++            limit,
++            counts: Mutex::new(HashMap::new()),
++        }
++    }
++
++    fn acquire(owner: &Arc<Self>, ip: IpAddr) -> Option<PerIpGuard> {
++        let mut counts = owner.counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
++        let count = counts.entry(ip).or_insert(0);
++        if *count >= owner.limit {
++            return None;
++        }
++        *count += 1;
++        Some(PerIpGuard {
++            owner: owner.clone(),
++            ip,
++        })
++    }
++}
++
++impl Drop for PerIpGuard {
++    fn drop(&mut self) {
++        let mut counts = self.owner.counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
++        if let Some(count) = counts.get_mut(&self.ip) {
++            *count -= 1;
++            if *count == 0 {
++                counts.remove(&self.ip);
++            }
++        }
++    }
++}
++
++/// Probe dead peers within about two minutes instead of the OS default of two hours
++fn enable_keepalive(stream: &TcpStream) -> std::io::Result<()> {
++    use rustix::net::sockopt;
++
++    sockopt::set_socket_keepalive(stream, true)?;
++    sockopt::set_tcp_keepidle(stream, Duration::from_secs(60))?;
++    sockopt::set_tcp_keepintvl(stream, Duration::from_secs(15))?;
++    sockopt::set_tcp_keepcnt(stream, 4)?;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn per_address_limit_releases_on_drop() {
++        let owner = Arc::new(PerIp::new(2));
++        let a: IpAddr = "192.0.2.1".parse().unwrap();
++        let b: IpAddr = "192.0.2.2".parse().unwrap();
++        let first = PerIp::acquire(&owner, a).unwrap();
++        let _second = PerIp::acquire(&owner, a).unwrap();
++        assert!(PerIp::acquire(&owner, a).is_none());
++        assert!(PerIp::acquire(&owner, b).is_some());
++        drop(first);
++        assert!(PerIp::acquire(&owner, a).is_some());
++    }
+ }
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..7c58bfb17dde5ea650e142bcb096d219db5f699e 100644
+index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..ea3b8c3410a8ca5ae6c6fc56ef407e5e03be56fc 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
 @@ -1,38 +1,54 @@
@@ -2306,7 +2539,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..7c58bfb17dde5ea650e142bcb096d219
 +            _ => true,
 +        };
 +
-+        if self.credit == 0 || (self.credit < INITIAL_WINDOW_SIZE / 4 && !drained) {
++        if self.close_sent || self.credit == 0 || (self.credit < INITIAL_WINDOW_SIZE / 4 && !drained) {
 +            return Ok(false);
 +        }
 +
@@ -2612,15 +2845,15 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..7c58bfb17dde5ea650e142bcb096d219
 +/// How long output pipes may stay open after Git itself exited
 +const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
 diff --git a/oxish/src/session/mod.rs b/oxish/src/session/mod.rs
-index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6f08956c0 100644
+index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc8f405be5 100644
 --- a/oxish/src/session/mod.rs
 +++ b/oxish/src/session/mod.rs
-@@ -1,24 +1,26 @@
+@@ -1,24 +1,22 @@
 -use core::str::{self, FromStr};
 +use core::time::Duration;
  
- #[cfg(debug_assertions)]
- use proto::SessionHostKey;
+-#[cfg(debug_assertions)]
+-use proto::SessionHostKey;
  use proto::{
      Disconnect, GlobalRequest, MessageType, Pretty,
      auth::KeyOptions,
@@ -2631,12 +2864,12 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6
 -use tokio::io::{AsyncRead, AsyncWrite};
 +use tokio::{
 +    io::{AsyncRead, AsyncWrite},
-+    time::{Instant, sleep},
++    time::{Instant, sleep, timeout},
 +};
  use tracing::{debug, info, instrument, trace, warn};
  
- #[cfg(debug_assertions)]
- use crate::KeyExchangeOutput;
+-#[cfg(debug_assertions)]
+-use crate::KeyExchangeOutput;
 -use crate::{Connection, Error, receive};
 +use crate::{Connection, Error, GitPolicy, receive};
  
@@ -2647,7 +2880,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6
  
  /// A single SSH session's state
  ///
-@@ -30,6 +32,7 @@ pub struct Session<T> {
+@@ -30,39 +28,41 @@ pub struct Session<T> {
      pub(crate) channels: Channels,
      pub(crate) post_quantum_kx: bool,
      pub(crate) options: KeyOptions,
@@ -2655,23 +2888,30 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6
  }
  
  impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
-@@ -39,6 +42,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
-         conn: Connection<T>,
-         provider: &'static dyn CryptoProvider,
-         options: KeyOptions,
-+        policy: GitPolicy,
-     ) -> Result<Self, Error> {
-         Ok(Self {
-             provider,
-@@ -52,6 +56,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
-             post_quantum_kx: kx.post_quantum_kx,
-             channels: Channels::default(),
-             options,
-+            policy,
-         })
-     }
- 
-@@ -60,9 +65,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+-    #[cfg(debug_assertions)]
+-    pub(crate) fn new(
+-        kx: KeyExchangeOutput<'_>,
+-        conn: Connection<T>,
+-        provider: &'static dyn CryptoProvider,
+-        options: KeyOptions,
+-    ) -> Result<Self, Error> {
+-        Ok(Self {
+-            provider,
+-            conn,
+-            kx: RekeyState::new(
+-                kx.session_id,
+-                kx.strict_kx,
+-                kx.identities,
+-                SessionHostKey::from_server(kx.host_key, provider)?,
+-            ),
+-            post_quantum_kx: kx.post_quantum_kx,
+-            channels: Channels::default(),
+-            options,
+-        })
+-    }
+-
+     /// Run the session, driving the connection forward and handling channel messages
+     ///
      /// This function never returns unless the connection is closed or an error occurs.
      #[instrument(name = "connection", skip(self), fields(addr = %self.conn.addr))]
      pub async fn run(mut self) -> Result<(), Error> {
@@ -2680,17 +2920,49 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6
 +        result
 +    }
 +
++    /// Flush buffered output, giving up on a peer that stops reading
++    async fn flush(&mut self) -> Result<(), Error> {
++        match timeout(WRITE_TIMEOUT, self.conn.flush()).await {
++            Ok(result) => result,
++            Err(_) => Err(Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut))),
++        }
++    }
++
 +    async fn serve(&mut self) -> Result<(), Error> {
 +        let idle = sleep(IDLE_TIMEOUT);
 +        tokio::pin!(idle);
++        let mut last_activity = Instant::now();
          loop {
++            let allowed = match self.channels.busy() {
++                true => BUSY_TIMEOUT,
++                false => IDLE_TIMEOUT,
++            };
++            idle.as_mut().reset(last_activity + allowed);
              tokio::select! {
                  result = receive(&mut self.conn.stream, &mut self.conn.read) => {
-+                    idle.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
++                    last_activity = Instant::now();
                      let packet = result?;
                      let kx = packet.message_type == MessageType::KeyExchangeInit
                          || self.kx.in_progress();
-@@ -109,17 +123,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+@@ -85,7 +85,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+                                 self.post_quantum_kx = post_quantum_kx;
+                                 debug!("completed client-initiated rekey");
+                             }
+-                            self.conn.flush().await?;
++                            self.flush().await?;
+                             continue;
+                         }
+                         MessageType::GlobalRequest => {
+@@ -93,7 +93,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+                             debug!(name = %String::from_utf8_lossy(request.name), "refusing unsupported global request");
+                             if request.want_reply {
+                                 self.conn.write.encode(&MessageType::RequestFailure)?;
+-                                self.conn.flush().await?;
++                                self.flush().await?;
+                             }
+                             continue;
+                         }
+@@ -109,148 +109,34 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                      match channel_message {
                          IncomingChannelMessage::Open(open) => self.channels.open(open, &mut self.conn.write),
                          IncomingChannelMessage::Request(request) => {
@@ -2711,20 +2983,22 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6
                          IncomingChannelMessage::WindowAdjust(adjust) => self.channels.adjust_window(&adjust).map_err(Into::into),
                          IncomingChannelMessage::Eof(eof) => self.channels.eof(&eof).map_err(Into::into),
                          IncomingChannelMessage::Close(close) => self.channels.close(&close, &mut self.conn.write),
-@@ -127,130 +134,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+                     }?;
  
-                     self.conn.flush().await?;
+-                    self.conn.flush().await?;
++                    self.flush().await?;
                  }
 -                result = TerminalsFuture::new(self.channels.channels_mut(), &mut self.conn.write), if !self.kx.in_progress() => {
 +                result = ChannelsFuture::new(&mut self.channels, &mut self.conn.write), if !self.kx.in_progress() => {
-+                    idle.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
++                    last_activity = Instant::now();
                      result?;
-                     self.conn.flush().await?;
-                 }
-+                () = &mut idle, if !self.channels.busy() => {
+-                    self.conn.flush().await?;
++                    self.flush().await?;
++                }
++                () = &mut idle => {
 +                    info!("closing idle connection");
 +                    return Ok(());
-+                }
+                 }
              }
          }
      }
@@ -2850,8 +3124,12 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..c70f7f0ceb9d4cc552d934a99112f8e6
 -}
 +/// How long a connection with no running command may stay silent
 +const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
++/// How long a connection with a running command may stay silent in both directions
++const BUSY_TIMEOUT: Duration = Duration::from_secs(3600);
++/// How long buffered output may wait for a peer that is not reading
++const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..608b6144ce71cfb22eb48c24d4ebb24ffbdd7869 100644
+index 151147cfbfaf967cbbea73dbd209ff50a17105cd..fa1a30f55c18491220df51571066e4e221f9c545 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
 @@ -1,20 +1,17 @@
@@ -3227,7 +3505,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..608b6144ce71cfb22eb48c24d4ebb24f
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -134,323 +382,549 @@ async fn handshake_ed25519_graviola() {
+@@ -134,323 +382,585 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -3626,6 +3904,42 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..608b6144ce71cfb22eb48c24d4ebb24f
 +    let first = first.await.unwrap().unwrap();
 +    assert!(first.status.success(), "{}", first.stderr);
 +    assert_eq!(first.stdout(), "FIRST\n");
++}
++
++#[tokio::test]
++async fn idle_connections_from_one_address_cannot_lock_out_logins() {
++    let world = script_world("echo OK").await;
++    world.bare_repo("a.git").await.unwrap();
++    let config = crate::Config {
++        max_unauthenticated_per_ip: 2,
++        ..crate::Config::default()
++    };
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++
++    let addr = client.addr;
++    let key = client.key.clone();
++    let idle: Vec<_> = futures_idle(addr, 2).await;
++    tokio::time::sleep(Duration::from_millis(300)).await;
++    let refused = client.run(Some(SERVICE), b"").await.unwrap();
++    assert!(!refused.status.success(), "a third pre-auth connection was served: {}", refused.stdout());
++
++    drop(idle);
++    tokio::time::sleep(Duration::from_millis(500)).await;
++    let served = CliClient::new(addr, &key).run(Some(SERVICE), b"").await.unwrap();
++    assert!(served.status.success(), "{}", served.stderr);
++    assert_eq!(served.stdout(), "OK\n");
++}
++
++/// Open `count` TCP connections that never send anything
++async fn futures_idle(addr: SocketAddr, count: usize) -> Vec<tokio::net::TcpStream> {
++    let mut streams = Vec::new();
++    for _ in 0..count {
++        streams.push(tokio::net::TcpStream::connect(addr).await.unwrap());
++    }
++    streams
 +}
 +
 +#[tokio::test]
@@ -4056,7 +4370,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..608b6144ce71cfb22eb48c24d4ebb24f
  #[tokio::test]
  async fn host_keys_from_files_graviola() {
      host_keys_from_files(graviola::DEFAULT_PROVIDER)
-@@ -493,9 +967,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+@@ -493,9 +1003,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
  #[tokio::test]
  async fn verify_keys() {
      let providers = [
@@ -4066,7 +4380,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..608b6144ce71cfb22eb48c24d4ebb24f
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -522,130 +993,6 @@ async fn verify_keys() {
+@@ -522,130 +1029,6 @@ async fn verify_keys() {
      }
  }
  
@@ -4197,7 +4511,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..608b6144ce71cfb22eb48c24d4ebb24f
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  
  /// Build and locate the `oxish-session` binary
-@@ -704,8 +1051,3 @@ fn subscribe() {
+@@ -704,8 +1087,3 @@ fn subscribe() {
      });
  }
  

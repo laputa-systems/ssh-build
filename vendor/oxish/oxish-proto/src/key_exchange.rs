@@ -86,6 +86,14 @@ impl<'a> InitialKeyExchangeState<'a> {
                     provider,
                 )?;
 
+                // Without strict key exchange a man in the middle can delete packets right after
+                // the handshake (Terrapin); every client that matters offers it.
+                if strict_kx.is_none() {
+                    return Err(ProtoError::NoCommonAlgorithm(
+                        "strict key exchange (kex-strict-c-v00@openssh.com) is required",
+                    ));
+                }
+
                 write.encode_kx(&local, Some(&mut kx.exchange))?;
                 *self = Self::AwaitingEcdhInit {
                     kx,

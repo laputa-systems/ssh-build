@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::Context as _;
-use proto::{HostKeys, OpenSshKeyV1, SshPrivateKey, crypto::CryptoProvider};
+use proto::{HostKeys, OpenSshKeyV1, crypto::CryptoProvider};
 use zeroize::Zeroizing;
 
 /// Largest host key file accepted, in bytes
@@ -65,7 +65,7 @@ mod tests {
         os::unix::fs::{PermissionsExt as _, symlink},
     };
 
-    use proto::{named::PublicKeyAlgorithm, pem_encode};
+    use proto::{SshPrivateKey, named::PublicKeyAlgorithm, pem_encode};
 
     use super::*;
     use crate::DEFAULT_PROVIDER;

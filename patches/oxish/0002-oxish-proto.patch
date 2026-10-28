@@ -1,8 +1,20 @@
 diff --git a/oxish-proto/src/auth.rs b/oxish-proto/src/auth.rs
-index dab51789c0e6f43d2c649ab208638e363994ae5c..65f6f671aa23ce8aeaef8f197212d9e8170231dd 100644
+index dab51789c0e6f43d2c649ab208638e363994ae5c..97a4dd615af78b14c8e1eb96eb0052064b3175a3 100644
 --- a/oxish-proto/src/auth.rs
 +++ b/oxish-proto/src/auth.rs
-@@ -153,8 +153,32 @@ impl fmt::Debug for AuthorizedKey {
+@@ -132,6 +132,11 @@ impl AuthorizedKey {
+         self.algorithm == public_key.algorithm && self.blob.as_slice() == public_key.key_blob
+     }
+ 
++    /// Whether two authorized keys hold the same public key, whatever their options
++    pub fn same_key(&self, other: &Self) -> bool {
++        self.algorithm == other.algorithm && self.blob == other.blob
++    }
++
+     /// Get the public key algorithm for this authorized key
+     pub fn algorithm(&self) -> &PublicKeyAlgorithm<'_> {
+         &self.algorithm
+@@ -153,8 +158,32 @@ impl fmt::Debug for AuthorizedKey {
  /// <https://man.openbsd.org/sshd.8#AUTHORIZED_KEYS_FILE_FORMAT>.
  #[derive(Clone, Debug, Default)]
  pub struct KeyOptions {
@@ -37,7 +49,7 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..65f6f671aa23ce8aeaef8f197212d9e8
  }
  
  impl KeyOptions {
-@@ -206,8 +230,12 @@ impl KeyOptions {
+@@ -206,8 +235,12 @@ impl KeyOptions {
              };
  
              match (name.to_ascii_lowercase().as_str(), value) {
@@ -52,7 +64,7 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..65f6f671aa23ce8aeaef8f197212d9e8
                  }
                  _ => {
                      debug!(option = name, "invalid key option");
-@@ -236,41 +264,30 @@ impl KeyOptions {
+@@ -236,41 +269,30 @@ impl KeyOptions {
  
  impl Encode for KeyOptions {
      fn encode(&self, buf: &mut Vec<u8>) {
@@ -109,7 +121,7 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..65f6f671aa23ce8aeaef8f197212d9e8
              next,
          })
      }
-@@ -676,31 +693,31 @@ mod tests {
+@@ -676,31 +698,31 @@ mod tests {
  
      #[test]
      fn key_options() {
@@ -164,7 +176,7 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..65f6f671aa23ce8aeaef8f197212d9e8
          ];
  
          for (options, expected) in cases {
-@@ -711,18 +728,30 @@ mod tests {
+@@ -711,18 +733,30 @@ mod tests {
  
              let (parsed, key_type, rest) = KeyOptions::parse(&line);
              let parsed = match (key_type, rest) {
@@ -330,6 +342,88 @@ index ee5f8758753bb060f8fd2ce06a1b8b18da9cbe05..abc4efe734e499b0d1bfbf6155baf481
      /// Create an OpenSSH-format private key file holding the given keys
      ///
      /// Returns `None` if `keys` is empty, as the format requires at least one key.
+diff --git a/oxish-proto/src/key_exchange.rs b/oxish-proto/src/key_exchange.rs
+index a8b133756294bb31f21a09eba8263f90b73db249..0ba082e2bd8ed766c94a47ba014308fbe2a9e9d0 100644
+--- a/oxish-proto/src/key_exchange.rs
++++ b/oxish-proto/src/key_exchange.rs
+@@ -86,6 +86,14 @@ impl<'a> InitialKeyExchangeState<'a> {
+                     provider,
+                 )?;
+ 
++                // Without strict key exchange a man in the middle can delete packets right after
++                // the handshake (Terrapin); every client that matters offers it.
++                if strict_kx.is_none() {
++                    return Err(ProtoError::NoCommonAlgorithm(
++                        "strict key exchange (kex-strict-c-v00@openssh.com) is required",
++                    ));
++                }
++
+                 write.encode_kx(&local, Some(&mut kx.exchange))?;
+                 *self = Self::AwaitingEcdhInit {
+                     kx,
+diff --git a/oxish-proto/src/lib.rs b/oxish-proto/src/lib.rs
+index ea2e4f793afdb925cad8192d28ba79048ac91e06..ab4828701eb2b3ed6b576c392e155f939a481a87 100644
+--- a/oxish-proto/src/lib.rs
++++ b/oxish-proto/src/lib.rs
+@@ -48,7 +48,13 @@ pub struct Identification<'a> {
+ impl<'a> Identification<'a> {
+     /// Decode an identification string from the start of `bytes`
+     pub fn decode(bytes: &'a [u8]) -> Result<Completion<Decoded<'a, Self>>, ProtoError> {
+-        let Ok(message) = str::from_utf8(bytes) else {
++        // The client may send its first key exchange packet in the same segment, so only the
++        // identification line itself (up to the first CRLF) has to be text.
++        let line_end = bytes
++            .windows(2)
++            .position(|pair| pair == b"\r\n")
++            .map_or(bytes.len(), |index| index + 2);
++        let Ok(message) = str::from_utf8(&bytes[..line_end]) else {
+             return Err(IdentificationError::InvalidUtf8.into());
+         };
+ 
+@@ -80,9 +86,10 @@ impl<'a> Identification<'a> {
+             comments,
+         };
+ 
++        debug_assert!(next.is_empty());
+         Ok(Completion::Complete(Decoded {
+             value: out,
+-            next: next.as_bytes(),
++            next: &bytes[line_end..],
+         }))
+     }
+ }
+@@ -747,3 +754,31 @@ pub const MAX_PACKET_LEN: u32 = 64 * 1024;
+ ///
+ /// See <https://www.rfc-editor.org/rfc/rfc4253#section-4.2>.
+ pub const PROTOCOL: &str = "2.0";
++
++#[cfg(test)]
++mod identification_tests {
++    use super::*;
++
++    #[test]
++    fn binary_data_may_follow_the_identification_line() {
++        let mut bytes = b"SSH-2.0-OpenSSH_10.6 comment\r\n".to_vec();
++        bytes.extend_from_slice(&[0, 0, 4, 12, 0xff, 0xfe, 0x80]);
++        let Ok(Completion::Complete(decoded)) = Identification::decode(&bytes) else {
++            panic!("identification with trailing packet bytes was not decoded");
++        };
++        assert_eq!(decoded.value.software, "OpenSSH_10.6");
++        assert_eq!(decoded.value.comments, "comment");
++        assert_eq!(decoded.next, [0, 0, 4, 12, 0xff, 0xfe, 0x80]);
++    }
++
++    #[test]
++    fn partial_and_invalid_lines_are_still_handled() {
++        assert!(matches!(
++            Identification::decode(b"SSH-2.0-op"),
++            Ok(Completion::Incomplete(_))
++        ));
++        assert!(Identification::decode(b"SSH-2.0-\xff\xfe\r\n").is_err());
++        assert!(Identification::decode(&[b'a'; 300]).is_err());
++        assert!(Identification::decode(b"HTTP/1.1 200\r\n").is_err());
++    }
++}
 diff --git a/oxish-proto/src/named.rs b/oxish-proto/src/named.rs
 index 52049383ee18401b27b0fa6dad077133fcaaba69..f50805ba99ef34cd18b2c293851bbe23f33a1685 100644
 --- a/oxish-proto/src/named.rs
@@ -384,3 +478,29 @@ index 52049383ee18401b27b0fa6dad077133fcaaba69..f50805ba99ef34cd18b2c293851bbe23
              Self::Unknown(name) => name,
          }
      }
+diff --git a/oxish-proto/src/oxish.service b/oxish-proto/src/oxish.service
+deleted file mode 100644
+index 404ab2c1d13c1538bc107d35283068a64d1daead..0000000000000000000000000000000000000000
+--- a/oxish-proto/src/oxish.service
++++ /dev/null
+@@ -1,20 +0,0 @@
+-[Unit]
+-Description=OxiSH SSH server
+-After=network.target nss-user-lookup.target auditd.service
+-ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
+-
+-[Service]
+-ExecStartPre=/usr/sbin/sshd -t
+-ExecStart=/usr/sbin/sshd -D $SSHD_OPTS
+-ExecReload=/usr/sbin/sshd -t
+-ExecReload=/bin/kill -HUP $MAINPID
+-KillMode=process
+-Restart=on-failure
+-RestartPreventExitStatus=255
+-Type=notify
+-RuntimeDirectory=sshd
+-RuntimeDirectoryMode=0755
+-
+-[Install]
+-WantedBy=multi-user.target
+-Alias=sshd.service

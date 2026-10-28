@@ -1,7 +1,5 @@
 use core::time::Duration;
 
-#[cfg(debug_assertions)]
-use proto::SessionHostKey;
 use proto::{
     Disconnect, GlobalRequest, MessageType, Pretty,
     auth::KeyOptions,
@@ -10,12 +8,10 @@ use proto::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    time::{Instant, sleep},
+    time::{Instant, sleep, timeout},
 };
 use tracing::{debug, info, instrument, trace, warn};
 
-#[cfg(debug_assertions)]
-use crate::KeyExchangeOutput;
 use crate::{Connection, Error, GitPolicy, receive};
 
 mod connections;
@@ -36,30 +32,6 @@ pub struct Session<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
-    #[cfg(debug_assertions)]
-    pub(crate) fn new(
-        kx: KeyExchangeOutput<'_>,
-        conn: Connection<T>,
-        provider: &'static dyn CryptoProvider,
-        options: KeyOptions,
-        policy: GitPolicy,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            provider,
-            conn,
-            kx: RekeyState::new(
-                kx.session_id,
-                kx.strict_kx,
-                kx.identities,
-                SessionHostKey::from_server(kx.host_key, provider)?,
-            ),
-            post_quantum_kx: kx.post_quantum_kx,
-            channels: Channels::default(),
-            options,
-            policy,
-        })
-    }
-
     /// Run the session, driving the connection forward and handling channel messages
     ///
     /// This function never returns unless the connection is closed or an error occurs.
@@ -70,13 +42,27 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
         result
     }
 
+    /// Flush buffered output, giving up on a peer that stops reading
+    async fn flush(&mut self) -> Result<(), Error> {
+        match timeout(WRITE_TIMEOUT, self.conn.flush()).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut))),
+        }
+    }
+
     async fn serve(&mut self) -> Result<(), Error> {
         let idle = sleep(IDLE_TIMEOUT);
         tokio::pin!(idle);
+        let mut last_activity = Instant::now();
         loop {
+            let allowed = match self.channels.busy() {
+                true => BUSY_TIMEOUT,
+                false => IDLE_TIMEOUT,
+            };
+            idle.as_mut().reset(last_activity + allowed);
             tokio::select! {
                 result = receive(&mut self.conn.stream, &mut self.conn.read) => {
-                    idle.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
+                    last_activity = Instant::now();
                     let packet = result?;
                     let kx = packet.message_type == MessageType::KeyExchangeInit
                         || self.kx.in_progress();
@@ -99,7 +85,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                                 self.post_quantum_kx = post_quantum_kx;
                                 debug!("completed client-initiated rekey");
                             }
-                            self.conn.flush().await?;
+                            self.flush().await?;
                             continue;
                         }
                         MessageType::GlobalRequest => {
@@ -107,7 +93,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                             debug!(name = %String::from_utf8_lossy(request.name), "refusing unsupported global request");
                             if request.want_reply {
                                 self.conn.write.encode(&MessageType::RequestFailure)?;
-                                self.conn.flush().await?;
+                                self.flush().await?;
                             }
                             continue;
                         }
@@ -132,14 +118,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                         IncomingChannelMessage::Close(close) => self.channels.close(&close, &mut self.conn.write),
                     }?;
 
-                    self.conn.flush().await?;
+                    self.flush().await?;
                 }
                 result = ChannelsFuture::new(&mut self.channels, &mut self.conn.write), if !self.kx.in_progress() => {
-                    idle.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
+                    last_activity = Instant::now();
                     result?;
-                    self.conn.flush().await?;
+                    self.flush().await?;
                 }
-                () = &mut idle, if !self.channels.busy() => {
+                () = &mut idle => {
                     info!("closing idle connection");
                     return Ok(());
                 }
@@ -150,3 +136,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
 
 /// How long a connection with no running command may stay silent
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a connection with a running command may stay silent in both directions
+const BUSY_TIMEOUT: Duration = Duration::from_secs(3600);
+/// How long buffered output may wait for a peer that is not reading
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);

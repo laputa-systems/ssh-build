@@ -534,7 +534,7 @@ impl Channel {
             _ => true,
         };
 
-        if self.credit == 0 || (self.credit < INITIAL_WINDOW_SIZE / 4 && !drained) {
+        if self.close_sent || self.credit == 0 || (self.credit < INITIAL_WINDOW_SIZE / 4 && !drained) {
             return Ok(false);
         }
 
