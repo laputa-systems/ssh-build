@@ -32,24 +32,67 @@ non-static directories and ZIPs over the sizes in `release-budgets.json`.
 and sftp/scp transfers against a loopback system `sshd` with throwaway keys,
 plus `exec` against the vendored OxiSH server.
 
-## OxiSH interop
+## OxiSH Git server (experimental)
 
-`vendor/oxish` is OxiSH pinned in `sources.lock.json`, built with the
-Graviola crypto provider only. It adds two things for Git hosting:
+A separate, optional distribution: `oxish-<triple>.zip` holds `bin/oxish-server` and
+`bin/oxish-session` for macOS arm64 and static-PIE musl Linux (x86_64, aarch64). It is a
+Rust SSH server whose only job is `git-upload-pack` and `git-receive-pack`, with Graviola as its
+only cryptography. It is not a general SSH server: no shell, no PTY, no SFTP, no forwarding,
+no agent or X11, no password authentication, no forced commands. It does not include Git; it
+runs the `git`, `git-upload-pack` and `git-receive-pack` of a [git-build] install that you point
+it at, and never looks them up on `PATH` or takes a program from a client.
 
-- `chacha20-poly1305@openssh.com` packet encryption using OpenSSH's own
-  construction (two ChaCha20 keys, Poly1305 over length plus payload), so the
-  no-libcrypto client can negotiate it.
-- Non-PTY `exec` with stdin/stdout/stderr forwarding and exit-status
-  propagation, restricted to `git-upload-pack` and `git-receive-pack`
-  (or an authorized key's forced command).
+[git-build]: https://github.com/laputa-systems/git-build
 
 ```sh
-sh test/oxish-chacha-interop.sh   # handshake with only chacha negotiated
-sh test/oxish-exec.sh             # git clone over exec, non-Git rejection
+oxish-server --generate-host-key host_key          # refuses to overwrite; rotate by adding a second key
+oxish-server --port 2222 \
+    --host-key-file host_key \
+    --repo-root /srv/git \
+    --git-dir ~/.local/share/git/current \
+    --authorized-keys authorized_keys
 ```
 
-OxiSH is not qualified as a public Git server.
+Run it as a dedicated unprivileged account (it refuses root). It binds `127.0.0.1` unless you
+pass `--bind`; it can also take a socket from `LISTEN_FDS`, so an existing supervisor or socket
+activation works. There is no service unit, no firewall change, and no key installation.
+
+`authorized_keys` uses OpenSSH syntax with one required option per key: `git-access="read"`
+(clone and fetch) or `git-access="write"` (also push). Any other option, a missing option, a
+duplicate, or a bad line stops the server at startup. The file, its directory, and each host key
+must be owned by the server user and not writable by others (host keys: mode 0600).
+
+Clients name repositories relative to `--repo-root` (`git@host:team/app.git` or
+`ssh://git@host/team/app.git`). Names are plain words, at most 8 components; `..`, hidden
+components, symlinks, and anything that is not a bare repository are refused, and the repository
+is opened by its canonical path under the root. Repositories are trusted code (their config and
+hooks run as the server user); keep `--repo-root` and `--git-dir` writable only by that user.
+Git protocol v2 is supported (`GIT_PROTOCOL=version=2` is the only value accepted); v0 still
+works.
+
+Limits: 32 unauthenticated connections, 32 authenticated sessions (`max-sessions` in `--config`),
+8 channels and 4 commands per connection, 30 s to key exchange, 60 s to authenticate, 5 min idle
+with no running command, 1 MiB of buffered input per channel.
+
+Hardware: Graviola needs x86-64 Broadwell-class cores (AES-NI, PCLMULQDQ, BMI1, ADX, AVX2) or
+aarch64 with NEON, AES, PMULL and SHA2. Both executables check this at startup and exit with a
+message instead of crashing later.
+
+Security status: **experimental**, not reviewed for production. See `SECURITY.md`.
+
+```sh
+make oxish-macos                                    # dist/oxish-macos/bin
+make oxish-linux DOCKER_PLATFORM=linux/arm64        # dist/oxish-linux-aarch64/bin
+sh scripts/package-oxish.sh                         # server ZIPs into dist/release
+SSH_BIN_DIR=dist/macos/bin OXISH_BIN_DIR=dist/oxish-macos/bin sh test/e2e-git.sh
+sh scripts/check-crypto-graph.sh                    # Graviola is the only provider
+sh scripts/vendor-oxish.sh verify                   # vendor tree == pinned upstream + patches
+sh scripts/vendor-graviola.sh verify
+```
+
+`test/e2e-git.sh` uses only this repository's `ssh`, the server under test, and the pinned
+git-build prerelease (`git-build.lock.json`, downloaded read-only and checksum-verified); it never
+falls back to the system `ssh` or `git`.
 
 ## Upgrading OpenSSH
 
