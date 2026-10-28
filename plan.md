@@ -52,10 +52,13 @@ Server extension:
   (Rust's bundled start files); fixed by linking with Alpine's gcc/musl.
 - S17 packaging: accepted locally (`sh scripts/package-oxish.sh`; one
   consolidated, verified `SHA256SUMS`). Nothing published.
-- S18 security review: see `SECURITY.md`; status stays experimental.
+- S18 security review: see `SECURITY.md`; status stays experimental. Fuzz
+  targets now also cover the authorized_keys parser and the Git policy; all
+  server crates forbid unsafe code; the Linux arm64 server builds
+  bit-for-bit reproducibly.
 - S19: `dl oxish` done (opt-in); final cleanup and report open.
 
-Next: longer fuzzing, external review, release workflow (owner decisions).
+Next: external review, continuous fuzzing, release workflow (owner decisions).
 Launch prompt: `Run the next open slice of plan.md in /Users/josh/d/ssh-build;
 brief per orchestrate, land green only, steer after each accept.`
 

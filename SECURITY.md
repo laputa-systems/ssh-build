@@ -64,7 +64,8 @@ also scans `Cargo.lock` and rejects primitive crates). The SSH packet constructi
 patched, checksum-pinned Graviola (`patches/graviola`), not in a second hand-written ChaCha20 or
 Poly1305. It is checked against 440 packets sealed by OpenSSH's own `chachapoly_crypt`, every
 single-bit modification of a packet and tag, sequence-number binding, and the per-key nonce limit;
-two libFuzzer targets ran 40 s each without a finding. The patch is not yet reviewed by Graviola's
+libFuzzer ran the open and round-trip targets for 4 minutes each (14.7 M and 8.1 M executions)
+without a finding. The patch is not yet reviewed by Graviola's
 maintainers.
 
 ## Known limitations and accepted risks
@@ -79,13 +80,24 @@ maintainers.
   before a nonce could repeat.
 - Hooks and Git config in repositories are trusted code. A push cannot change them, but anyone
   who can write the repository directory on disk can run code as the server user.
-- `fuzz/` targets cover packet decoding and the chacha construction only; the channel layer and
-  Git policy are covered by tests, not fuzzing.
+- Fuzzing covers packet decoding (6.4 M executions in 4 minutes), the chacha construction, the
+  authorized_keys line parser (12 M in 2 minutes), and the Git command policy (5.8 M in 2
+  minutes, asserting the program and repository stay inside the trusted directories). The channel
+  state machine is covered by tests, not fuzzing.
+- No sanitizer run: the server crates contain no `unsafe` (`#![forbid(unsafe_code)]`); all
+  `unsafe` is in Graviola, which is upstream's to test. An AddressSanitizer build on macOS arm64
+  failed to link under the local toolchain.
 
 ## Blockers before calling it production-ready
 
 1. External review of the server and of the Graviola patch.
-2. Longer fuzzing, including the channel state machine and the authorized-keys parser, in CI.
-3. A deployment guide for supervision, log handling, and key rotation procedures, tested on a
-   real host.
+2. Continuous fuzzing, including the channel state machine, in CI.
+3. A deployment guide for supervision, log handling, and key rotation, tested on a real host.
 4. Release workflow and signed releases; nothing has been published.
+
+## Evidence
+
+- The end-to-end suite (`test/e2e-git.sh`, 19 checks) passed on macOS arm64, on Linux arm64 and,
+  on a native host with BMI1/AVX2, on Linux x86-64; on an emulated x86-64 CPU without BMI1/AVX2 the
+  server refuses to start with a clear message.
+- Two clean `--no-cache` builds of the Linux arm64 server are bit-for-bit identical.
