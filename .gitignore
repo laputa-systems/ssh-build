@@ -1,0 +1,6 @@
+.work/
+dist/
+/src/
+out/
+zipcheck/
+stage/

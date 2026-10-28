@@ -74,6 +74,9 @@ jobs:
           sh scripts/install-jaq.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
+
       - name: Set up Docker Buildx
         if: matrix.kind == 'linux'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

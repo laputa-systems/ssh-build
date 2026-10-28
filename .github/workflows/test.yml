@@ -34,6 +34,9 @@ jobs:
         run: |
           sh scripts/install-jaq.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
       - name: Vendored sources match their pins and patches
         run: |
           sh scripts/vendor-oxish.sh verify

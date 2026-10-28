@@ -109,7 +109,8 @@ maintainers.
 1. External review of the server and of the Graviola patch.
 2. Continuous fuzzing, including the channel state machine, in CI.
 3. A deployment guide for supervision, log handling, and key rotation, tested on a real host.
-4. Release workflow and signed releases; nothing has been published.
+4. A first run of `release.yml` on GitHub (the workflow is written and checked locally but has
+   never run), and signed releases; nothing has been published.
 
 ## Evidence
 

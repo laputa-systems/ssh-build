@@ -78,3 +78,25 @@ Both are `Apache-2.0 OR MIT` or `Apache-2.0 OR ISC OR MIT-0` (SPDX headers and `
   own `chachapoly_crypt`; `sh scripts/gen-chachapoly-vectors.sh` regenerates them from the pinned
   OpenSSH build (`make macos` first).
 - Fuzz targets live in `vendor/oxish/fuzz` (`cargo fuzz run <target>`).
+
+## CI and releases
+
+`.github/workflows/lint.yml` (`make lint`: script syntax, the crypto-graph self-test, and
+`scripts/audit-release.sh`) and `test.yml` (vendor and crypto-graph checks plus the server tests on
+macOS arm64 and Linux arm64/x86-64) run on pull requests and pushes to `master`. Those tests skip
+the hybrid post-quantum handshake when the runner's `ssh` cannot offer it; `test/e2e-git.sh` in the
+release job requires it.
+
+`release.yml` is a manual dispatch that refuses non-default branches. Each of three native jobs
+builds the client and the server, packages its target with `ONLY_TARGET=<triple>`, unpacks the ZIPs,
+and runs `test/runtime.sh` and `test/e2e-git.sh` on those bytes. The release job then requires
+exactly the twelve expected assets, every manifest to name `GITHUB_SHA` with `build_dirty=false`,
+fully static and hardened Linux ELFs, and a verified consolidated `SHA256SUMS`, and only then
+creates the tag `release-<sha>` through the API and a pre-release with `--verify-tag`. Actions are
+pinned to the SHAs approved in repomod's `actions.toml`; `scripts/install-jaq.sh` installs the pinned
+`jaq` the scripts need. `sh scripts/audit-release.sh` checks the workflow's contract locally;
+`repomod lint` still reports the release workflow as unrecognized because the C and Rust sources are
+vendored or fetched rather than at the repository root.
+
+The workflows were checked with actionlint, and the release job's publish-side steps were run on
+Ubuntu against real ZIPs. The full workflow has not run on GitHub.
