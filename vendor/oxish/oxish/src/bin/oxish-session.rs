@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf};
 
 use anyhow::Context as _;
-use oxish::{DEFAULT_PROVIDER, GitPolicy, resume};
+use oxish::{DEFAULT_PROVIDER, GitPolicy, require_supported_cpu, resume};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -11,6 +11,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    require_supported_cpu()?;
     let mut args = env::args_os().skip(1);
     let (Some(repo_root), Some(git_dir), None) = (args.next(), args.next(), args.next()) else {
         anyhow::bail!("usage: oxish-session <repository-root> <git-directory>");

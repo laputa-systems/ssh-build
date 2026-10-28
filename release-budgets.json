@@ -1,5 +1,30 @@
 {
-  "aarch64-apple-darwin": { "measured_zip_bytes": 1364855, "max_zip_bytes": 1500000 },
-  "x86_64-unknown-linux-musl": { "measured_zip_bytes": 1898024, "max_zip_bytes": 2100000 },
-  "aarch64-unknown-linux-musl": { "measured_zip_bytes": 1904733, "max_zip_bytes": 2100000 }
+  "ssh": {
+    "aarch64-apple-darwin": {
+      "measured_zip_bytes": 1364855,
+      "max_zip_bytes": 1500000
+    },
+    "x86_64-unknown-linux-musl": {
+      "measured_zip_bytes": 1898024,
+      "max_zip_bytes": 2100000
+    },
+    "aarch64-unknown-linux-musl": {
+      "measured_zip_bytes": 1904733,
+      "max_zip_bytes": 2100000
+    }
+  },
+  "oxish": {
+    "aarch64-apple-darwin": {
+      "measured_zip_bytes": 1972868,
+      "max_zip_bytes": 2200000
+    },
+    "x86_64-unknown-linux-musl": {
+      "measured_zip_bytes": 2403537,
+      "max_zip_bytes": 2650000
+    },
+    "aarch64-unknown-linux-musl": {
+      "measured_zip_bytes": 2269246,
+      "max_zip_bytes": 2500000
+    }
+  }
 }

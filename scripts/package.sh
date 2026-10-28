@@ -35,7 +35,7 @@ macos_toolchain=$("$(xcrun --sdk macosx --find clang)" --version | sed -n '1p')
 
 mkdir -p "$out_dir"
 out_dir=$(CDPATH= cd -- "$out_dir" && pwd -P)
-rm -f "$out_dir"/ssh-*.zip "$out_dir"/ssh-*.manifest "$out_dir"/SHA256SUMS
+rm -f "$out_dir"/ssh-*.zip "$out_dir"/ssh-*.manifest
 
 package_target() {
     triple=$1
@@ -67,7 +67,7 @@ package_target() {
     (cd "$bin_dir" && zip -y -X -q "$out_dir/$zip_name" ssh ssh-keygen ssh-agent ssh-add sftp scp)
 
     zip_bytes=$(wc -c < "$out_dir/$zip_name" | tr -d ' ')
-    budget=$(jaq -r --arg t "$triple" '.[$t].max_zip_bytes' "$budgets")
+    budget=$(jaq -r --arg t "$triple" '.ssh[$t].max_zip_bytes' "$budgets")
     test -n "$budget" && [ "$budget" != null ] || { echo "package: no budget for $triple" >&2; exit 1; }
     if [ "$zip_bytes" -gt "$budget" ]; then
         echo "package: $zip_name is $zip_bytes bytes, over the $budget byte budget" >&2
@@ -89,8 +89,6 @@ package_target aarch64-apple-darwin dist/macos/bin "arm64" "$macos_toolchain"
 package_target x86_64-unknown-linux-musl dist/linux-x86_64/bin "x86-64" "$linux_toolchain"
 package_target aarch64-unknown-linux-musl dist/linux-aarch64/bin "ARM aarch64" "$linux_toolchain"
 
-(cd "$out_dir" && shasum -a 256 ssh-*.zip ssh-*.manifest | sort -k 2 > SHA256SUMS.tmp)
-mv "$out_dir/SHA256SUMS.tmp" "$out_dir/SHA256SUMS"
-(cd "$out_dir" && shasum -a 256 -c SHA256SUMS)
+sh "$script_dir/write-sums.sh" "$out_dir"
 
 echo "Packaged 3 ZIPs and manifests in $out_dir"

@@ -9,6 +9,7 @@ test -n "$OPENSSH_VERSION"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 
+export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}
 sh "$script_dir/fetch-sources.sh" >/dev/null
 src_dir=$root_dir/.work/sources/openssh-${OPENSSH_VERSION}
 build_dir=$root_dir/.work/build-macos

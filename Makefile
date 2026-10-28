@@ -5,7 +5,7 @@ MACOS_DIST ?= dist/macos/bin
 LINUX_ARCH = $(if $(findstring arm64,$(DOCKER_PLATFORM)),aarch64,x86_64)
 LINUX_DIST ?= dist/linux-$(LINUX_ARCH)/bin
 
-.PHONY: macos linux
+.PHONY: macos linux oxish-macos oxish-linux
 
 macos:
 	@set -eu; \
@@ -29,3 +29,21 @@ linux:
 			.; \
 		test -x "$(LINUX_DIST)/ssh"; \
 		echo "wrote $(LINUX_DIST)"
+
+OXISH_LINUX_DIST ?= dist/oxish-linux-$(LINUX_ARCH)/bin
+
+oxish-macos:
+	@sh scripts/build-oxish-macos.sh
+
+oxish-linux:
+	@set -eu; \
+		mkdir -p "$(OXISH_LINUX_DIST)"; \
+		docker buildx build \
+			--platform=$(DOCKER_PLATFORM) \
+			--progress=plain \
+			--file=Dockerfile.oxish \
+			--target=artifacts \
+			--output=type=local,dest=$(OXISH_LINUX_DIST) \
+			.; \
+		test -x "$(OXISH_LINUX_DIST)/oxish-server"; \
+		echo "wrote $(OXISH_LINUX_DIST)"

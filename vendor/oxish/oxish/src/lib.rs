@@ -23,6 +23,10 @@ use tracing::{debug, trace, warn};
 /// The only cryptography provider: Graviola
 pub use graviola::DEFAULT_PROVIDER;
 
+mod cpu;
+pub use cpu::{MissingCpuFeature, require_supported_cpu};
+mod host_keys;
+pub use host_keys::load_host_keys;
 mod git;
 pub use git::{GitAccess, GitCommand, GitPolicy, GitService, PolicyError, validate_protocol};
 mod authentication;

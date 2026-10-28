@@ -314,6 +314,22 @@ index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..30da28c2767ada231574552ce8a762d8
  /// The `SSH_MSG_CHANNEL_WINDOW_ADJUST` message
  ///
  /// See <https://www.rfc-editor.org/rfc/rfc4254#section-5.2>.
+diff --git a/oxish-proto/src/host_keys.rs b/oxish-proto/src/host_keys.rs
+index ee5f8758753bb060f8fd2ce06a1b8b18da9cbe05..abc4efe734e499b0d1bfbf6155baf481cdb9b37f 100644
+--- a/oxish-proto/src/host_keys.rs
++++ b/oxish-proto/src/host_keys.rs
+@@ -154,6 +154,11 @@ pub struct OpenSshKeyV1 {
+ }
+ 
+ impl OpenSshKeyV1 {
++    /// The contained private keys as PKCS#8 documents
++    pub fn pkcs8_keys(&self) -> impl Iterator<Item = Zeroizing<Vec<u8>>> + '_ {
++        self.keys.iter().map(SshPrivateKey::to_pkcs8)
++    }
++
+     /// Create an OpenSSH-format private key file holding the given keys
+     ///
+     /// Returns `None` if `keys` is empty, as the format requires at least one key.
 diff --git a/oxish-proto/src/named.rs b/oxish-proto/src/named.rs
 index 52049383ee18401b27b0fa6dad077133fcaaba69..f50805ba99ef34cd18b2c293851bbe23f33a1685 100644
 --- a/oxish-proto/src/named.rs

@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.18@sha256:dabfc0969b935b2080555ace70ee69a5261af8a8f1b4df97b9e7fbcf6722eddf
+
+# Static-PIE musl build of the Graviola-only OxiSH Git server. The Rust toolchain is the nightly
+# pinned in rust-toolchain.toml, installed by a checksum-pinned rustup-init.
+
+FROM scratch AS rustup-arm64
+ADD --checksum=sha256:7fdbb23acf6495efee2e371580c52b365917551b4835090a225c44ac30915235 \
+    https://static.rust-lang.org/rustup/archive/1.29.2/aarch64-unknown-linux-musl/rustup-init /rustup-init
+
+FROM scratch AS rustup-amd64
+ADD --checksum=sha256:2ba97d668c06dc4b1884f2a3fa6f4cf14b9bd0c1db379af7e4f87a705ff19edd \
+    https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-musl/rustup-init /rustup-init
+
+FROM rustup-${TARGETARCH} AS rustup
+
+FROM alpine:latest@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS build
+
+RUN apk add --no-cache \
+        binutils=2.45.1-r1 \
+        gcc=15.2.0-r5 \
+        musl-dev=1.2.6-r3 \
+        ca-certificates=20261020-r0 \
+        ca-certificates-bundle=20260611-r0 \
+        file
+
+RUN case "$(apk --print-arch)" in \
+        aarch64|x86_64) ;; \
+        *) echo "unsupported Alpine architecture: $(apk --print-arch)" >&2; exit 1 ;; \
+    esac
+
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
+COPY --from=rustup --chmod=0755 /rustup-init /usr/local/bin/rustup-init
+COPY rust-toolchain.toml /src/rust-toolchain.toml
+WORKDIR /src
+RUN rustup-init -y --no-modify-path --profile minimal --default-toolchain none \
+    && rustup show active-toolchain \
+    && rustc -V
+
+COPY vendor/oxish /src/vendor/oxish
+COPY vendor/graviola /src/vendor/graviola
+
+# An explicit --target keeps these flags off build scripts and proc macros, which must stay dynamic.
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=pic -C link-arg=-static-pie"
+RUN triple="$(uname -m)-unknown-linux-musl" \
+    && cargo build --locked --release --target "$triple" --manifest-path vendor/oxish/Cargo.toml -p oxish --bins \
+    && mkdir /out \
+    && cp "vendor/oxish/target/$triple/release/oxish-server" "vendor/oxish/target/$triple/release/oxish-session" /out/ \
+    && rustc -vV > /out/rustc-version.txt
+
+COPY scripts/qualify-binaries.sh /tmp/qualify-binaries.sh
+
+RUN QUALIFY_BINS="oxish-server oxish-session" sh /tmp/qualify-binaries.sh /out \
+    && rm /tmp/qualify-binaries.sh
+
+FROM scratch AS artifacts
+
+COPY --from=build /out/ /

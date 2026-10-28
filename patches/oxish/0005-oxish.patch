@@ -498,7 +498,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..83cbff9d767a392de83b41a96174aa42
      fn parse_fake_keys() {
          fake_key(&PublicKeyAlgorithm::EcdsaSha2Nistp256, DEFAULT_PROVIDER).unwrap();
 diff --git a/oxish/src/bin/oxish-server.rs b/oxish/src/bin/oxish-server.rs
-index 858a38b98838c22b0e471c65185fa9f9d3d338d6..9e9bbe978fe514bcca4c81a3362dab6facf5278b 100644
+index 858a38b98838c22b0e471c65185fa9f9d3d338d6..ef164739b50899f600e9698b4cd7e025a027e2bf 100644
 --- a/oxish/src/bin/oxish-server.rs
 +++ b/oxish/src/bin/oxish-server.rs
 @@ -1,4 +1,4 @@
@@ -512,22 +512,35 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..9e9bbe978fe514bcca4c81a3362dab6f
  #[cfg(target_os = "linux")]
  use listenfd::ListenFd;
 -use oxish::{Config, DEFAULT_PROVIDER, DefaultStore, Server};
-+use oxish::{Account, Config, DEFAULT_PROVIDER, GitPolicy, Server, Username};
++use oxish::{Account, Config, DEFAULT_PROVIDER, GitPolicy, Server, Username, load_host_keys, require_supported_cpu};
  use proto::{
      HostKeys, OpenSshKeyV1, SshPrivateKey,
      named::{Named, PublicKeyAlgorithm},
-@@ -65,6 +65,10 @@ async fn main() -> anyhow::Result<()> {
+@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
+         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+         .init();
+ 
++    require_supported_cpu()?;
+     let provider = DEFAULT_PROVIDER;
+     let args = Args::parse();
+ 
+@@ -65,10 +66,11 @@ async fn main() -> anyhow::Result<()> {
          };
      }
  
+-    let host_keys = match HostKeys::from_files(args.host_key_file.into_iter(), provider) {
+-        Ok(host_keys) => host_keys,
+-        Err(e) => anyhow::bail!("{e} (try RUST_LOG=warn for more information)"),
+-    };
 +    anyhow::ensure!(
 +        !args.host_key_file.is_empty(),
 +        "at least one --host-key-file is required (create one with --generate-host-key)"
 +    );
-     let host_keys = match HostKeys::from_files(args.host_key_file.into_iter(), provider) {
-         Ok(host_keys) => host_keys,
-         Err(e) => anyhow::bail!("{e} (try RUST_LOG=warn for more information)"),
-@@ -92,20 +96,14 @@ async fn main() -> anyhow::Result<()> {
++    let host_keys = load_host_keys(&args.host_key_file, provider)?;
+     info!(len = host_keys.len(), "loaded host keys");
+ 
+     let session_bin = match args.session_bin {
+@@ -92,20 +94,14 @@ async fn main() -> anyhow::Result<()> {
              listener.set_nonblocking(true)?;
              TcpListener::from_std(listener)?
          }
@@ -550,7 +563,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..9e9bbe978fe514bcca4c81a3362dab6f
          None => anyhow::bail!("--port is required"),
      };
  
-@@ -124,28 +122,39 @@ async fn main() -> anyhow::Result<()> {
+@@ -124,28 +120,39 @@ async fn main() -> anyhow::Result<()> {
          config.spawn = args.spawn;
      }
  
@@ -598,7 +611,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..9e9bbe978fe514bcca4c81a3362dab6f
      #[clap(long)]
      generate_host_key: Option<PathBuf>,
      #[clap(long, value_parser = host_key_type, default_value = "ssh-ed25519")]
-@@ -153,6 +162,18 @@ struct Args {
+@@ -153,6 +160,18 @@ struct Args {
      /// Path to the `oxish-session` binary (defaults to a sibling of this executable)
      #[clap(long)]
      session_bin: Option<PathBuf>,
@@ -617,7 +630,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..9e9bbe978fe514bcca4c81a3362dab6f
      #[cfg(debug_assertions)]
      #[clap(long, action = ArgAction::Set, default_value_t = true)]
      spawn: bool,
-@@ -164,8 +185,3 @@ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
+@@ -164,8 +183,3 @@ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
          algorithm => Ok(algorithm.to_owned()),
      }
  }
@@ -627,7 +640,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..9e9bbe978fe514bcca4c81a3362dab6f
 -    "/etc/ssh/ssh_host_ecdsa_key",
 -];
 diff --git a/oxish/src/bin/oxish-session.rs b/oxish/src/bin/oxish-session.rs
-index e603b4c80214d514cb869901db47b30862ef241e..251c58624748deb1fab90a4f210ca2d9da83275d 100644
+index e603b4c80214d514cb869901db47b30862ef241e..68568f0f86f7a79d2c8678cda7f7d6e3170ae63d 100644
 --- a/oxish/src/bin/oxish-session.rs
 +++ b/oxish/src/bin/oxish-session.rs
 @@ -1,4 +1,7 @@
@@ -635,15 +648,16 @@ index e603b4c80214d514cb869901db47b30862ef241e..251c58624748deb1fab90a4f210ca2d9
 +use std::{env, path::PathBuf};
 +
 +use anyhow::Context as _;
-+use oxish::{DEFAULT_PROVIDER, GitPolicy, resume};
++use oxish::{DEFAULT_PROVIDER, GitPolicy, require_supported_cpu, resume};
  
  #[tokio::main(flavor = "current_thread")]
  async fn main() -> anyhow::Result<()> {
-@@ -8,5 +11,12 @@ async fn main() -> anyhow::Result<()> {
+@@ -8,5 +11,13 @@ async fn main() -> anyhow::Result<()> {
          .with_writer(std::io::stderr)
          .init();
  
 -    Ok(resume(DEFAULT_PROVIDER)?.run().await?)
++    require_supported_cpu()?;
 +    let mut args = env::args_os().skip(1);
 +    let (Some(repo_root), Some(git_dir), None) = (args.next(), args.next(), args.next()) else {
 +        anyhow::bail!("usage: oxish-session <repository-root> <git-directory>");
@@ -653,6 +667,77 @@ index e603b4c80214d514cb869901db47b30862ef241e..251c58624748deb1fab90a4f210ca2d9
 +        .context("invalid git policy")?;
 +    Ok(resume(DEFAULT_PROVIDER, policy)?.run().await?)
  }
+diff --git a/oxish/src/cpu.rs b/oxish/src/cpu.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb55526409382b11d01de53fb19a5c23ba10d70b
+--- /dev/null
++++ b/oxish/src/cpu.rs
+@@ -0,0 +1,65 @@
++//! CPU feature floor required by Graviola
++//!
++//! Graviola asserts its required features on first use; checking up front turns an unsupported
++//! machine into a clear startup error instead of an abort in the middle of a handshake.
++
++use core::fmt;
++
++/// A CPU feature Graviola needs that this machine lacks
++#[derive(Debug)]
++pub struct MissingCpuFeature(pub &'static str);
++
++impl fmt::Display for MissingCpuFeature {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(
++            f,
++            "this CPU lacks `{}`, which Graviola requires (x86-64 needs a Broadwell-class core: \
++             AES-NI, PCLMULQDQ, BMI1, ADX, AVX2; aarch64 needs NEON with the AES, PMULL and SHA2 \
++             extensions)",
++            self.0
++        )
++    }
++}
++
++impl core::error::Error for MissingCpuFeature {}
++
++/// Fail unless the CPU has every feature Graviola requires
++pub fn require_supported_cpu() -> Result<(), MissingCpuFeature> {
++    #[cfg(target_arch = "x86_64")]
++    {
++        let features = [
++            ("aes", is_x86_feature_detected!("aes")),
++            ("pclmulqdq", is_x86_feature_detected!("pclmulqdq")),
++            ("bmi1", is_x86_feature_detected!("bmi1")),
++            ("adx", is_x86_feature_detected!("adx")),
++            ("avx", is_x86_feature_detected!("avx")),
++            ("avx2", is_x86_feature_detected!("avx2")),
++        ];
++        if let Some((name, _)) = features.iter().find(|(_, present)| !present) {
++            return Err(MissingCpuFeature(name));
++        }
++    }
++
++    #[cfg(target_arch = "aarch64")]
++    {
++        let features = [
++            ("neon", std::arch::is_aarch64_feature_detected!("neon")),
++            ("aes", std::arch::is_aarch64_feature_detected!("aes")),
++            ("pmull", std::arch::is_aarch64_feature_detected!("pmull")),
++            ("sha2", std::arch::is_aarch64_feature_detected!("sha2")),
++        ];
++        if let Some((name, _)) = features.iter().find(|(_, present)| !present) {
++            return Err(MissingCpuFeature(name));
++        }
++    }
++
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn the_test_machine_meets_the_floor() {
++        super::require_supported_cpu().unwrap();
++    }
++}
 diff --git a/oxish/src/git.rs b/oxish/src/git.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..c5f8a93a8ff6f0e68d5ab8d9b1e3c7c7eb942cde
@@ -1218,11 +1303,128 @@ index 0000000000000000000000000000000000000000..c5f8a93a8ff6f0e68d5ab8d9b1e3c7c7
 +        assert!(GitPolicy::new(f.policy.repo_root(), &evil).is_err());
 +    }
 +}
+diff --git a/oxish/src/host_keys.rs b/oxish/src/host_keys.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b307dba03913a22103407245c54e6b854694368
+--- /dev/null
++++ b/oxish/src/host_keys.rs
+@@ -0,0 +1,111 @@
++//! Strict host key loading
++//!
++//! The upstream loader skips unreadable or malformed key files with a warning, which would let a
++//! server quietly come up with a different identity than the operator configured. This loader
++//! fails on the first problem instead.
++
++use core::str::FromStr as _;
++use std::{
++    fs::OpenOptions,
++    io::Read as _,
++    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
++    path::Path,
++};
++
++use anyhow::Context as _;
++use proto::{HostKeys, OpenSshKeyV1, SshPrivateKey, crypto::CryptoProvider};
++use zeroize::Zeroizing;
++
++/// Largest host key file accepted, in bytes
++const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
++
++/// Load every configured host key, requiring private, owned, regular files
++///
++/// Each file must be owned by the server user, readable by nobody else, and not a symlink. Any
++/// unreadable or malformed file is an error, so the served identity is always the configured one.
++pub fn load_host_keys<P: AsRef<Path>>(
++    paths: &[P],
++    provider: &dyn CryptoProvider,
++) -> anyhow::Result<HostKeys> {
++    anyhow::ensure!(!paths.is_empty(), "no host key files configured");
++
++    let euid = rustix::process::geteuid().as_raw();
++    let mut keys = Vec::new();
++    for path in paths {
++        let path = path.as_ref();
++        let mut file = OpenOptions::new()
++            .read(true)
++            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
++            .open(path)
++            .with_context(|| format!("failed to open host key `{}`", path.display()))?;
++        let meta = file.metadata()?;
++        anyhow::ensure!(meta.is_file(), "host key `{}` is not a regular file", path.display());
++        anyhow::ensure!(
++            meta.uid() == euid && meta.mode() & 0o077 == 0,
++            "host key `{}` must be owned by the server user and not accessible by others (mode 0600)",
++            path.display()
++        );
++        anyhow::ensure!(meta.len() <= MAX_KEY_FILE_BYTES, "host key `{}` is too large", path.display());
++
++        let mut pem = Zeroizing::new(String::new());
++        file.read_to_string(&mut pem)
++            .with_context(|| format!("failed to read host key `{}`", path.display()))?;
++        let openssh = OpenSshKeyV1::from_str(&pem)
++            .map_err(|error| anyhow::anyhow!("host key `{}` is invalid: {error}", path.display()))?;
++        keys.extend(openssh.pkcs8_keys());
++    }
++
++    HostKeys::new(keys.into_iter(), provider).map_err(|error| anyhow::anyhow!("host keys rejected: {error}"))
++}
++
++#[cfg(test)]
++mod tests {
++    use std::{
++        fs,
++        os::unix::fs::{PermissionsExt as _, symlink},
++    };
++
++    use proto::{named::PublicKeyAlgorithm, pem_encode};
++
++    use super::*;
++    use crate::DEFAULT_PROVIDER;
++
++    fn write_key(dir: &Path, name: &str, mode: u32) -> std::path::PathBuf {
++        let (key, pkcs8) = DEFAULT_PROVIDER.generate_signing_key(&PublicKeyAlgorithm::Ed25519).unwrap();
++        let pkcs8 = Zeroizing::new(pkcs8);
++        let private = SshPrivateKey::from_pkcs8(&pkcs8, &*key).unwrap();
++        let pem = pem_encode(
++            "OPENSSH PRIVATE KEY",
++            &OpenSshKeyV1::new([private]).unwrap().to_bytes(DEFAULT_PROVIDER).unwrap(),
++        );
++        let path = dir.join(name);
++        fs::write(&path, pem).unwrap();
++        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
++        path
++    }
++
++    #[test]
++    fn private_files_load_and_everything_else_is_an_error() {
++        let dir = tempfile::tempdir().unwrap();
++        let good = write_key(dir.path(), "good", 0o600);
++        let second = write_key(dir.path(), "second", 0o400);
++        assert_eq!(load_host_keys(&[&good, &second], DEFAULT_PROVIDER).unwrap().len(), 2);
++
++        let readable = write_key(dir.path(), "readable", 0o644);
++        assert!(load_host_keys(&[&readable], DEFAULT_PROVIDER).is_err());
++        let group = write_key(dir.path(), "group", 0o640);
++        assert!(load_host_keys(&[&group], DEFAULT_PROVIDER).is_err());
++
++        let link = dir.path().join("link");
++        symlink(&good, &link).unwrap();
++        assert!(load_host_keys(&[&link], DEFAULT_PROVIDER).is_err());
++
++        let junk = dir.path().join("junk");
++        fs::write(&junk, "not a key").unwrap();
++        fs::set_permissions(&junk, fs::Permissions::from_mode(0o600)).unwrap();
++        assert!(load_host_keys(&[&junk], DEFAULT_PROVIDER).is_err());
++
++        assert!(load_host_keys(&[&good, &dir.path().join("missing")], DEFAULT_PROVIDER).is_err());
++        assert!(load_host_keys::<&Path>(&[], DEFAULT_PROVIDER).is_err());
++    }
++}
 diff --git a/oxish/src/lib.rs b/oxish/src/lib.rs
-index af3a4a7fdb54654311788861d9f8d8e68df8668b..a12c6d127294c9954f7767d53d6510da700ae703 100644
+index af3a4a7fdb54654311788861d9f8d8e68df8668b..4eb0ef90f4796e3085068827cc602ad0d8a239b3 100644
 --- a/oxish/src/lib.rs
 +++ b/oxish/src/lib.rs
-@@ -20,32 +20,20 @@ use thiserror::Error;
+@@ -20,32 +20,24 @@ use thiserror::Error;
  use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
  use tracing::{debug, trace, warn};
  
@@ -1244,6 +1446,10 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..a12c6d127294c9954f7767d53d6510da
 -))]
 -compile_error!("no crypto providers enabled -- enable at least one to fix this error");
  
++mod cpu;
++pub use cpu::{MissingCpuFeature, require_supported_cpu};
++mod host_keys;
++pub use host_keys::load_host_keys;
 +mod git;
 +pub use git::{GitAccess, GitCommand, GitPolicy, GitService, PolicyError, validate_protocol};
  mod authentication;

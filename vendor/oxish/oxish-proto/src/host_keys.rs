@@ -154,6 +154,11 @@ pub struct OpenSshKeyV1 {
 }
 
 impl OpenSshKeyV1 {
+    /// The contained private keys as PKCS#8 documents
+    pub fn pkcs8_keys(&self) -> impl Iterator<Item = Zeroizing<Vec<u8>>> + '_ {
+        self.keys.iter().map(SshPrivateKey::to_pkcs8)
+    }
+
     /// Create an OpenSSH-format private key file holding the given keys
     ///
     /// Returns `None` if `keys` is empty, as the format requires at least one key.

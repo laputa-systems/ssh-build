@@ -3,13 +3,13 @@
 #   sh scripts/qualify-binaries.sh <bindir> [macos|linux]
 # Fails closed; no weakened checks. On Linux uses readelf/nm, on macOS
 # otool/codesign. EXPECT_ARCH overrides the arch assertion.
-set -eu
+set -u
 
 dir=${1:?usage: qualify-binaries.sh <bindir>}
 flavour=${2:-$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/')}
 arch=${EXPECT_ARCH:-$(uname -m)}
 
-bins="ssh ssh-keygen ssh-agent ssh-add sftp scp"
+bins=${QUALIFY_BINS:-"ssh ssh-keygen ssh-agent ssh-add sftp scp"}
 fails=0
 
 chk() {
@@ -26,6 +26,9 @@ for b in $bins; do
     test -x "$f" || { echo "FAIL: $f missing or not executable" >&2; fails=$((fails + 1)); continue; }
 
     case $b in
+        oxish-*)
+            ! LC_ALL=C grep -aqiE 'aws-lc|aws_lc|openssl|boringssl|libressl' "$f"; chk $? "$b: no other crypto provider named in the bytes"
+            ;;
         sftp|scp)
             ! LC_ALL=C grep -aqE '/bin/ssh($|[^-a-z])' "$f"; chk $? "$b: finds ssh through PATH, no absolute path"
             ;;
@@ -41,9 +44,13 @@ for b in $bins; do
         echo "$file_out" | grep -q "$arch"; chk $? "$b: arch $arch"
         otool -hv "$f" | grep -q "PIE"; chk $? "$b: PIE"
         codesign -v "$f" 2>/dev/null; chk $? "$b: valid signature"
+        minos=$(otool -l "$f" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
+        floor=${MACOS_FLOOR:-14.0}
+        [ -n "$minos" ] && [ "$(printf '%s\n%s\n' "$minos" "$floor" | sort -V | tail -n 1)" = "$floor" ]; chk $? "$b: deployment target $minos within the documented floor $floor"
     else
         interp=$(readelf -l "$f" 2>/dev/null | grep -c "INTERP" || true)
         [ "$interp" -eq 0 ]; chk $? "$b: static, no PT_INTERP"
+        readelf -h "$f" 2>/dev/null | grep -q "Type:.*DYN"; chk $? "$b: position independent (static-pie)"
         needed=$(readelf -d "$f" 2>/dev/null | grep -c "NEEDED" || true)
         [ "$needed" -eq 0 ]; chk $? "$b: static, no DT_NEEDED"
         undef=$(nm -D "$f" 2>/dev/null | grep -ci "evp\|RSA_\|EC_KEY\|BN_new\|libcrypto\|libssl" || true)

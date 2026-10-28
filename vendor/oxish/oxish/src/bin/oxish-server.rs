@@ -16,7 +16,7 @@ use clap::ArgAction;
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use listenfd::ListenFd;
-use oxish::{Account, Config, DEFAULT_PROVIDER, GitPolicy, Server, Username};
+use oxish::{Account, Config, DEFAULT_PROVIDER, GitPolicy, Server, Username, load_host_keys, require_supported_cpu};
 use proto::{
     HostKeys, OpenSshKeyV1, SshPrivateKey,
     named::{Named, PublicKeyAlgorithm},
@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    require_supported_cpu()?;
     let provider = DEFAULT_PROVIDER;
     let args = Args::parse();
 
@@ -69,10 +70,7 @@ async fn main() -> anyhow::Result<()> {
         !args.host_key_file.is_empty(),
         "at least one --host-key-file is required (create one with --generate-host-key)"
     );
-    let host_keys = match HostKeys::from_files(args.host_key_file.into_iter(), provider) {
-        Ok(host_keys) => host_keys,
-        Err(e) => anyhow::bail!("{e} (try RUST_LOG=warn for more information)"),
-    };
+    let host_keys = load_host_keys(&args.host_key_file, provider)?;
     info!(len = host_keys.len(), "loaded host keys");
 
     let session_bin = match args.session_bin {
