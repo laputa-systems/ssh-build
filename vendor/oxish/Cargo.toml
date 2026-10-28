@@ -1,0 +1,53 @@
+[workspace]
+members = ["oxish", "oxish-aws-lc", "oxish-graviola", "oxish-proto"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1.0.95"
+aws-lc-rs = { version = "1.12", features = ["prebuilt-nasm"] }
+bitflags = "2"
+clap = { version = "4.5.24", features = ["derive"] }
+data-encoding = "2.10"
+graviola = "0.4"
+libc = "0.2"
+listenfd = "1.0.2"
+serde = { version = "1", features = ["derive"] }
+sha1 = "0.11"
+sha2 = "0.11"
+tempfile = "3.27"
+thiserror = "2.0.9"
+tokio = { version = "1.42", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rustix = { version = "1", features = ["termios", "pty", "process", "fs", "net", "stdio"] }
+zeroize = "1"
+
+[workspace.lints.rust]
+elided_lifetimes_in_paths = "warn"
+trivial_numeric_casts = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage,coverage_nightly)"] }
+unnameable_types = "warn"
+unreachable_pub = "warn"
+unused_extern_crates = "warn"
+unused_import_braces = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+alloc_instead_of_core = "warn"
+cloned_instead_of_copied = "warn"
+manual_let_else = "warn"
+or_fun_call = "warn"
+std_instead_of_core = "warn"
+undocumented_unsafe_blocks = "warn"
+upper_case_acronyms = "warn"
+use_self = "warn"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
