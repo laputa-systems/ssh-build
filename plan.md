@@ -5,9 +5,10 @@
 Goal: OpenSSH 10.6p1 client without libcrypto (ssh, ssh-keygen, ssh-agent,
 ssh-add, sftp, scp) for macOS arm64 + static musl Linux (x86_64, aarch64),
 plus OxiSH/Graviola chacha20-poly1305@openssh.com + non-PTY exec for Git.
-Base: uncommitted `plan.md` only, branch `master`, tree otherwise empty.
-Accepted: none yet (preflight). Red: none on the integration branch.
-Next: S0. Resume: pick the next open item in **Sequence**, brief per the
+Base: `5ec429f` (S0+S4), branch `master`, tree clean.
+Accepted: S0, S4 (interop proven with system ssh; re-run vs S1 client in S3).
+Red: none on the integration branch.
+Next: S1 (macOS client), then S2+S5 in parallel. Resume: pick the next open item in **Sequence**, brief per the
 orchestrate run-a-slice contract, steer after each accept.
 Launch prompt: `Run the next open slice of plan.md in /Users/josh/d/ssh-build;
 brief per orchestrate, land green only, steer after each accept.`
