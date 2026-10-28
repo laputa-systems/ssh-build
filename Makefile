@@ -24,7 +24,7 @@ linux:
 			--build-arg=OPENSSH_VERSION=$(OPENSSH_VERSION) \
 			--build-arg=OPENSSH_SHA256=$$(sed -n 's/^OPENSSH_SHA256=//p' scripts/fetch-sources.sh) \
 			--target=artifacts \
-			--output=type=local,dest=dist/linux \
+			--output=type=local,dest=$(LINUX_DIST) \
 			.; \
 		test -x "$(LINUX_DIST)/ssh"; \
 		echo "wrote $(LINUX_DIST)"
