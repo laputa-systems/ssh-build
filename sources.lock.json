@@ -1,0 +1,22 @@
+{
+  "openssh": {
+    "version": "10.6p1",
+    "tarball": "openssh-10.6p1.tar.gz",
+    "urls": [
+      "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p1.tar.gz",
+      "https://ftp.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p1.tar.gz"
+    ],
+    "sha256": "a9dc9565dffe8640f64d863cd29a32bc4a3dbdec0566a7fc44c5d6ee767d5f39",
+    "note": "hex SHA-256 verified identical from both mirrors at preflight; release notes at https://www.openssh.com/releasenotes.html"
+  },
+  "oxish": {
+    "repo": "https://github.com/djc/oxish",
+    "rev": "d81b20b7ea494b6aa4cadea179699adbae9bb374",
+    "note": "pinned main rev at preflight; provides oxish-proto, oxish-graviola, oxish server"
+  },
+  "graviola": {
+    "version": "0.4.1",
+    "checksum": "e8596c4fa98466aae2fcf4c72a665bc0e021c0aaab1e47d82044d3dc3e309a76",
+    "note": "crates.io checksum as locked in OxiSH Cargo.lock; OxiSH workspace requires graviola 0.4"
+  }
+}
