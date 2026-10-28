@@ -253,7 +253,6 @@ impl Channels {
             })?;
         }
 
-        // The client is no longer listening: kill the command; dropping it reaps it.
         debug!(channel_id = %close.recipient_channel, "received channel close from client; removing");
         self.channels.remove(&close.recipient_channel);
         Ok(())
@@ -389,7 +388,6 @@ impl Channel {
             return Ok(wrote);
         };
 
-        // Output: alternate stdout and stderr so neither starves the other, bounded per call.
         for _ in 0..MAX_PACKETS_PER_POLL {
             if self.send_window == 0 {
                 break;
@@ -457,7 +455,6 @@ impl Channel {
             wrote = true;
         }
 
-        // Learn of the exit without waiting for the pipes: a grandchild can hold them open.
         if active.outcome.is_none() {
             if let Some(process) = active.process.as_mut() {
                 match process.poll_exit(cx) {
@@ -489,7 +486,6 @@ impl Channel {
         let outputs_done = active.stderr_backlog.is_empty()
             && active.process.as_ref().is_none_or(GitProcess::outputs_closed);
 
-        // EOF only after both pipes hit end of file and everything was forwarded.
         if outputs_done && !active.eof_sent && active.outcome.is_some() {
             write.encode(&ChannelEof {
                 recipient_channel: self.remote_id,

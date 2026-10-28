@@ -54,7 +54,6 @@ fuzz_target!(|data: &[u8]| {
             continue;
         };
 
-        // Whatever the input, the program is one of ours and the repository is under the root.
         assert!(command.program.starts_with(&fixture.bin));
         let repository = Path::new(command.args.last().unwrap());
         assert!(repository.starts_with(&fixture.root));

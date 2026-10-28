@@ -31,7 +31,6 @@ expected_version=$(sed -n 's/^OPENSSH_VERSION=//p' scripts/fetch-sources.sh)
 test "$("$ssh" -V 2>&1)" = "OpenSSH_${expected_version}, without OpenSSL"
 echo "ok: version $expected_version"
 
-# Key generation: Ed25519 plain + encrypted, pubkey derivation.
 "$keygen" -q -t ed25519 -N "" -f "$work/id_plain"
 "$keygen" -y -f "$work/id_plain" | grep -q "^ssh-ed25519 "
 echo "ok: ed25519 keygen + pubkey"
@@ -64,15 +63,12 @@ chmod 600 "$work/ssh_config"
 "$ssh" -F "$work/ssh_config" -G rt-alias | grep -qi "^identityfile $abs_work/id_plain"
 echo "ok: ssh_config parsing"
 
-# Agent: add plain key, list shows it; locked-by-passphrase key needs -P via stdin is
-# intentionally untested here (no TTY); agent forwarding untouched.
 eval "$("$agent" -s)" >/dev/null
 trap '$add -k >/dev/null 2>&1 || true; kill $SSH_AGENT_PID 2>/dev/null || true' EXIT
 "$add" -q "$work/id_plain"
 "$add" -l | grep -q "ED25519"
 echo "ok: ssh-agent add + list"
 
-# Loopback server: system sshd (test-only fixture, never shipped).
 sshd_bin=$(command -v sshd || true)
 [ -z "$sshd_bin" ] && sshd_bin=/usr/sbin/sshd
 test -x "$sshd_bin" || { echo "FAIL: no sshd fixture available" >&2; exit 1; }
@@ -118,8 +114,6 @@ printf 'get %s %s\n' "$abs_work/remote/payload.bin" "$work/back-sftp.bin" | "$sf
 cmp "$work/payload.bin" "$work/back-sftp.bin"
 echo "ok: sftp + scp round-trips byte-exact"
 
-# Exec: real git-upload-pack bytes, exit status, and rejection of non-Git
-# commands, all through THIS client binary against the vendored OxiSH server.
 OXISH_TEST_SSH="$abs_work_ssh" CARGO_TARGET_DIR="$PWD/.work/target-oxish" cargo test \
     --manifest-path vendor/oxish/Cargo.toml -p oxish exec_ > "$work/exec.log" 2>&1 \
     || { tail -n 30 "$work/exec.log" >&2; echo "FAIL: loopback exec" >&2; exit 1; }

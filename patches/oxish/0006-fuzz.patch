@@ -901,10 +901,10 @@ index a1f389e044467224dab9fbcf1778ebcb6b59edaf..6cf3df27697ed1ad0d367458d57bde34
 +bench = false
 diff --git a/fuzz/fuzz_targets/authorized_key.rs b/fuzz/fuzz_targets/authorized_key.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6eab5a10d18e0251bd1a66849310e6bc1f333b5a
+index 0000000000000000000000000000000000000000..7d6e1227b5aa12e3ca456d6385fad1f8a523f28a
 --- /dev/null
 +++ b/fuzz/fuzz_targets/authorized_key.rs
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,15 @@
 +#![no_main]
 +
 +use libfuzzer_sys::fuzz_target;
@@ -915,8 +915,6 @@ index 0000000000000000000000000000000000000000..6eab5a10d18e0251bd1a66849310e6bc
 +        return;
 +    };
 +
-+    // Any line either parses into a key or is refused; it must never panic, and a parsed
-+    // line must not carry more than one git-access value.
 +    if let Some(key) = AuthorizedKey::from_str(line, provider::DEFAULT_PROVIDER) {
 +        let _ = key.options.git_access;
 +        assert!(key.same_key(&key));
@@ -924,10 +922,10 @@ index 0000000000000000000000000000000000000000..6eab5a10d18e0251bd1a66849310e6bc
 +});
 diff --git a/fuzz/fuzz_targets/git_command.rs b/fuzz/fuzz_targets/git_command.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d36f16278e794dc8d1eca63c4c5d4f14084adf6f
+index 0000000000000000000000000000000000000000..da7f6e26f1070c74f10f8f1ce345b30b97ce1b61
 --- /dev/null
 +++ b/fuzz/fuzz_targets/git_command.rs
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,64 @@
 +#![no_main]
 +
 +use std::{
@@ -984,7 +982,6 @@ index 0000000000000000000000000000000000000000..d36f16278e794dc8d1eca63c4c5d4f14
 +            continue;
 +        };
 +
-+        // Whatever the input, the program is one of ours and the repository is under the root.
 +        assert!(command.program.starts_with(&fixture.bin));
 +        let repository = Path::new(command.args.last().unwrap());
 +        assert!(repository.starts_with(&fixture.root));
@@ -995,10 +992,10 @@ index 0000000000000000000000000000000000000000..d36f16278e794dc8d1eca63c4c5d4f14
 +});
 diff --git a/fuzz/fuzz_targets/ssh_chacha_open.rs b/fuzz/fuzz_targets/ssh_chacha_open.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b4d01c496943588454b5aaba7a683702ff7e17ea
+index 0000000000000000000000000000000000000000..eae9b867d633da56e40d59408031e73aee37632d
 --- /dev/null
 +++ b/fuzz/fuzz_targets/ssh_chacha_open.rs
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,42 @@
 +#![no_main]
 +
 +use libfuzzer_sys::fuzz_target;
@@ -1025,7 +1022,6 @@ index 0000000000000000000000000000000000000000..b4d01c496943588454b5aaba7a683702
 +    let mut opener = provider::DEFAULT_PROVIDER.opening_key(0, &source).unwrap();
 +    let mut opened = packet.to_vec();
 +    if opener.open_in_place(seq, &mut opened, tag).is_err() {
-+        // Authentication failed: the packet must be untouched, never partly decrypted.
 +        let mut again = packet.to_vec();
 +        let _ = provider::DEFAULT_PROVIDER
 +            .opening_key(0, &source)
@@ -1035,7 +1031,6 @@ index 0000000000000000000000000000000000000000..b4d01c496943588454b5aaba7a683702
 +        return;
 +    }
 +
-+    // An authentic packet must seal back to exactly what was received.
 +    let mut sealer = provider::DEFAULT_PROVIDER.sealing_key(0, &source).unwrap();
 +    let mut resealed = opened.clone();
 +    let mut new_tag = [0u8; 16];

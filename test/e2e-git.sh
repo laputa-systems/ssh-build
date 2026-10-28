@@ -2,11 +2,6 @@
 # End-to-end qualification of the OxiSH Git server on released-style bytes.
 #
 #   SSH_BIN_DIR=dist/macos/bin OXISH_BIN_DIR=dist/oxish-macos/bin sh test/e2e-git.sh
-#
-# Uses only: the OpenSSH client from SSH_BIN_DIR, the server from OXISH_BIN_DIR, and the git-build
-# binaries from GIT_BUILD_DIR (default: the pinned prerelease, downloaded and checksum-verified).
-# Never falls back to the system ssh or git. Throwaway keys, temporary repository root, loopback,
-# ephemeral port, pinned host key (StrictHostKeyChecking=yes throughout).
 set -eu
 
 : "${SSH_BIN_DIR:?set SSH_BIN_DIR to the directory with the built ssh and ssh-keygen}"
@@ -54,7 +49,6 @@ version=$("$git_dir/git" --version)
 echo "git: $version ($git_dir)"
 echo "ssh: $("$ssh_dir/ssh" -V 2>&1)"
 
-# Keys: a pushing client, a fetch-only client, an unauthorized client, a decoy host key.
 for name in rw ro stranger; do
     "$ssh_dir/ssh-keygen" -q -t ed25519 -N "" -C "e2e-$name" -f "$work/keys/$name"
 done
@@ -100,7 +94,6 @@ ssh_opts() {
 }
 # shellcheck disable=SC2086
 rssh() { key=$1; shift; $(ssh_opts "$key") -p "$port" git@127.0.0.1 "$@"; }
-# The product git as the client, with this repository's ssh and a closed environment.
 g() {
     key=$1
     shift
@@ -108,14 +101,12 @@ g() {
         GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$(ssh_opts "$key")" ${TRACE:+GIT_TRACE_PACKET="$TRACE"} \
         "$git_dir/git" "$@"
 }
-# Local repository setup with the product git and a PATH that resolves its helpers first.
 lg() {
     env -i HOME="$work/home" PATH="$git_dir:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
         "$git_dir/git" "$@"
 }
 url() { echo "ssh://git@127.0.0.1:$port/$1"; }
 
-# --- Seed: product git creates a bare repository, a push over SSH fills it.
 lg init -q --bare -b main "$work/repos/a.git"
 lg init -q --bare -b main "$work/repos/big.git"
 seed=$work/seed
@@ -131,7 +122,6 @@ g rw -C "$seed" push -q "$(url big.git)" main
 seed_sha=$(g rw -C "$seed" rev-parse HEAD)
 ok "push of branches, tags and a 24 MB pack through the server"
 
-# --- Negotiation: Ed25519 auth, hybrid post-quantum KEX, explicit cipher, via the client's own log.
 $(ssh_opts rw) -v -p "$port" -o KexAlgorithms=mlkem768x25519-sha256 -o Ciphers=chacha20-poly1305@openssh.com \
     git@127.0.0.1 "git-upload-pack 'a.git'" < /dev/null > /dev/null 2> "$work/negotiation.log" || true
 grep -q 'kex: algorithm: mlkem768x25519-sha256' "$work/negotiation.log" || fail "hybrid post-quantum key exchange was not negotiated"
@@ -140,7 +130,6 @@ grep -q 'Authenticated to 127.0.0.1.*publickey\|Authentication succeeded (public
 grep -q 'host key.*ssh-ed25519' "$work/negotiation.log" || fail "host key was not ssh-ed25519"
 ok "ed25519 auth, mlkem768x25519-sha256 kex, chacha20-poly1305@openssh.com cipher"
 
-# --- Protocol v2 is really negotiated (packet trace), and v0 still works.
 rm -f "$work/trace-v2.txt" "$work/trace-v0.txt"
 TRACE=$work/trace-v2.txt g ro -c protocol.version=2 clone -q "$(url a.git)" "$work/clients/v2"
 grep -q '< version 2' "$work/trace-v2.txt" || fail "protocol v2 was requested but the server did not answer with version 2"
@@ -156,7 +145,6 @@ g ro ls-remote "$(url a.git)" > "$work/lsremote.txt"
 grep -q 'refs/tags/v1' "$work/lsremote.txt" && grep -q 'refs/heads/main' "$work/lsremote.txt"
 ok "ls-remote lists branches and tags; fsck is clean"
 
-# --- Fetch and push round trip with a new commit and a new branch.
 printf 'second\n' > "$seed/second.txt"
 g rw -C "$seed" add second.txt
 g rw -C "$seed" -c user.name=e2e -c user.email=e2e@example.invalid commit -q -m second
@@ -167,7 +155,6 @@ g ro -C "$work/clients/v2" fetch -q origin
 g ro -C "$work/clients/v2" rev-parse origin/feature >/dev/null
 ok "fetch sees pushed commits and branches"
 
-# --- Failed commands: meaningful stderr and nonzero exit status.
 must_fail "push with a fetch-only key" g ro -C "$work/clients/v2" push "$(url a.git)" main:ro-attempt
 grep -q 'access denied' "$work/last.err" || fail "denied push did not say why"
 ok "denied push explains itself on stderr"
@@ -186,7 +173,6 @@ must_fail "non-fast-forward push" g rw -C "$work/clients/diverge" push origin HE
 grep -q 'rejected\|non-fast-forward\|fetch first' "$work/last.err" || fail "rejected push gave no diagnostic"
 ok "rejected push relays git's diagnostic and exit status"
 
-# --- Negative cases.
 ls "$work/repos" > "$work/repos.before"
 mkdir -p "$work/outside"
 lg init -q --bare "$work/outside/escape.git"
@@ -238,7 +224,6 @@ kill -0 "$server_pid" || fail "the server died on malformed input"
 g ro ls-remote "$(url a.git)" > /dev/null
 ok "malformed packets dropped; server still serves"
 
-# --- Disconnect during an active transfer leaves no child process or temporary state behind.
 pack_objects_before=$(pgrep -f 'pack-objects' | wc -l | tr -d ' ')
 mkfifo "$work/sink"
 sleep 30 < "$work/sink" &

@@ -24,7 +24,7 @@ index aa1cd85cf95f5198c12b7c12302b7fcff449e7f8..1b25c9e013146253bc437695bc51b354
  serde = { workspace = true }
  thiserror = { workspace = true }
 diff --git a/oxish/src/authentication.rs b/oxish/src/authentication.rs
-index 405574e23aa021bed75a5aacbeea82a32e6d8e58..54ad1e1c320ebaea38f6994bdaab065b04c06c18 100644
+index 405574e23aa021bed75a5aacbeea82a32e6d8e58..63407e342f490141d7278342452b4b26ebca84df 100644
 --- a/oxish/src/authentication.rs
 +++ b/oxish/src/authentication.rs
 @@ -1,5 +1,7 @@
@@ -202,7 +202,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..54ad1e1c320ebaea38f6994bdaab065b
                      service_name: user_auth_request.service_name,
                      algorithm: public_key.algorithm,
                      public_key: public_key.key_blob,
-@@ -249,27 +231,23 @@ impl AuthenticationState {
+@@ -249,27 +231,21 @@ impl AuthenticationState {
                      Err(error) => {
                          debug!(%error, "failed to encode signature");
                          send_auth_failed(write)?;
@@ -218,8 +218,6 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..54ad1e1c320ebaea38f6994bdaab065b
 -                            return Err(ProtoError::Unreachable("must have cached user").into());
 -                        };
 -                        info!(user = %user.data.name, "authentication successful");
-+                    // The fake key only equalizes timing; a signature that verifies against it must
-+                    // never log anyone in.
 +                    Ok(Ok(())) if genuine => {
 +                        info!(user = %account.name, "authentication successful");
  
@@ -237,7 +235,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..54ad1e1c320ebaea38f6994bdaab065b
                      }
                  }
              }
-@@ -315,79 +293,96 @@ fn send_auth_failed(write: &mut WriteState) -> Result<(), ProtoError> {
+@@ -315,79 +291,96 @@ fn send_auth_failed(write: &mut WriteState) -> Result<(), ProtoError> {
      })
  }
  
@@ -402,7 +400,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..54ad1e1c320ebaea38f6994bdaab065b
  }
  
  /// A validated username
-@@ -396,29 +391,11 @@ pub struct User {
+@@ -396,29 +389,11 @@ pub struct User {
  #[derive(Clone, Debug, PartialEq, Eq)]
  pub struct Username(String);
  
@@ -433,7 +431,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..54ad1e1c320ebaea38f6994bdaab065b
              true => Err(Error::InvalidUsername),
              false => Ok(Self(value)),
          }
-@@ -450,12 +427,165 @@ pub enum AuthError {
+@@ -450,12 +425,162 @@ pub enum AuthError {
      TooManyAttempts,
  }
  
@@ -570,16 +568,13 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..54ad1e1c320ebaea38f6994bdaab065b
 +        let genuine = signed_by(&*signing, b"session-1", "git", &blob).unwrap();
 +        assert!(verifies(&key, &genuine, b"session-1", "git", &blob));
 +
-+        // Replayed on another session or for another user: the signed data differs.
 +        assert!(!verifies(&key, &genuine, b"session-2", "git", &blob));
 +        assert!(!verifies(&key, &genuine, b"session-1", "root", &blob));
 +
-+        // A different key's signature over the same data.
 +        let (other, _, _) = key_pair();
 +        let forged = signed_by(&*other, b"session-1", "git", &blob).unwrap();
 +        assert!(!verifies(&key, &forged, b"session-1", "git", &blob));
 +
-+        // Flipped bits and truncation.
 +        for index in 0..genuine.len() {
 +            let mut tampered = genuine.clone();
 +            tampered[index] ^= 0x01;
@@ -600,7 +595,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..54ad1e1c320ebaea38f6994bdaab065b
      #[test]
      fn parse_fake_keys() {
 diff --git a/oxish/src/bin/oxish-server.rs b/oxish/src/bin/oxish-server.rs
-index 858a38b98838c22b0e471c65185fa9f9d3d338d6..e1c6ea0a69be6f1727cb4a3bc4768de708622e56 100644
+index 858a38b98838c22b0e471c65185fa9f9d3d338d6..f5a3e8b31c1284c8f522d76e7ffff6451020f721 100644
 --- a/oxish/src/bin/oxish-server.rs
 +++ b/oxish/src/bin/oxish-server.rs
 @@ -1,4 +1,6 @@
@@ -681,7 +676,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..e1c6ea0a69be6f1727cb4a3bc4768de7
          Some(path) => {
              let s = fs::read_to_string(path)
                  .with_context(|| format!("failed to read config file `{}`", path.display()))?;
-@@ -119,33 +114,40 @@ async fn main() -> anyhow::Result<()> {
+@@ -119,43 +114,61 @@ async fn main() -> anyhow::Result<()> {
          }
          None => Config::default(),
      };
@@ -724,17 +719,19 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..e1c6ea0a69be6f1727cb4a3bc4768de7
 +    /// Address to listen on; loopback unless you deliberately choose otherwise
 +    #[clap(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
 +    bind: IpAddr,
++    /// TOML file with `max-sessions`, `max-unauthenticated-per-ip` and `max-sessions-per-ip`
      #[clap(short, long)]
      config: Option<PathBuf>,
 -    #[clap(long, default_values = DEFAULT_HOST_KEY_FILES)]
-+    /// Host key file; repeat to serve several keys (add a new one here to rotate)
++    /// Host key file; repeat to serve several keys (the first of each algorithm is presented)
 +    #[clap(long)]
      host_key_file: Vec<PathBuf>,
 +    /// Create a new host key at this path and exit; never overwrites a file
      #[clap(long)]
      generate_host_key: Option<PathBuf>,
++    /// Algorithm for a key made with --generate-host-key
      #[clap(long, value_parser = host_key_type, default_value = "ssh-ed25519")]
-@@ -153,9 +155,18 @@ struct Args {
+     host_key_type: PublicKeyAlgorithm<'static>,
      /// Path to the `oxish-session` binary (defaults to a sibling of this executable)
      #[clap(long)]
      session_bin: Option<PathBuf>,
@@ -756,7 +753,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..e1c6ea0a69be6f1727cb4a3bc4768de7
  }
  
  fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
-@@ -164,8 +175,3 @@ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
+@@ -164,8 +177,3 @@ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
          algorithm => Ok(algorithm.to_owned()),
      }
  }
@@ -868,10 +865,10 @@ index 0000000000000000000000000000000000000000..eb55526409382b11d01de53fb19a5c23
 +}
 diff --git a/oxish/src/git.rs b/oxish/src/git.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..08f84ad84ffe25476271fc26be3b372c2f9d4660
+index 0000000000000000000000000000000000000000..115c7d51785690dac774ff0c5efbbddbf0cf9c69
 --- /dev/null
 +++ b/oxish/src/git.rs
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,598 @@
 +//! Git-only command policy
 +//!
 +//! Turns the command string of an SSH `exec` request into a fixed argument vector for one of
@@ -1067,8 +1064,6 @@ index 0000000000000000000000000000000000000000..08f84ad84ffe25476271fc26be3b372c
 +            if !meta.file_type().is_dir() {
 +                return Err(PolicyError::NotFound);
 +            }
-+            // A directory inside a repository is not a repository: refs named like
-+            // `x/HEAD`, `x/objects/y`, `x/refs/z` would otherwise fake one.
 +            if index + 1 < components.len() && looks_like_repository(&path) {
 +                return Err(PolicyError::NotFound);
 +            }
@@ -1929,7 +1924,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..1fb4b29953f5ba0158e24d804c8678ab
 +    }
  }
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..ea3b8c3410a8ca5ae6c6fc56ef407e5e03be56fc 100644
+index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42db008d20 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
 @@ -1,38 +1,54 @@
@@ -2302,7 +2297,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..ea3b8c3410a8ca5ae6c6fc56ef407e5e
          if !channel.close_sent {
              channel.close_sent = true;
              write.encode(&ChannelClose {
-@@ -250,272 +253,351 @@ impl Channels {
+@@ -250,272 +253,347 @@ impl Channels {
              })?;
          }
  
@@ -2334,7 +2329,6 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..ea3b8c3410a8ca5ae6c6fc56ef407e5e
 -            }
 -        }
 -
-+        // The client is no longer listening: kill the command; dropping it reaps it.
 +        debug!(channel_id = %close.recipient_channel, "received channel close from client; removing");
 +        self.channels.remove(&close.recipient_channel);
          Ok(())
@@ -2474,7 +2468,6 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..ea3b8c3410a8ca5ae6c6fc56ef407e5e
 +            return Ok(wrote);
 +        };
 +
-+        // Output: alternate stdout and stderr so neither starves the other, bounded per call.
 +        for _ in 0..MAX_PACKETS_PER_POLL {
 +            if self.send_window == 0 {
 +                break;
@@ -2542,7 +2535,6 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..ea3b8c3410a8ca5ae6c6fc56ef407e5e
 +            wrote = true;
 +        }
 +
-+        // Learn of the exit without waiting for the pipes: a grandchild can hold them open.
 +        if active.outcome.is_none() {
 +            if let Some(process) = active.process.as_mut() {
 +                match process.poll_exit(cx) {
@@ -2574,7 +2566,6 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..ea3b8c3410a8ca5ae6c6fc56ef407e5e
 +        let outputs_done = active.stderr_backlog.is_empty()
 +            && active.process.as_ref().is_none_or(GitProcess::outputs_closed);
 +
-+        // EOF only after both pipes hit end of file and everything was forwarded.
 +        if outputs_done && !active.eof_sent && active.outcome.is_some() {
 +            write.encode(&ChannelEof {
 +                recipient_channel: self.remote_id,
@@ -2903,7 +2894,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..ea3b8c3410a8ca5ae6c6fc56ef407e5e
      }
  }
  
-@@ -567,7 +649,17 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
+@@ -567,7 +645,17 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
      }
  }
  
@@ -3209,7 +3200,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc
 +/// How long buffered output may wait for a peer that is not reading
 +const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e786a52fe2f 100644
+index 151147cfbfaf967cbbea73dbd209ff50a17105cd..42591422c81fe9e6b8816f537130f31eada4c3df 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
 @@ -1,20 +1,17 @@
@@ -3258,7 +3249,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e78
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -92,41 +82,299 @@ async fn openssh_keygen_agrees() {
+@@ -92,41 +82,298 @@ async fn openssh_keygen_agrees() {
      }
  }
  
@@ -3507,7 +3498,6 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e78
 +        let mut child_stdin = child.stdin.take().unwrap();
 +        let input = stdin.to_vec();
 +        let writer = tokio::spawn(async move {
-+            // The command can exit before reading its input
 +            match child_stdin.write_all(&input).await {
 +                Ok(()) => {}
 +                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
@@ -3585,7 +3575,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e78
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -134,323 +382,613 @@ async fn handshake_ed25519_graviola() {
+@@ -134,323 +381,610 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -3761,7 +3751,6 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e78
 -            server,
 -        )
 +async fn channel_half_close_still_delivers_later_output() {
-+    // The command reads until the client's EOF, keeps running, and only then answers.
 +    let world = script_world("PATH=/usr/bin:/bin; wc -c | tr -d ' '; sleep 1; echo after-eof").await;
 +    world.bare_repo("a.git").await.unwrap();
 +    let (client, _guard) = world
@@ -3855,8 +3844,6 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e78
 -    let client = CliClient::new(addr, &key_dir.path().join("key"));
 +#[tokio::test]
 +async fn channel_large_stdin_reaches_a_slow_reader_while_output_flows() {
-+    // The command emits output and sleeps before reading, so its stdin pipe fills; the server
-+    // must keep forwarding output and must not stall on the unread input.
 +    let world = script_world(
 +        "PATH=/usr/bin:/bin; head -c 2000000 /dev/zero | tr '\\0' 'x'; sleep 2; wc -c | tr -d ' '",
 +    )
@@ -4479,7 +4466,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e78
  #[tokio::test]
  async fn host_keys_from_files_graviola() {
      host_keys_from_files(graviola::DEFAULT_PROVIDER)
-@@ -493,9 +1031,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+@@ -493,9 +1027,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
  #[tokio::test]
  async fn verify_keys() {
      let providers = [
@@ -4489,7 +4476,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e78
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -522,130 +1057,6 @@ async fn verify_keys() {
+@@ -522,130 +1053,6 @@ async fn verify_keys() {
      }
  }
  
@@ -4620,7 +4607,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..ccfe45d9167a8ff1a3de0990e7f15e78
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  
  /// Build and locate the `oxish-session` binary
-@@ -704,8 +1115,3 @@ fn subscribe() {
+@@ -704,8 +1111,3 @@ fn subscribe() {
      });
  }
  

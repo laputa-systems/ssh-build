@@ -142,14 +142,16 @@ struct Args {
     /// Address to listen on; loopback unless you deliberately choose otherwise
     #[clap(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     bind: IpAddr,
+    /// TOML file with `max-sessions`, `max-unauthenticated-per-ip` and `max-sessions-per-ip`
     #[clap(short, long)]
     config: Option<PathBuf>,
-    /// Host key file; repeat to serve several keys (add a new one here to rotate)
+    /// Host key file; repeat to serve several keys (the first of each algorithm is presented)
     #[clap(long)]
     host_key_file: Vec<PathBuf>,
     /// Create a new host key at this path and exit; never overwrites a file
     #[clap(long)]
     generate_host_key: Option<PathBuf>,
+    /// Algorithm for a key made with --generate-host-key
     #[clap(long, value_parser = host_key_type, default_value = "ssh-ed25519")]
     host_key_type: PublicKeyAlgorithm<'static>,
     /// Path to the `oxish-session` binary (defaults to a sibling of this executable)

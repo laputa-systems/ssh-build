@@ -24,7 +24,6 @@ fuzz_target!(|data: &[u8]| {
     let mut opener = provider::DEFAULT_PROVIDER.opening_key(0, &source).unwrap();
     let mut opened = packet.to_vec();
     if opener.open_in_place(seq, &mut opened, tag).is_err() {
-        // Authentication failed: the packet must be untouched, never partly decrypted.
         let mut again = packet.to_vec();
         let _ = provider::DEFAULT_PROVIDER
             .opening_key(0, &source)
@@ -34,7 +33,6 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // An authentic packet must seal back to exactly what was received.
     let mut sealer = provider::DEFAULT_PROVIDER.sealing_key(0, &source).unwrap();
     let mut resealed = opened.clone();
     let mut new_tag = [0u8; 16];

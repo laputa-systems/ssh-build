@@ -97,6 +97,10 @@ maintainers.
 
 ## Evidence
 
+Not verified: a live GitHub session with the built client (`ssh -T git@github.com`, then a clone and
+push of a private repository with a throwaway key) is an owner-run check, and no published release
+has been downloaded and checked.
+
 - The end-to-end suite (`test/e2e-git.sh`, 19 checks) passed on macOS arm64, on Linux arm64 and,
   on a native host with BMI1/AVX2, on Linux x86-64; on an emulated x86-64 CPU without BMI1/AVX2 the
   server refuses to start with a clear message.

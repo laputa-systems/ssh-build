@@ -237,8 +237,6 @@ impl AuthenticationState {
 
                 let options = authorized_key.options.clone();
                 match spawn_blocking(move || authorized_key.verify(message, signature)).await {
-                    // The fake key only equalizes timing; a signature that verifies against it must
-                    // never log anyone in.
                     Ok(Ok(())) if genuine => {
                         info!(user = %account.name, "authentication successful");
 
@@ -560,16 +558,13 @@ mod tests {
         let genuine = signed_by(&*signing, b"session-1", "git", &blob).unwrap();
         assert!(verifies(&key, &genuine, b"session-1", "git", &blob));
 
-        // Replayed on another session or for another user: the signed data differs.
         assert!(!verifies(&key, &genuine, b"session-2", "git", &blob));
         assert!(!verifies(&key, &genuine, b"session-1", "root", &blob));
 
-        // A different key's signature over the same data.
         let (other, _, _) = key_pair();
         let forged = signed_by(&*other, b"session-1", "git", &blob).unwrap();
         assert!(!verifies(&key, &forged, b"session-1", "git", &blob));
 
-        // Flipped bits and truncation.
         for index in 0..genuine.len() {
             let mut tampered = genuine.clone();
             tampered[index] ^= 0x01;

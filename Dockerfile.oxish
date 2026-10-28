@@ -1,8 +1,5 @@
 # syntax=docker/dockerfile:1.18@sha256:dabfc0969b935b2080555ace70ee69a5261af8a8f1b4df97b9e7fbcf6722eddf
 
-# Static-PIE musl build of the Graviola-only OxiSH Git server. The Rust toolchain is the nightly
-# pinned in rust-toolchain.toml, installed by a checksum-pinned rustup-init.
-
 FROM scratch AS rustup-arm64
 ADD --checksum=sha256:7fdbb23acf6495efee2e371580c52b365917551b4835090a225c44ac30915235 \
     https://static.rust-lang.org/rustup/archive/1.29.2/aarch64-unknown-linux-musl/rustup-init /rustup-init

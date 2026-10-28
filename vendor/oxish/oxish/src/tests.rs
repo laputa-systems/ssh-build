@@ -317,7 +317,6 @@ impl CliClient {
         let mut child_stdin = child.stdin.take().unwrap();
         let input = stdin.to_vec();
         let writer = tokio::spawn(async move {
-            // The command can exit before reading its input
             match child_stdin.write_all(&input).await {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
@@ -443,7 +442,6 @@ async fn channel_command_killed_by_a_signal_is_reported_after_its_output() {
 
 #[tokio::test]
 async fn channel_half_close_still_delivers_later_output() {
-    // The command reads until the client's EOF, keeps running, and only then answers.
     let world = script_world("PATH=/usr/bin:/bin; wc -c | tr -d ' '; sleep 1; echo after-eof").await;
     world.bare_repo("a.git").await.unwrap();
     let (client, _guard) = world
@@ -476,8 +474,6 @@ async fn channel_stdout_and_stderr_both_drain_completely() {
 
 #[tokio::test]
 async fn channel_large_stdin_reaches_a_slow_reader_while_output_flows() {
-    // The command emits output and sleeps before reading, so its stdin pipe fills; the server
-    // must keep forwarding output and must not stall on the unread input.
     let world = script_world(
         "PATH=/usr/bin:/bin; head -c 2000000 /dev/zero | tr '\\0' 'x'; sleep 2; wc -c | tr -d ' '",
     )

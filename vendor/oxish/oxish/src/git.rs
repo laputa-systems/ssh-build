@@ -193,8 +193,6 @@ impl GitPolicy {
             if !meta.file_type().is_dir() {
                 return Err(PolicyError::NotFound);
             }
-            // A directory inside a repository is not a repository: refs named like
-            // `x/HEAD`, `x/objects/y`, `x/refs/z` would otherwise fake one.
             if index + 1 < components.len() && looks_like_repository(&path) {
                 return Err(PolicyError::NotFound);
             }
