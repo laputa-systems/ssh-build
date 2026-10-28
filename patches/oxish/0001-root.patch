@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60ba2799596 100644
+index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..32e172a4b42c8fbbea3399504bb5a7bd93693f0b 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -67,65 +67,6 @@ version = "1.0.104"
@@ -161,7 +161,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "futures-core"
  version = "0.3.34"
-@@ -374,12 +256,6 @@ dependencies = [
+@@ -374,17 +256,9 @@ dependencies = [
   "r-efi 6.0.0",
  ]
  
@@ -174,7 +174,12 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "graviola"
  version = "0.4.1"
-@@ -427,16 +303,6 @@ version = "1.70.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e8596c4fa98466aae2fcf4c72a665bc0e021c0aaab1e47d82044d3dc3e309a76"
+ dependencies = [
+  "cfg-if",
+  "getrandom 0.3.4",
+@@ -427,16 +301,6 @@ version = "1.70.2"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
  
@@ -191,7 +196,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "js-sys"
  version = "0.3.106"
-@@ -460,16 +326,6 @@ version = "0.2.191"
+@@ -460,16 +324,6 @@ version = "0.2.191"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
  
@@ -208,7 +213,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "linux-raw-sys"
  version = "0.12.1"
-@@ -508,12 +364,6 @@ version = "2.8.3"
+@@ -508,12 +362,6 @@ version = "2.8.3"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
  
@@ -221,7 +226,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "mio"
  version = "1.2.4"
-@@ -525,16 +375,6 @@ dependencies = [
+@@ -525,16 +373,6 @@ dependencies = [
   "windows-sys",
  ]
  
@@ -238,7 +243,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "nu-ansi-term"
  version = "0.50.3"
-@@ -566,7 +406,6 @@ dependencies = [
+@@ -566,7 +404,6 @@ dependencies = [
   "data-encoding",
   "libc",
   "listenfd",
@@ -246,7 +251,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
   "oxish-graviola",
   "oxish-proto",
   "rustix",
-@@ -580,14 +419,6 @@ dependencies = [
+@@ -580,14 +417,6 @@ dependencies = [
   "zeroize",
  ]
  
@@ -261,7 +266,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "oxish-graviola"
  version = "0.2.0"
-@@ -615,22 +446,6 @@ version = "0.2.17"
+@@ -615,22 +444,6 @@ version = "0.2.17"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
  
@@ -284,7 +289,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "proc-macro2"
  version = "1.0.107"
-@@ -661,18 +476,6 @@ version = "6.0.0"
+@@ -661,18 +474,6 @@ version = "6.0.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
  
@@ -303,7 +308,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "regex-automata"
  version = "0.4.18"
-@@ -690,12 +493,6 @@ version = "0.8.11"
+@@ -690,12 +491,6 @@ version = "0.8.11"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
  
@@ -316,7 +321,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "rustix"
  version = "1.1.5"
-@@ -785,12 +582,6 @@ dependencies = [
+@@ -785,12 +580,6 @@ dependencies = [
   "lazy_static",
  ]
  
@@ -329,7 +334,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  [[package]]
  name = "signal-hook-registry"
  version = "1.4.8"
-@@ -1032,12 +823,6 @@ version = "1.0.27"
+@@ -1032,12 +821,6 @@ version = "1.0.27"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
  
@@ -343,7 +348,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..b7b5bfa15dfda8796342a7e0d5ede60b
  name = "utf8parse"
  version = "0.2.2"
 diff --git a/Cargo.toml b/Cargo.toml
-index 3c82432e458aee44ed5188f96164529a567d2243..862afeeeefc0d7ff6fe24b2dc9fd18121f74496c 100644
+index 3c82432e458aee44ed5188f96164529a567d2243..9cc2eb467a4a5a778c5d5c49d0d600bfa87b16a0 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -1,5 +1,5 @@
@@ -361,7 +366,7 @@ index 3c82432e458aee44ed5188f96164529a567d2243..862afeeeefc0d7ff6fe24b2dc9fd1812
  bitflags = "2"
  clap = { version = "4.5.24", features = ["derive"] }
  data-encoding = "2.10"
-@@ -47,7 +46,10 @@ undocumented_unsafe_blocks = "warn"
+@@ -47,7 +46,13 @@ undocumented_unsafe_blocks = "warn"
  upper_case_acronyms = "warn"
  use_self = "warn"
  
@@ -369,6 +374,9 @@ index 3c82432e458aee44ed5188f96164529a567d2243..862afeeeefc0d7ff6fe24b2dc9fd1812
 -[profile.dist]
 -inherits = "release"
 -lto = "thin"
++[patch.crates-io]
++graviola = { path = "../graviola" }
++
 +[profile.release]
 +opt-level = 3
 +lto = "fat"

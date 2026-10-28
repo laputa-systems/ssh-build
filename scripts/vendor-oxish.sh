@@ -64,7 +64,7 @@ case ${1:-} in
         check=$work_dir/vendor-check
         materialize_base "$check"
         apply_patches "$check"
-        if ! diff -r -x target -x .work "$check" "$vendor_dir" > "$work_dir/vendor-check.diff"; then
+        if ! diff -r -x target -x .work -x corpus -x artifacts "$check" "$vendor_dir" > "$work_dir/vendor-check.diff"; then
             head -n 20 "$work_dir/vendor-check.diff" >&2
             fail "vendor/oxish differs from upstream $rev plus patches/oxish; run export if the change is intended"
         fi
@@ -77,7 +77,7 @@ case ${1:-} in
         git -C "$base" init --quiet
         git -C "$base" add -A
         git -C "$base" -c user.name=vendor -c user.email=vendor@invalid commit --quiet -m base
-        rsync -a --delete --exclude .git --exclude target --exclude .work "$vendor_dir/" "$base/"
+        rsync -a --delete --exclude .git --exclude target --exclude .work --exclude corpus --exclude artifacts "$vendor_dir/" "$base/"
         git -C "$base" add -A
         mkdir -p "$patch_dir"
         rm -f "$patch_dir"/*.patch

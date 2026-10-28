@@ -46,6 +46,9 @@ undocumented_unsafe_blocks = "warn"
 upper_case_acronyms = "warn"
 use_self = "warn"
 
+[patch.crates-io]
+graviola = { path = "../graviola" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"

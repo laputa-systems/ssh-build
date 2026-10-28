@@ -12,6 +12,7 @@ test "$(uname -m)" = arm64 || { echo "build-oxish-macos: needs arm64" >&2; exit 
 
 sh scripts/check-crypto-graph.sh
 sh scripts/vendor-oxish.sh verify
+sh scripts/vendor-graviola.sh verify
 
 export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}
 export CARGO_TARGET_DIR=$root_dir/.work/target-oxish-release

@@ -16,9 +16,30 @@ libfuzzer-sys = "0.4"
 package = "oxish-proto"
 path = "../oxish-proto"
 
+[dependencies.provider]
+package = "oxish-graviola"
+path = "../oxish-graviola"
+
+[patch.crates-io]
+graviola = { path = "../../graviola" }
+
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_chacha_open"
+path = "fuzz_targets/ssh_chacha_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_chacha_roundtrip"
+path = "fuzz_targets/ssh_chacha_roundtrip.rs"
 test = false
 doc = false
 bench = false

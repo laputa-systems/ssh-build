@@ -1,0 +1,248 @@
+diff --git a/fuzz/Cargo.lock b/fuzz/Cargo.lock
+index fcfdaedd66e7d26a54d071aa7155f017dd64624c..3dd75d7a2f972e0258734ef6996bc728767016dc 100644
+--- a/fuzz/Cargo.lock
++++ b/fuzz/Cargo.lock
+@@ -38,6 +38,18 @@ version = "0.1.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+ 
++[[package]]
++name = "getrandom"
++version = "0.3.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
++dependencies = [
++ "cfg-if",
++ "libc",
++ "r-efi 5.3.0",
++ "wasip2",
++]
++
+ [[package]]
+ name = "getrandom"
+ version = "0.4.3"
+@@ -46,7 +58,15 @@ checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+ dependencies = [
+  "cfg-if",
+  "libc",
+- "r-efi",
++ "r-efi 6.0.0",
++]
++
++[[package]]
++name = "graviola"
++version = "0.4.1"
++dependencies = [
++ "cfg-if",
++ "getrandom 0.3.4",
+ ]
+ 
+ [[package]]
+@@ -55,7 +75,7 @@ version = "0.1.35"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+ dependencies = [
+- "getrandom",
++ "getrandom 0.4.3",
+  "libc",
+ ]
+ 
+@@ -86,12 +106,22 @@ name = "oxish-fuzz"
+ version = "0.0.0"
+ dependencies = [
+  "libfuzzer-sys",
++ "oxish-graviola",
+  "oxish-proto",
+ ]
+ 
++[[package]]
++name = "oxish-graviola"
++version = "0.2.0"
++dependencies = [
++ "graviola",
++ "oxish-proto",
++ "zeroize",
++]
++
+ [[package]]
+ name = "oxish-proto"
+-version = "0.1.0"
++version = "0.2.0"
+ dependencies = [
+  "data-encoding",
+  "thiserror",
+@@ -123,6 +153,12 @@ dependencies = [
+  "proc-macro2",
+ ]
+ 
++[[package]]
++name = "r-efi"
++version = "5.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
++
+ [[package]]
+ name = "r-efi"
+ version = "6.0.0"
+@@ -203,6 +239,21 @@ version = "1.0.24"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+ 
++[[package]]
++name = "wasip2"
++version = "1.0.4+wasi-0.2.12"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
++dependencies = [
++ "wit-bindgen",
++]
++
++[[package]]
++name = "wit-bindgen"
++version = "0.57.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
++
+ [[package]]
+ name = "zeroize"
+ version = "1.9.0"
+diff --git a/fuzz/Cargo.toml b/fuzz/Cargo.toml
+index a1f389e044467224dab9fbcf1778ebcb6b59edaf..7bd643d2be1b7bd9774395134bfdb6b62e3b868b 100644
+--- a/fuzz/Cargo.toml
++++ b/fuzz/Cargo.toml
+@@ -16,9 +16,30 @@ libfuzzer-sys = "0.4"
+ package = "oxish-proto"
+ path = "../oxish-proto"
+ 
++[dependencies.provider]
++package = "oxish-graviola"
++path = "../oxish-graviola"
++
++[patch.crates-io]
++graviola = { path = "../../graviola" }
++
+ [[bin]]
+ name = "decode"
+ path = "fuzz_targets/decode.rs"
+ test = false
+ doc = false
+ bench = false
++
++[[bin]]
++name = "ssh_chacha_open"
++path = "fuzz_targets/ssh_chacha_open.rs"
++test = false
++doc = false
++bench = false
++
++[[bin]]
++name = "ssh_chacha_roundtrip"
++path = "fuzz_targets/ssh_chacha_roundtrip.rs"
++test = false
++doc = false
++bench = false
+diff --git a/fuzz/fuzz_targets/ssh_chacha_open.rs b/fuzz/fuzz_targets/ssh_chacha_open.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4d01c496943588454b5aaba7a683702ff7e17ea
+--- /dev/null
++++ b/fuzz/fuzz_targets/ssh_chacha_open.rs
+@@ -0,0 +1,44 @@
++#![no_main]
++
++use libfuzzer_sys::fuzz_target;
++use proto::{
++    crypto::{KeySourceSide, OpeningKey as _, SealingKey as _},
++    named::EncryptionAlgorithm,
++};
++
++const HEADER: usize = 64 + 4 + 16;
++
++fuzz_target!(|data: &[u8]| {
++    let Some((header, packet)) = data.split_at_checked(HEADER) else {
++        return;
++    };
++
++    let source = KeySourceSide {
++        algorithm: EncryptionAlgorithm::Chacha20Poly1305,
++        encryption_key: header[..64].to_vec(),
++        initial_iv: Vec::new(),
++    };
++    let seq = u32::from_be_bytes(header[64..68].try_into().unwrap());
++    let tag = &header[68..];
++
++    let mut opener = provider::DEFAULT_PROVIDER.opening_key(0, &source).unwrap();
++    let mut opened = packet.to_vec();
++    if opener.open_in_place(seq, &mut opened, tag).is_err() {
++        // Authentication failed: the packet must be untouched, never partly decrypted.
++        let mut again = packet.to_vec();
++        let _ = provider::DEFAULT_PROVIDER
++            .opening_key(0, &source)
++            .unwrap()
++            .open_in_place(seq, &mut again, tag);
++        assert_eq!(again, packet);
++        return;
++    }
++
++    // An authentic packet must seal back to exactly what was received.
++    let mut sealer = provider::DEFAULT_PROVIDER.sealing_key(0, &source).unwrap();
++    let mut resealed = opened.clone();
++    let mut new_tag = [0u8; 16];
++    sealer.seal_in_place(seq, &mut resealed, &mut new_tag).unwrap();
++    assert_eq!(resealed, packet);
++    assert_eq!(new_tag, tag);
++});
+diff --git a/fuzz/fuzz_targets/ssh_chacha_roundtrip.rs b/fuzz/fuzz_targets/ssh_chacha_roundtrip.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..17ce5355bdcb13f14950d91282068d1a3754363d
+--- /dev/null
++++ b/fuzz/fuzz_targets/ssh_chacha_roundtrip.rs
+@@ -0,0 +1,49 @@
++#![no_main]
++
++use libfuzzer_sys::fuzz_target;
++use proto::{
++    crypto::{KeySourceSide, OpeningKey as _, SealingKey as _},
++    named::EncryptionAlgorithm,
++};
++
++fuzz_target!(|data: &[u8]| {
++    let Some((header, plain)) = data.split_at_checked(64 + 4 + 1) else {
++        return;
++    };
++    if plain.len() < 4 {
++        return;
++    }
++
++    let source = KeySourceSide {
++        algorithm: EncryptionAlgorithm::Chacha20Poly1305,
++        encryption_key: header[..64].to_vec(),
++        initial_iv: Vec::new(),
++    };
++    let seq = u32::from_be_bytes(header[64..68].try_into().unwrap());
++    let flip = usize::from(header[68]);
++
++    let mut sealer = provider::DEFAULT_PROVIDER.sealing_key(0, &source).unwrap();
++    let mut packet = plain.to_vec();
++    let mut tag = [0u8; 16];
++    sealer.seal_in_place(seq, &mut packet, &mut tag).unwrap();
++
++    let mut opener = provider::DEFAULT_PROVIDER.opening_key(0, &source).unwrap();
++    let length = opener.decrypt_packet_length(seq, packet[..4].try_into().unwrap());
++    assert_eq!(length, plain[..4]);
++
++    let mut forged = packet.clone();
++    let mut forged_tag = tag;
++    let index = flip % (forged.len() + 16);
++    match forged.get_mut(index) {
++        Some(byte) => *byte ^= 1,
++        None => forged_tag[index - packet.len()] ^= 1,
++    }
++    let before = forged.clone();
++    assert!(opener.open_in_place(seq, &mut forged, &forged_tag).is_err());
++    assert_eq!(forged, before);
++
++    let mut opener = provider::DEFAULT_PROVIDER.opening_key(0, &source).unwrap();
++    let mut genuine = packet;
++    opener.open_in_place(seq, &mut genuine, &tag).unwrap();
++    assert_eq!(genuine, plain);
++});

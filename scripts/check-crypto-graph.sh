@@ -47,6 +47,8 @@ cd "$root_dir"
 cargo tree --locked --manifest-path "$manifest" -p oxish --edges normal,build --target all --prefix none \
     | sed 's/ v[0-9].*$//' | check_release_graph
 check_lock < "$lock"
+cargo tree --locked --manifest-path "$manifest" -p oxish --edges normal,build --target all --prefix none \
+    | grep -q '^graviola v.*vendor/graviola' || fail "graviola does not resolve to the patched vendor/graviola"
 graviola=$(sed -n '/^name = "graviola"$/{n;s/^version = "\(.*\)"$/\1/p;}' "$lock")
 [ -n "$graviola" ] || fail "graviola is not in Cargo.lock"
 echo "crypto graph ok: graviola $graviola is the only provider (release graph and Cargo.lock)"
