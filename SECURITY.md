@@ -25,9 +25,12 @@ than switched off.
 - Repository names are resolved component by component without following symlinks, then compared
   with the canonical path. A local attacker who can replace directories under the root between
   that check and Git opening the repository is outside the model.
-- The server refuses to run as root. The session process runs as the same user as the server;
-  there is no privilege separation between them beyond keeping private host keys out of the
-  session process.
+- The server refuses to run as root. The session process runs as the same user as the server and
+  **holds the host private key**: the server serializes it into the handoff so the session can
+  sign key re-exchanges. The two-process split gives the server a place to authenticate and cap
+  connections before any Git command runs; it is not a host-key isolation boundary. A Git
+  command's own process never sees the key, but anyone who can run code as the server user can
+  read the host key file.
 
 ## Review record
 
@@ -49,6 +52,19 @@ No exploitable (P1) defect was found. Findings and their resolution:
 | 5 | P3 | Clients that send their first key exchange packet in the same segment as the identification string were dropped | only the identification line must be text | `binary_data_may_follow_the_identification_line` |
 | 6 | P3 | Duplicate authorized keys with different `git-access` were accepted | duplicates are a startup error | `authorized_keys_require_an_explicit_git_access` |
 | 7 | P3 | `WINDOW_ADJUST` after channel close; non-strict-KEX clients accepted (Terrapin exposure with this cipher) | no adjust after close; strict key exchange required | e2e (OpenSSH 10.6 negotiates strict KEX) |
+
+A second review pass (after the table above) found four more, all fixed:
+
+| # | Finding | Resolution | Regression test |
+|---|---------|------------|-----------------|
+| 8 | The per-address pre-auth slot was held for the whole session, so four live sessions blocked a fifth login | released when authentication succeeds | `established_sessions_do_not_use_up_the_pre_auth_allowance` |
+| 9 | Commands being stopped no longer counted toward the 4-command limit, and shutdown did not wait for them | a permit per live process, held until it is reaped; shutdown waits for all | `closed_channels_keep_their_slot_until_the_command_is_reaped` |
+| 10 | A client's maximum packet size below 512 was rounded up, so the server could send bigger packets than the client allowed | sizes below 128 are refused, others honored exactly | `channels_are_never_given_a_bigger_packet_size_than_the_peer_allows` |
+| 11 | The Linux hardening gate missed an executable stack (multi-line `readelf` output) and did not require RELRO | parses `readelf -lW`, requires `GNU_STACK` without X, `GNU_RELRO`, no W+X load segment, no TEXTREL | `test/qualify-elf.Dockerfile` builds good and bad ELF fixtures |
+
+Packaging also no longer trusts the checkout it runs in: each build writes `build-record.json`
+(commit, input hash, toolchain, executable hashes) and `package*.sh` refuse binaries whose record
+does not match the current inputs, and promote output only when every target passes.
 
 Other fixes made while building this, each with a test: the exec path ran a client-supplied
 program path (closed by `git::tests::executable_is_never_client_supplied` and the e2e hostile

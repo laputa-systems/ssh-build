@@ -3,9 +3,9 @@
 # size budgets, then write and verify <out_dir>/SHA256SUMS over all assets.
 # Usage: sh scripts/package.sh [out_dir]      (default: dist/release)
 # Inputs: dist/macos/bin, dist/linux-x86_64/bin, dist/linux-aarch64/bin.
-# Linux linkage is qualified with readelf inside the Docker build that
-# produced those bytes; here they are re-checked with file(1) for arch and
-# static-pie so a stale or wrong-arch directory cannot be packaged.
+# Each input directory needs the build-record.json its build wrote (scripts/build-record.sh);
+# stale, modified or foreign binaries are refused, and nothing in <out_dir> changes unless every
+# target passes.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -24,24 +24,21 @@ upstream_sha256=$(sed -n 's/^OPENSSH_SHA256=//p' "$canonical")
 test -n "$upstream_version" || { echo "package: cannot read version" >&2; exit 1; }
 test -n "$upstream_sha256" || { echo "package: cannot read archive sha" >&2; exit 1; }
 
-build_commit=$(git -C "$repo_root" rev-parse HEAD)
-build_dirty=false
-if git -C "$repo_root" status --short | grep -q .; then build_dirty=true; fi
-
-linux_toolchain=$(awk -F'[= ]+' '$2 ~ /^(binutils|gcc|musl-dev)$/ { printf "%s %s;", $2, $3 }' "$dockerfile")
-test -n "$linux_toolchain" || { echo "package: cannot read Dockerfile toolchain pins" >&2; exit 1; }
-linux_toolchain="alpine apk: ${linux_toolchain%;}"
-macos_toolchain=$("$(xcrun --sdk macosx --find clang)" --version | sed -n '1p')
-
 mkdir -p "$out_dir"
 out_dir=$(CDPATH= cd -- "$out_dir" && pwd -P)
-rm -f "$out_dir"/ssh-*.zip "$out_dir"/ssh-*.manifest
+stage=$(mktemp -d "$out_dir/.stage.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
 
 package_target() {
     triple=$1
     bin_dir=$repo_root/$2
     expected=$3
-    toolchain=$4
+
+    sh "$script_dir/build-record.sh" verify ssh "$bin_dir" "$triple"
+    record=$bin_dir/build-record.json
+    build_commit=$(jaq -r .commit "$record")
+    build_dirty=$(jaq -r .dirty "$record")
+    toolchain=$(jaq -r .toolchain "$record")
 
     for b in ssh ssh-keygen ssh-agent ssh-add sftp scp; do
         test -x "$bin_dir/$b" || { echo "package: $bin_dir/$b missing; build $triple first" >&2; exit 1; }
@@ -64,9 +61,9 @@ package_target() {
     esac
 
     zip_name=ssh-$triple.zip
-    (cd "$bin_dir" && zip -y -X -q "$out_dir/$zip_name" ssh ssh-keygen ssh-agent ssh-add sftp scp)
+    (cd "$bin_dir" && zip -y -X -q "$stage/$zip_name" ssh ssh-keygen ssh-agent ssh-add sftp scp)
 
-    zip_bytes=$(wc -c < "$out_dir/$zip_name" | tr -d ' ')
+    zip_bytes=$(wc -c < "$stage/$zip_name" | tr -d ' ')
     budget=$(jaq -r --arg t "$triple" '.ssh[$t].max_zip_bytes' "$budgets")
     test -n "$budget" && [ "$budget" != null ] || { echo "package: no budget for $triple" >&2; exit 1; }
     if [ "$zip_bytes" -gt "$budget" ]; then
@@ -75,7 +72,7 @@ package_target() {
     fi
     echo "budget: $zip_name $zip_bytes/$budget bytes"
 
-    cat > "$out_dir/ssh-$triple.manifest" <<EOF
+    cat > "$stage/ssh-$triple.manifest" <<EOF
 upstream_version=$upstream_version
 upstream_sha256=$upstream_sha256
 target=$triple
@@ -85,10 +82,12 @@ toolchain=$toolchain
 EOF
 }
 
-package_target aarch64-apple-darwin dist/macos/bin "arm64" "$macos_toolchain"
-package_target x86_64-unknown-linux-musl dist/linux-x86_64/bin "x86-64" "$linux_toolchain"
-package_target aarch64-unknown-linux-musl dist/linux-aarch64/bin "ARM aarch64" "$linux_toolchain"
+package_target aarch64-apple-darwin dist/macos/bin "arm64"
+package_target x86_64-unknown-linux-musl dist/linux-x86_64/bin "x86-64"
+package_target aarch64-unknown-linux-musl dist/linux-aarch64/bin "ARM aarch64"
 
+rm -f "$out_dir"/ssh-*.zip "$out_dir"/ssh-*.manifest
+mv "$stage"/ssh-* "$out_dir"/
 sh "$script_dir/write-sums.sh" "$out_dir"
 
 echo "Packaged 3 ZIPs and manifests in $out_dir"

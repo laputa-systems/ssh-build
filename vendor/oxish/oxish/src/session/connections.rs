@@ -5,7 +5,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
-use std::{collections::BTreeMap, os::unix::process::ExitStatusExt as _};
+use std::{collections::BTreeMap, os::unix::process::ExitStatusExt as _, sync::Arc};
 
 use proto::{
     IncomingPacket, MAX_PACKET_LEN, MessageType, ProtoError, WriteState,
@@ -18,7 +18,10 @@ use proto::{
     },
     named::ChannelType,
 };
-use tokio::time::{Instant, Sleep, sleep};
+use tokio::{
+    sync::Semaphore,
+    time::{Instant, Sleep, sleep},
+};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -27,12 +30,24 @@ use crate::{
 };
 
 /// Open session channels of one connection
-#[derive(Default)]
 pub(crate) struct Channels {
     next_id: u32,
     channels: BTreeMap<u32, Channel>,
     /// Channel to poll first, so one busy channel cannot starve the others
     cursor: u32,
+    /// One permit per live Git process, held until it is reaped, even after its channel closed
+    processes: Arc<Semaphore>,
+}
+
+impl Default for Channels {
+    fn default() -> Self {
+        Self {
+            next_id: 0,
+            channels: BTreeMap::new(),
+            cursor: 0,
+            processes: Arc::new(Semaphore::new(MAX_PROCESSES)),
+        }
+    }
 }
 
 /// What the connection allows the current channel request to do
@@ -59,6 +74,11 @@ impl Channels {
             return Ok(());
         }
 
+        if open.maximum_packet_size < MIN_PACKET_SIZE {
+            write.encode(&ChannelOpenFailure::packet_size_too_small(open.sender_channel))?;
+            return Ok(());
+        }
+
         if self.channels.len() >= MAX_CHANNELS {
             write.encode(&ChannelOpenFailure::resource_shortage(open.sender_channel))?;
             return Ok(());
@@ -76,7 +96,7 @@ impl Channels {
             send_window: open.initial_window_size,
             receive_window: INITIAL_WINDOW_SIZE,
             credit: 0,
-            maximum_packet_size: open.maximum_packet_size.max(MIN_PACKET_SIZE),
+            maximum_packet_size: open.maximum_packet_size,
             protocol: None,
             run: Run::Idle,
             close_sent: false,
@@ -98,7 +118,7 @@ impl Channels {
         write: &mut WriteState,
         grant: &Grant<'_>,
     ) -> Result<(), Error> {
-        let running = self.busy_count();
+        let processes = self.processes.clone();
         let Some(channel) = self.channels.get_mut(&request.recipient_channel) else {
             return Err(ProtoError::InvalidPacket("channel request for unknown channel ID").into());
         };
@@ -124,12 +144,9 @@ impl Channels {
                 if !matches!(channel.run, Run::Idle) {
                     warn!("rejecting second exec request on a channel");
                     false
-                } else if running >= MAX_PROCESSES {
-                    warn!("rejecting exec request: too many running commands");
-                    false
-                } else {
+                } else if let Ok(permit) = processes.try_acquire_owned() {
                     match grant.policy.authorize(exec.command, grant.options.git_access) {
-                        Ok(command) => match GitProcess::spawn(&command, channel.protocol) {
+                        Ok(command) => match GitProcess::spawn(&command, channel.protocol, permit) {
                             Ok(process) => {
                                 info!(service = ?command.service, "running git command");
                                 channel.run = Run::Active(Box::new(Active::new(Some(process))));
@@ -153,6 +170,9 @@ impl Channels {
                             false
                         }
                     }
+                } else {
+                    warn!("rejecting exec request: too many live commands");
+                    false
                 }
             }
             other => {
@@ -305,13 +325,11 @@ impl Channels {
         for process in &mut processes {
             process.finish_stopping(deadline).await;
         }
-    }
+        drop(processes);
 
-    fn busy_count(&self) -> usize {
-        self.channels
-            .values()
-            .filter(|channel| matches!(channel.run, Run::Active(_)))
-            .count()
+        // Commands whose channels closed earlier are still being stopped by their reaper tasks.
+        let all = u32::try_from(MAX_PROCESSES).unwrap_or(u32::MAX);
+        let _ = tokio::time::timeout_at(deadline + SHUTDOWN_GRACE, self.processes.acquire_many(all)).await;
     }
 }
 
@@ -647,8 +665,8 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
 
 const DENIED_MESSAGE: &[u8] = b"oxish: repository not found or access denied\n";
 const INITIAL_WINDOW_SIZE: u32 = 16 * MAX_PACKET_LEN;
-/// Smallest packet size honored for a client that advertises something absurdly small
-const MIN_PACKET_SIZE: u32 = 512;
+/// Smallest maximum packet size a client may advertise; smaller channels are refused, never rounded up
+const MIN_PACKET_SIZE: u32 = 128;
 const READ_CHUNK: usize = 32 * 1024;
 const MAX_PACKETS_PER_POLL: usize = 16;
 /// Session channels one connection may hold open at once
@@ -659,3 +677,95 @@ const MAX_PROCESSES: usize = 4;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// How long output pipes may stay open after Git itself exited
 const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, os::unix::fs::{PermissionsExt as _, symlink}, path::Path};
+
+    use proto::{auth::GitAccess, named::ChannelType};
+
+    use super::*;
+    use crate::DEFAULT_PROVIDER;
+
+    fn directory(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn open(id: u32, maximum_packet_size: u32) -> ChannelOpen<'static> {
+        ChannelOpen {
+            r#type: ChannelType::Session,
+            sender_channel: id,
+            initial_window_size: 1 << 20,
+            maximum_packet_size,
+        }
+    }
+
+    fn exec(channel: u32) -> ChannelRequest<'static> {
+        ChannelRequest {
+            recipient_channel: channel,
+            r#type: ChannelRequestType::Exec(proto::channels::Exec {
+                command: b"git-upload-pack 'a.git'",
+            }),
+            want_reply: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_channels_keep_their_slot_until_the_command_is_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(dir.path()).unwrap();
+        directory(&base);
+        let (repos, bin) = (base.join("repos"), base.join("bin"));
+        directory(&repos.join("a.git").join("objects"));
+        directory(&repos.join("a.git").join("refs"));
+        fs::write(repos.join("a.git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        directory(&bin);
+        fs::write(bin.join("git"), "#!/bin/sh\ntrap '' TERM\nPATH=/bin:/usr/bin\nsleep 30\n").unwrap();
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("git", bin.join("git-upload-pack")).unwrap();
+        symlink("git", bin.join("git-receive-pack")).unwrap();
+
+        let policy = GitPolicy::new(&repos, &bin).unwrap();
+        let options = KeyOptions {
+            git_access: Some(GitAccess::Read),
+        };
+        let grant = Grant {
+            policy: &policy,
+            options: &options,
+        };
+        let mut write = WriteState::new(DEFAULT_PROVIDER.secure_random());
+        let mut channels = Channels::default();
+
+        for id in 0..MAX_PROCESSES as u32 {
+            channels.open(open(id, 32768), &mut write).unwrap();
+            channels.request(exec(id), &mut write, &grant).unwrap();
+            channels.close(&ChannelClose { recipient_channel: id }, &mut write).unwrap();
+        }
+        assert!(!channels.busy(), "every channel is closed");
+        assert_eq!(channels.processes.available_permits(), 0, "the stopping commands still count");
+
+        let next = MAX_PROCESSES as u32;
+        channels.open(open(next, 32768), &mut write).unwrap();
+        channels.request(exec(next), &mut write, &grant).unwrap();
+        assert!(!channels.busy(), "a command beyond the live-process budget was started");
+
+        channels.shutdown().await;
+        assert_eq!(
+            channels.processes.available_permits(),
+            MAX_PROCESSES,
+            "shutdown must wait for every stopping command"
+        );
+    }
+
+    #[test]
+    fn channels_are_never_given_a_bigger_packet_size_than_the_peer_allows() {
+        let mut write = WriteState::new(DEFAULT_PROVIDER.secure_random());
+        let mut channels = Channels::default();
+        channels.open(open(0, MIN_PACKET_SIZE - 1), &mut write).unwrap();
+        assert!(channels.channels.is_empty(), "a channel too small to serve was accepted");
+        channels.open(open(1, MIN_PACKET_SIZE), &mut write).unwrap();
+        let channel = channels.channels.values().next().unwrap();
+        assert_eq!(channel.maximum_packet_size, MIN_PACKET_SIZE);
+    }
+}

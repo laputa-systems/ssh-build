@@ -11,6 +11,7 @@ use std::{
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
+    sync::OwnedSemaphorePermit,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 };
 use tracing::debug;
@@ -32,6 +33,7 @@ pub(crate) struct GitProcess {
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
     status: Option<ExitStatus>,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 /// Which child output pipe to read
@@ -43,7 +45,13 @@ pub(crate) enum Output {
 
 impl GitProcess {
     /// Spawn a validated command; `protocol` is an already validated `GIT_PROTOCOL` value
-    pub(crate) fn spawn(command: &GitCommand, protocol: Option<&str>) -> io::Result<Self> {
+    ///
+    /// The permit stays held until the child has been reaped, including while it is being stopped.
+    pub(crate) fn spawn(
+        command: &GitCommand,
+        protocol: Option<&str>,
+        permit: OwnedSemaphorePermit,
+    ) -> io::Result<Self> {
         let mut cmd = Command::new(&command.program);
         cmd.args(&command.args)
             .env_clear()
@@ -73,6 +81,7 @@ impl GitProcess {
             queue: VecDeque::new(),
             stdin_closing: false,
             status: None,
+            permit: Some(permit),
         })
     }
 
@@ -260,6 +269,7 @@ impl GitProcess {
             return;
         };
         let group = self.group;
+        let permit = self.permit.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             let _ = child.start_kill();
             return;
@@ -271,6 +281,7 @@ impl GitProcess {
                 }
                 let _ = child.kill().await;
             }
+            drop(permit);
         });
     }
 }

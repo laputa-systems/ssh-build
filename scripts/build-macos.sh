@@ -34,4 +34,5 @@ codesign -s - "$dest_dir"/ssh "$dest_dir"/ssh-keygen "$dest_dir"/ssh-agent \
     "$dest_dir"/ssh-add "$dest_dir"/sftp "$dest_dir"/scp
 
 test "$("$dest_dir/ssh" -V 2>&1)" = "OpenSSH_${OPENSSH_VERSION}, without OpenSSL"
+sh "$script_dir/build-record.sh" write ssh "$dest_dir" aarch64-apple-darwin
 echo "macos client ready in $dest_dir"

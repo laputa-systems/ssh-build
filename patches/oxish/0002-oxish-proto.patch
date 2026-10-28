@@ -225,10 +225,10 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..1a1b8feb33f7399fe593c3815eeaca20
          "AAAAC3NzaC1lZDI1NTE5AAAAIMPdEXeWrpzl1Lgk7akX7+7x4B1eoyV5tyD6674DIh3R user@host";
  }
 diff --git a/oxish-proto/src/channels.rs b/oxish-proto/src/channels.rs
-index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..30da28c2767ada231574552ce8a762d8b86c2445 100644
+index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..f64f11e6373544981bd443e32ac891ffbbd50fdc 100644
 --- a/oxish-proto/src/channels.rs
 +++ b/oxish-proto/src/channels.rs
-@@ -119,6 +119,15 @@ impl ChannelOpenFailure<'static> {
+@@ -119,6 +119,24 @@ impl ChannelOpenFailure<'static> {
          }
      }
  
@@ -241,10 +241,19 @@ index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..30da28c2767ada231574552ce8a762d8
 +        }
 +    }
 +
++    /// Failure response for a channel open whose maximum packet size is too small to serve
++    pub fn packet_size_too_small(recipient_channel: u32) -> Self {
++        Self {
++            recipient_channel,
++            reason_code: ChannelOpenFailureReason::AdministrativelyProhibited,
++            description: "maximum packet size is too small",
++        }
++    }
++
      /// Failure response for a channel open with an unsupported channel type
      pub fn unknown_type(recipient_channel: u32) -> Self {
          Self {
-@@ -294,6 +303,12 @@ impl Encode for ChannelRequest<'_> {
+@@ -294,6 +312,12 @@ impl Encode for ChannelRequest<'_> {
          want_reply.encode(buffer);
          match r#type {
              ChannelRequestType::ExitStatus(status) => status.encode(buffer),
@@ -257,7 +266,7 @@ index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..30da28c2767ada231574552ce8a762d8
              _ => warn!(r#type = ?r#type.name(), "channel request type cannot be encoded"),
          }
      }
-@@ -311,6 +326,11 @@ pub enum ChannelRequestType<'a> {
+@@ -311,6 +335,11 @@ pub enum ChannelRequestType<'a> {
      ///
      /// As defined in <https://www.rfc-editor.org/info/rfc4254/#section-6.10>.
      ExitStatus(u32),
@@ -269,7 +278,7 @@ index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..30da28c2767ada231574552ce8a762d8
      /// `pty-req`, request a pseudo-terminal
      ///
      /// As defined in <https://www.rfc-editor.org/rfc/rfc4254#section-6.2>.
-@@ -340,6 +360,7 @@ impl ChannelRequestType<'_> {
+@@ -340,6 +369,7 @@ impl ChannelRequestType<'_> {
          match self {
              Self::AuthAgentReq => "auth-agent-req@openssh.com",
              Self::ExitStatus(_) => "exit-status",
@@ -277,7 +286,7 @@ index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..30da28c2767ada231574552ce8a762d8
              Self::PtyReq(_) => "pty-req",
              Self::Env(_) => "env",
              Self::Exec(_) => "exec",
-@@ -350,6 +371,15 @@ impl ChannelRequestType<'_> {
+@@ -350,6 +380,15 @@ impl ChannelRequestType<'_> {
      }
  }
  
@@ -293,7 +302,7 @@ index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..30da28c2767ada231574552ce8a762d8
  /// Type-specific data for the `window-change` channel request
  ///
  /// See <https://www.rfc-editor.org/rfc/rfc4254#section-6.7>.
-@@ -825,6 +855,46 @@ impl fmt::Debug for ChannelData<'_> {
+@@ -825,6 +864,46 @@ impl fmt::Debug for ChannelData<'_> {
      }
  }
  

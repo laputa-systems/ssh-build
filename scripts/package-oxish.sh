@@ -3,6 +3,9 @@
 # the size budgets, then refresh and verify the consolidated SHA256SUMS in <out_dir>.
 # Usage: sh scripts/package-oxish.sh [out_dir]      (default: dist/release)
 # Inputs: dist/oxish-macos/bin, dist/oxish-linux-x86_64/bin, dist/oxish-linux-aarch64/bin.
+# Each input directory needs the build-record.json its build wrote (scripts/build-record.sh);
+# stale, modified or foreign binaries are refused, and nothing in <out_dir> changes unless every
+# target passes.
 # The archive holds bin/oxish-server, bin/oxish-session, the upstream licenses, and a
 # provenance.json naming the OxiSH revision, Graviola version, patch identity, toolchain, build
 # commit, target, and the SHA-256 of each executable. No Git binary is included.
@@ -27,13 +30,11 @@ oxish_rev=$(sed -n 's/^OXISH_REV=//p' "$script_dir/fetch-sources.sh")
 graviola_version=$(jaq -r '.graviola.version' "$repo_root/sources.lock.json")
 graviola_sha256=$(jaq -r '.graviola.checksum' "$repo_root/sources.lock.json")
 patch_sha256=$(cat "$repo_root"/patches/oxish/*.patch "$repo_root"/patches/graviola/*.patch | sha256 | awk '{ print $1 }')
-build_commit=$(git -C "$repo_root" rev-parse HEAD)
-build_dirty=false
-if git -C "$repo_root" status --short | grep -q .; then build_dirty=true; fi
 
 mkdir -p "$out_dir"
 out_dir=$(CDPATH= cd -- "$out_dir" && pwd -P)
-rm -f "$out_dir"/oxish-*.zip "$out_dir"/oxish-*.manifest
+stage=$(mktemp -d "$out_dir/.stage.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
 
 stage_root=$repo_root/.work/package-oxish
 rm -rf "$stage_root"
@@ -43,7 +44,12 @@ package_target() {
     triple=$1
     bin_dir=$repo_root/$2
     expected=$3
-    toolchain=$4
+
+    sh "$script_dir/build-record.sh" verify oxish "$bin_dir" "$triple"
+    record=$bin_dir/build-record.json
+    build_commit=$(jaq -r .commit "$record")
+    build_dirty=$(jaq -r .dirty "$record")
+    toolchain=$(jaq -r .toolchain "$record")
 
     for b in oxish-server oxish-session; do
         test -x "$bin_dir/$b" || fail "$bin_dir/$b missing; build $triple first"
@@ -64,11 +70,11 @@ package_target() {
         *) QUALIFY_BINS="oxish-server oxish-session" sh "$script_dir/qualify-binaries.sh" "$bin_dir" macos >/dev/null || fail "$bin_dir failed qualification" ;;
     esac
 
-    stage=$stage_root/$triple
-    mkdir -p "$stage/bin"
-    cp "$bin_dir/oxish-server" "$bin_dir/oxish-session" "$stage/bin/"
-    cp "$repo_root/vendor/oxish/LICENSE-APACHE" "$repo_root/vendor/oxish/LICENSE-MIT" "$stage/"
-    cat > "$stage/THIRD-PARTY.md" <<EOF
+    pkg=$stage_root/$triple
+    mkdir -p "$pkg/bin"
+    cp "$bin_dir/oxish-server" "$bin_dir/oxish-session" "$pkg/bin/"
+    cp "$repo_root/vendor/oxish/LICENSE-APACHE" "$repo_root/vendor/oxish/LICENSE-MIT" "$pkg/"
+    cat > "$pkg/THIRD-PARTY.md" <<EOF
 # Third-party code in this archive
 
 - OxiSH ($oxish_rev, https://github.com/djc/oxish): Apache-2.0 OR MIT, see LICENSE-APACHE and
@@ -79,8 +85,8 @@ package_target() {
   (MIT or Apache-2.0).
 EOF
 
-    server_sha256=$(sha256 "$stage/bin/oxish-server" | awk '{ print $1 }')
-    session_sha256=$(sha256 "$stage/bin/oxish-session" | awk '{ print $1 }')
+    server_sha256=$(sha256 "$pkg/bin/oxish-server" | awk '{ print $1 }')
+    session_sha256=$(sha256 "$pkg/bin/oxish-session" | awk '{ print $1 }')
     jaq -n \
         --arg target "$triple" --arg oxish_rev "$oxish_rev" --arg graviola "$graviola_version" \
         --arg graviola_sha256 "$graviola_sha256" --arg patch_sha256 "$patch_sha256" \
@@ -92,18 +98,18 @@ EOF
           patches_sha256: $patch_sha256, toolchain: $toolchain,
           build_commit: $commit, build_dirty: $dirty,
           cpu_floor: {x86_64: "Broadwell-class: AES-NI PCLMULQDQ BMI1 ADX AVX2", aarch64: "NEON with AES PMULL SHA2"},
-          executables: {"bin/oxish-server": $server, "bin/oxish-session": $session}}' > "$stage/provenance.json"
+          executables: {"bin/oxish-server": $server, "bin/oxish-session": $session}}' > "$pkg/provenance.json"
 
     zip_name=oxish-$triple.zip
-    (cd "$stage" && zip -y -X -q -r "$out_dir/$zip_name" bin LICENSE-APACHE LICENSE-MIT THIRD-PARTY.md provenance.json)
+    (cd "$pkg" && zip -y -X -q -r "$stage/$zip_name" bin LICENSE-APACHE LICENSE-MIT THIRD-PARTY.md provenance.json)
 
-    zip_bytes=$(wc -c < "$out_dir/$zip_name" | tr -d ' ')
+    zip_bytes=$(wc -c < "$stage/$zip_name" | tr -d ' ')
     budget=$(jaq -r --arg t "$triple" '.oxish[$t].max_zip_bytes // empty' "$budgets")
     [ -n "$budget" ] || fail "no budget for $triple"
     [ "$zip_bytes" -le "$budget" ] || fail "$zip_name is $zip_bytes bytes, over the $budget byte budget"
     echo "budget: $zip_name $zip_bytes/$budget bytes"
 
-    cat > "$out_dir/oxish-$triple.manifest" <<EOF
+    cat > "$stage/oxish-$triple.manifest" <<EOF
 upstream_oxish_rev=$oxish_rev
 graviola_version=$graviola_version
 graviola_crate_sha256=$graviola_sha256
@@ -115,16 +121,11 @@ toolchain=$toolchain
 EOF
 }
 
-mac_toolchain=$(cd "$repo_root" && rustc -vV | tr '\n' ';')
-linux_toolchain() {
-    file=$repo_root/$1/rustc-version.txt
-    [ -f "$file" ] || fail "$file missing; build with make oxish-linux"
-    tr '\n' ';' < "$file"
-}
+package_target aarch64-apple-darwin dist/oxish-macos/bin "arm64"
+package_target x86_64-unknown-linux-musl dist/oxish-linux-x86_64/bin "x86-64"
+package_target aarch64-unknown-linux-musl dist/oxish-linux-aarch64/bin "ARM aarch64"
 
-package_target aarch64-apple-darwin dist/oxish-macos/bin "arm64" "$mac_toolchain"
-package_target x86_64-unknown-linux-musl dist/oxish-linux-x86_64/bin "x86-64" "$(linux_toolchain dist/oxish-linux-x86_64/bin)"
-package_target aarch64-unknown-linux-musl dist/oxish-linux-aarch64/bin "ARM aarch64" "$(linux_toolchain dist/oxish-linux-aarch64/bin)"
-
+rm -f "$out_dir"/oxish-*.zip "$out_dir"/oxish-*.manifest
+mv "$stage"/oxish-* "$out_dir"/
 sh "$script_dir/write-sums.sh" "$out_dir"
 echo "Packaged 3 server ZIPs and manifests in $out_dir"

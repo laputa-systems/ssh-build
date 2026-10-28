@@ -4,6 +4,7 @@ DOCKER_PLATFORM ?= linux/arm64
 MACOS_DIST ?= dist/macos/bin
 LINUX_ARCH = $(if $(findstring arm64,$(DOCKER_PLATFORM)),aarch64,x86_64)
 LINUX_DIST ?= dist/linux-$(LINUX_ARCH)/bin
+LINUX_TRIPLE = $(LINUX_ARCH)-unknown-linux-musl
 
 .PHONY: macos linux oxish-macos oxish-linux
 
@@ -28,6 +29,7 @@ linux:
 			--output=type=local,dest=$(LINUX_DIST) \
 			.; \
 		test -x "$(LINUX_DIST)/ssh"; \
+		sh scripts/build-record.sh write ssh "$(LINUX_DIST)" $(LINUX_TRIPLE); \
 		echo "wrote $(LINUX_DIST)"
 
 OXISH_LINUX_DIST ?= dist/oxish-linux-$(LINUX_ARCH)/bin
@@ -46,4 +48,5 @@ oxish-linux:
 			--output=type=local,dest=$(OXISH_LINUX_DIST) \
 			.; \
 		test -x "$(OXISH_LINUX_DIST)/oxish-server"; \
+		sh scripts/build-record.sh write oxish "$(OXISH_LINUX_DIST)" $(LINUX_TRIPLE); \
 		echo "wrote $(OXISH_LINUX_DIST)"

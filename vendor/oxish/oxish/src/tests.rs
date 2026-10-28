@@ -648,6 +648,35 @@ async fn idle_connections_from_one_address_cannot_lock_out_logins() {
     assert_eq!(served.stdout(), "OK\n");
 }
 
+#[tokio::test]
+async fn established_sessions_do_not_use_up_the_pre_auth_allowance() {
+    let world = script_world("PATH=/usr/bin:/bin; sleep 3; echo OK").await;
+    world.bare_repo("a.git").await.unwrap();
+    let config = crate::Config {
+        max_unauthenticated_per_ip: 1,
+        max_sessions_per_ip: 3,
+        ..crate::Config::default()
+    };
+    let (client, _guard) = world
+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
+        .await
+        .unwrap();
+
+    let addr = client.addr;
+    let key = client.key.clone();
+    let mut runs = vec![tokio::spawn(async move { client.run(Some(SERVICE), b"").await })];
+    for _ in 0..2 {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let key = key.clone();
+        runs.push(tokio::spawn(async move { CliClient::new(addr, &key).run(Some(SERVICE), b"").await }));
+    }
+    for run in runs {
+        let run = run.await.unwrap().unwrap();
+        assert!(run.status.success(), "a session behind established ones was refused: {}", run.stderr);
+        assert_eq!(run.stdout(), "OK\n");
+    }
+}
+
 /// Open `count` TCP connections that never send anything
 async fn futures_idle(addr: SocketAddr, count: usize) -> Vec<tokio::net::TcpStream> {
     let mut streams = Vec::new();

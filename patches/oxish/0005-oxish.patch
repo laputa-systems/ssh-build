@@ -1640,7 +1640,7 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..2b7d894268524a9848bd9d525b516696
  use unix as platform;
  
 diff --git a/oxish/src/server.rs b/oxish/src/server.rs
-index 7f807df2cd33360f8aaaccda043dbc85f34becbf..1fb4b29953f5ba0158e24d804c8678abe910cea3 100644
+index 7f807df2cd33360f8aaaccda043dbc85f34becbf..f9f7dbf6b522b8eae488bd5ac3c8bd75dcd6d7d6 100644
 --- a/oxish/src/server.rs
 +++ b/oxish/src/server.rs
 @@ -1,7 +1,7 @@
@@ -1747,7 +1747,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..1fb4b29953f5ba0158e24d804c8678ab
  
      #[instrument(name = "handshake", skip(self, stream, addr), fields(addr = %addr))]
      pub(crate) async fn accept(&self, stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
-+        let Some(_pre_auth_ip) = PerIp::acquire(&self.pre_auth_by_ip, addr.ip()) else {
++        let Some(pre_auth_ip) = PerIp::acquire(&self.pre_auth_by_ip, addr.ip()) else {
 +            warn!(%addr, "too many unauthenticated connections from this address");
 +            return Err(anyhow::anyhow!("too many unauthenticated connections from this address"));
 +        };
@@ -1755,7 +1755,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..1fb4b29953f5ba0158e24d804c8678ab
          let authenticating = match self.authenticating.try_acquire() {
              Ok(permit) => permit,
              Err(TryAcquireError::NoPermits) => {
-@@ -107,27 +130,30 @@ impl Server {
+@@ -107,27 +130,31 @@ impl Server {
          };
  
          let future = conn.exchange_keys(&self.host_keys, self.provider);
@@ -1777,6 +1777,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..1fb4b29953f5ba0158e24d804c8678ab
          .await
          .context("authentication failed")?;
          drop(authenticating);
++        drop(pre_auth_ip);
  
 -        #[cfg(debug_assertions)]
 -        if !self.config.spawn {
@@ -1795,7 +1796,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..1fb4b29953f5ba0158e24d804c8678ab
  
          let Connection {
              stream,
-@@ -169,7 +195,7 @@ impl Server {
+@@ -169,7 +196,7 @@ impl Server {
              options,
          };
  
@@ -1804,7 +1805,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..1fb4b29953f5ba0158e24d804c8678ab
              .await
              .context("failed to spawn session process")?;
  
-@@ -191,30 +217,101 @@ impl Server {
+@@ -191,30 +218,101 @@ impl Server {
  #[derive(Debug, Deserialize)]
  #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
  pub struct Config {
@@ -1924,10 +1925,10 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..1fb4b29953f5ba0158e24d804c8678ab
 +    }
  }
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42db008d20 100644
+index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..cdd00d5e7a4874ea2776b93df13481b00c5a9d19 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
-@@ -1,38 +1,54 @@
+@@ -1,38 +1,69 @@
  use core::{
      fmt,
      future::Future,
@@ -1941,7 +1942,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 -    collections::{BTreeMap, btree_map::Entry},
 -    time::Instant,
 -};
-+use std::{collections::BTreeMap, os::unix::process::ExitStatusExt as _};
++use std::{collections::BTreeMap, os::unix::process::ExitStatusExt as _, sync::Arc};
  
  use proto::{
      IncomingPacket, MAX_PACKET_LEN, MessageType, ProtoError, WriteState,
@@ -1957,7 +1958,10 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
      },
      named::ChannelType,
  };
-+use tokio::time::{Instant, Sleep, sleep};
++use tokio::{
++    sync::Semaphore,
++    time::{Instant, Sleep, sleep},
++};
  use tracing::{debug, info, warn};
  
 -use crate::{Error, platform::Terminal};
@@ -1966,13 +1970,26 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 +    platform::{GitProcess, Output},
 +};
  
+-#[derive(Default)]
 +/// Open session channels of one connection
- #[derive(Default)]
  pub(crate) struct Channels {
      next_id: u32,
      channels: BTreeMap<u32, Channel>,
 +    /// Channel to poll first, so one busy channel cannot starve the others
 +    cursor: u32,
++    /// One permit per live Git process, held until it is reaped, even after its channel closed
++    processes: Arc<Semaphore>,
++}
++
++impl Default for Channels {
++    fn default() -> Self {
++        Self {
++            next_id: 0,
++            channels: BTreeMap::new(),
++            cursor: 0,
++            processes: Arc::new(Semaphore::new(MAX_PROCESSES)),
++        }
++    }
 +}
 +
 +/// What the connection allows the current channel request to do
@@ -1992,10 +2009,15 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
      pub(crate) fn open(
          &mut self,
          open: ChannelOpen<'_>,
-@@ -43,27 +59,36 @@ impl Channels {
+@@ -43,27 +74,41 @@ impl Channels {
              return Ok(());
          }
  
++        if open.maximum_packet_size < MIN_PACKET_SIZE {
++            write.encode(&ChannelOpenFailure::packet_size_too_small(open.sender_channel))?;
++            return Ok(());
++        }
++
 +        if self.channels.len() >= MAX_CHANNELS {
 +            write.encode(&ChannelOpenFailure::resource_shortage(open.sender_channel))?;
 +            return Ok(());
@@ -2020,12 +2042,11 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
              remote_id: open.sender_channel,
              send_window: open.initial_window_size,
 -            receive_window: 0,
--            maximum_packet_size: open.maximum_packet_size,
--            env: Vec::new(),
--            terminal: None,
 +            receive_window: INITIAL_WINDOW_SIZE,
 +            credit: 0,
-+            maximum_packet_size: open.maximum_packet_size.max(MIN_PACKET_SIZE),
+             maximum_packet_size: open.maximum_packet_size,
+-            env: Vec::new(),
+-            terminal: None,
 +            protocol: None,
 +            run: Run::Idle,
              close_sent: false,
@@ -2043,7 +2064,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
          Ok(())
      }
  
-@@ -71,101 +96,81 @@ impl Channels {
+@@ -71,101 +116,81 @@ impl Channels {
          &mut self,
          request: ChannelRequest<'_>,
          write: &mut WriteState,
@@ -2051,7 +2072,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 -        options: &KeyOptions,
 +        grant: &Grant<'_>,
      ) -> Result<(), Error> {
-+        let running = self.busy_count();
++        let processes = self.processes.clone();
          let Some(channel) = self.channels.get_mut(&request.recipient_channel) else {
              return Err(ProtoError::InvalidPacket("channel request for unknown channel ID").into());
          };
@@ -2070,13 +2091,15 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 -                        debug!(name = env.name, "ignoring environment variable request");
 -                        if request.want_reply {
 -                            write.encode(&channel.failure())?;
+-                        }
+-                        return Ok(());
 +        let accepted = match request.r#type {
 +            ChannelRequestType::Env(env) => match (env.name, &channel.run) {
 +                ("GIT_PROTOCOL", Run::Idle) => match validate_protocol(env.value) {
 +                    Some(protocol) => {
 +                        channel.protocol = Some(protocol);
 +                        true
-+                    }
+                     }
 +                    None => {
 +                        debug!(value = env.value, "rejecting GIT_PROTOCOL value");
 +                        false
@@ -2085,44 +2108,8 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 +                _ => {
 +                    debug!(name = env.name, "rejecting environment variable request");
 +                    false
-+                }
-+            },
-+            ChannelRequestType::Exec(exec) => {
-+                if !matches!(channel.run, Run::Idle) {
-+                    warn!("rejecting second exec request on a channel");
-+                    false
-+                } else if running >= MAX_PROCESSES {
-+                    warn!("rejecting exec request: too many running commands");
-+                    false
-+                } else {
-+                    match grant.policy.authorize(exec.command, grant.options.git_access) {
-+                        Ok(command) => match GitProcess::spawn(&command, channel.protocol) {
-+                            Ok(process) => {
-+                                info!(service = ?command.service, "running git command");
-+                                channel.run = Run::Active(Box::new(Active::new(Some(process))));
-+                                true
-+                            }
-+                            Err(error) => {
-+                                warn!(%error, "failed to spawn git");
-+                                false
-+                            }
-+                        },
-+                        Err(error @ (PolicyError::NotFound | PolicyError::Denied)) => {
-+                            info!(%error, "refusing git command");
-+                            let mut active = Active::new(None);
-+                            active.stderr_backlog.extend_from_slice(DENIED_MESSAGE);
-+                            active.outcome = Some(Outcome::Exited(1));
-+                            channel.run = Run::Active(Box::new(active));
-+                            true
-+                        }
-+                        Err(error) => {
-+                            warn!(%error, "rejecting exec request");
-+                            false
-                         }
--                        return Ok(());
-                     }
                  }
-             }
+-            }
 -            ChannelRequestType::Shell => {
 -                let Some(TerminalState::Requested(pty_req)) = channel.terminal.take() else {
 -                    return Err(
@@ -2146,29 +2133,62 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 -                    recipient_channel: channel.remote_id,
 -                    bytes_to_add: INITIAL_WINDOW_SIZE,
 -                })?;
-+            other => {
-+                warn!(request_type = ?other, "rejecting unsupported channel request");
-+                false
-             }
+-            }
 -            ChannelRequestType::WindowChange(window_change) => match &channel.terminal {
 -                Some(TerminalState::Running(terminal)) => terminal.resize(&window_change)?,
 -                _ => warn!("window-change request without running terminal"),
--            },
+             },
 -            // Should be sent by the server only, ignore when received from clients
 -            ChannelRequestType::ExitStatus(status) => {
 -                debug!(channel_id = %request.recipient_channel, exit_status = %status, "received exit-status from client");
 -                if request.want_reply {
 -                    write.encode(&channel.failure())?;
--                }
++            ChannelRequestType::Exec(exec) => {
++                if !matches!(channel.run, Run::Idle) {
++                    warn!("rejecting second exec request on a channel");
++                    false
++                } else if let Ok(permit) = processes.try_acquire_owned() {
++                    match grant.policy.authorize(exec.command, grant.options.git_access) {
++                        Ok(command) => match GitProcess::spawn(&command, channel.protocol, permit) {
++                            Ok(process) => {
++                                info!(service = ?command.service, "running git command");
++                                channel.run = Run::Active(Box::new(Active::new(Some(process))));
++                                true
++                            }
++                            Err(error) => {
++                                warn!(%error, "failed to spawn git");
++                                false
++                            }
++                        },
++                        Err(error @ (PolicyError::NotFound | PolicyError::Denied)) => {
++                            info!(%error, "refusing git command");
++                            let mut active = Active::new(None);
++                            active.stderr_backlog.extend_from_slice(DENIED_MESSAGE);
++                            active.outcome = Some(Outcome::Exited(1));
++                            channel.run = Run::Active(Box::new(active));
++                            true
++                        }
++                        Err(error) => {
++                            warn!(%error, "rejecting exec request");
++                            false
++                        }
++                    }
++                } else {
++                    warn!("rejecting exec request: too many live commands");
++                    false
+                 }
 -                return Ok(());
--            }
+             }
 -            // Agent forwarding is not supported -- only reply when asked
 -            ChannelRequestType::AuthAgentReq | ChannelRequestType::Unknown(_) => {
 -                if request.want_reply {
 -                    write.encode(&channel.failure())?;
 -                }
 -                return Ok(());
--            }
++            other => {
++                warn!(request_type = ?other, "rejecting unsupported channel request");
++                false
+             }
 -            _ => {
 -                warn!(request_type = ?request.r#type, "ignoring channel request");
 -                if request.want_reply {
@@ -2207,7 +2227,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
          Ok(())
      }
  
-@@ -176,26 +181,21 @@ impl Channels {
+@@ -176,26 +201,21 @@ impl Channels {
              ));
          };
  
@@ -2239,7 +2259,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
              Some(window) => channel.receive_window = window,
              None => {
                  return Err(ProtoError::InvalidPacket(
-@@ -204,30 +204,34 @@ impl Channels {
+@@ -204,30 +224,34 @@ impl Channels {
              }
          }
  
@@ -2289,7 +2309,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
          debug!(channel_id = %eof.recipient_channel, "received channel eof from client");
          Ok(())
      }
-@@ -242,7 +246,6 @@ impl Channels {
+@@ -242,7 +266,6 @@ impl Channels {
              return Ok(());
          };
  
@@ -2297,7 +2317,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
          if !channel.close_sent {
              channel.close_sent = true;
              write.encode(&ChannelClose {
-@@ -250,272 +253,347 @@ impl Channels {
+@@ -250,272 +273,345 @@ impl Channels {
              })?;
          }
  
@@ -2383,13 +2403,11 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 +        for process in &mut processes {
 +            process.finish_stopping(deadline).await;
 +        }
-+    }
++        drop(processes);
 +
-+    fn busy_count(&self) -> usize {
-+        self.channels
-+            .values()
-+            .filter(|channel| matches!(channel.run, Run::Active(_)))
-+            .count()
++        // Commands whose channels closed earlier are still being stopped by their reaper tasks.
++        let all = u32::try_from(MAX_PROCESSES).unwrap_or(u32::MAX);
++        let _ = tokio::time::timeout_at(deadline + SHUTDOWN_GRACE, self.processes.acquire_many(all)).await;
      }
  }
  
@@ -2894,7 +2912,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
      }
  }
  
-@@ -567,7 +645,17 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
+@@ -567,7 +663,109 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
      }
  }
  
@@ -2903,8 +2921,8 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 -/// How long to wait for a shell to become reapable after its PTY reports EOF
 -/// or after it is killed
 -const EXIT_GRACE_PERIOD: Duration = Duration::from_secs(5);
-+/// Smallest packet size honored for a client that advertises something absurdly small
-+const MIN_PACKET_SIZE: u32 = 512;
++/// Smallest maximum packet size a client may advertise; smaller channels are refused, never rounded up
++const MIN_PACKET_SIZE: u32 = 128;
 +const READ_CHUNK: usize = 32 * 1024;
 +const MAX_PACKETS_PER_POLL: usize = 16;
 +/// Session channels one connection may hold open at once
@@ -2915,6 +2933,98 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..aa64be135aa361dc75a2b40ab5d68e42
 +const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 +/// How long output pipes may stay open after Git itself exited
 +const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
++
++#[cfg(test)]
++mod tests {
++    use std::{fs, os::unix::fs::{PermissionsExt as _, symlink}, path::Path};
++
++    use proto::{auth::GitAccess, named::ChannelType};
++
++    use super::*;
++    use crate::DEFAULT_PROVIDER;
++
++    fn directory(path: &Path) {
++        fs::create_dir_all(path).unwrap();
++        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
++    }
++
++    fn open(id: u32, maximum_packet_size: u32) -> ChannelOpen<'static> {
++        ChannelOpen {
++            r#type: ChannelType::Session,
++            sender_channel: id,
++            initial_window_size: 1 << 20,
++            maximum_packet_size,
++        }
++    }
++
++    fn exec(channel: u32) -> ChannelRequest<'static> {
++        ChannelRequest {
++            recipient_channel: channel,
++            r#type: ChannelRequestType::Exec(proto::channels::Exec {
++                command: b"git-upload-pack 'a.git'",
++            }),
++            want_reply: true,
++        }
++    }
++
++    #[tokio::test]
++    async fn closed_channels_keep_their_slot_until_the_command_is_reaped() {
++        let dir = tempfile::tempdir().unwrap();
++        let base = fs::canonicalize(dir.path()).unwrap();
++        directory(&base);
++        let (repos, bin) = (base.join("repos"), base.join("bin"));
++        directory(&repos.join("a.git").join("objects"));
++        directory(&repos.join("a.git").join("refs"));
++        fs::write(repos.join("a.git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
++        directory(&bin);
++        fs::write(bin.join("git"), "#!/bin/sh\ntrap '' TERM\nPATH=/bin:/usr/bin\nsleep 30\n").unwrap();
++        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
++        symlink("git", bin.join("git-upload-pack")).unwrap();
++        symlink("git", bin.join("git-receive-pack")).unwrap();
++
++        let policy = GitPolicy::new(&repos, &bin).unwrap();
++        let options = KeyOptions {
++            git_access: Some(GitAccess::Read),
++        };
++        let grant = Grant {
++            policy: &policy,
++            options: &options,
++        };
++        let mut write = WriteState::new(DEFAULT_PROVIDER.secure_random());
++        let mut channels = Channels::default();
++
++        for id in 0..MAX_PROCESSES as u32 {
++            channels.open(open(id, 32768), &mut write).unwrap();
++            channels.request(exec(id), &mut write, &grant).unwrap();
++            channels.close(&ChannelClose { recipient_channel: id }, &mut write).unwrap();
++        }
++        assert!(!channels.busy(), "every channel is closed");
++        assert_eq!(channels.processes.available_permits(), 0, "the stopping commands still count");
++
++        let next = MAX_PROCESSES as u32;
++        channels.open(open(next, 32768), &mut write).unwrap();
++        channels.request(exec(next), &mut write, &grant).unwrap();
++        assert!(!channels.busy(), "a command beyond the live-process budget was started");
++
++        channels.shutdown().await;
++        assert_eq!(
++            channels.processes.available_permits(),
++            MAX_PROCESSES,
++            "shutdown must wait for every stopping command"
++        );
++    }
++
++    #[test]
++    fn channels_are_never_given_a_bigger_packet_size_than_the_peer_allows() {
++        let mut write = WriteState::new(DEFAULT_PROVIDER.secure_random());
++        let mut channels = Channels::default();
++        channels.open(open(0, MIN_PACKET_SIZE - 1), &mut write).unwrap();
++        assert!(channels.channels.is_empty(), "a channel too small to serve was accepted");
++        channels.open(open(1, MIN_PACKET_SIZE), &mut write).unwrap();
++        let channel = channels.channels.values().next().unwrap();
++        assert_eq!(channel.maximum_packet_size, MIN_PACKET_SIZE);
++    }
++}
 diff --git a/oxish/src/session/mod.rs b/oxish/src/session/mod.rs
 index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc8f405be5 100644
 --- a/oxish/src/session/mod.rs
@@ -3200,7 +3310,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc
 +/// How long buffered output may wait for a peer that is not reading
 +const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..42591422c81fe9e6b8816f537130f31eada4c3df 100644
+index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd0531c7f1 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
 @@ -1,20 +1,17 @@
@@ -3575,7 +3685,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..42591422c81fe9e6b8816f537130f31e
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -134,323 +381,610 @@ async fn handshake_ed25519_graviola() {
+@@ -134,323 +381,639 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -4029,6 +4139,35 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..42591422c81fe9e6b8816f537130f31e
 +    assert_eq!(served.stdout(), "OK\n");
 +}
 +
++#[tokio::test]
++async fn established_sessions_do_not_use_up_the_pre_auth_allowance() {
++    let world = script_world("PATH=/usr/bin:/bin; sleep 3; echo OK").await;
++    world.bare_repo("a.git").await.unwrap();
++    let config = crate::Config {
++        max_unauthenticated_per_ip: 1,
++        max_sessions_per_ip: 3,
++        ..crate::Config::default()
++    };
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++
++    let addr = client.addr;
++    let key = client.key.clone();
++    let mut runs = vec![tokio::spawn(async move { client.run(Some(SERVICE), b"").await })];
++    for _ in 0..2 {
++        tokio::time::sleep(Duration::from_millis(800)).await;
++        let key = key.clone();
++        runs.push(tokio::spawn(async move { CliClient::new(addr, &key).run(Some(SERVICE), b"").await }));
++    }
++    for run in runs {
++        let run = run.await.unwrap().unwrap();
++        assert!(run.status.success(), "a session behind established ones was refused: {}", run.stderr);
++        assert_eq!(run.stdout(), "OK\n");
++    }
++}
++
 +/// Open `count` TCP connections that never send anything
 +async fn futures_idle(addr: SocketAddr, count: usize) -> Vec<tokio::net::TcpStream> {
 +    let mut streams = Vec::new();
@@ -4466,7 +4605,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..42591422c81fe9e6b8816f537130f31e
  #[tokio::test]
  async fn host_keys_from_files_graviola() {
      host_keys_from_files(graviola::DEFAULT_PROVIDER)
-@@ -493,9 +1027,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+@@ -493,9 +1056,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
  #[tokio::test]
  async fn verify_keys() {
      let providers = [
@@ -4476,7 +4615,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..42591422c81fe9e6b8816f537130f31e
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -522,130 +1053,6 @@ async fn verify_keys() {
+@@ -522,130 +1082,6 @@ async fn verify_keys() {
      }
  }
  
@@ -4607,7 +4746,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..42591422c81fe9e6b8816f537130f31e
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  
  /// Build and locate the `oxish-session` binary
-@@ -704,8 +1111,3 @@ fn subscribe() {
+@@ -704,8 +1140,3 @@ fn subscribe() {
      });
  }
  
@@ -4618,10 +4757,10 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..42591422c81fe9e6b8816f537130f31e
 -const KX_WARNING_MARKER: &str = "post-quantum secure";
 diff --git a/oxish/src/unix/exec.rs b/oxish/src/unix/exec.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..cee354dfcc200e9cf9350d4f6edf44ca7089abe6
+index 0000000000000000000000000000000000000000..0b0c9b1d7b13170fed2fb23dc1ec1c1c720c12d4
 --- /dev/null
 +++ b/oxish/src/unix/exec.rs
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,296 @@
 +use core::{
 +    pin::Pin,
 +    task::{Context, Poll},
@@ -4635,6 +4774,7 @@ index 0000000000000000000000000000000000000000..cee354dfcc200e9cf9350d4f6edf44ca
 +use rustix::process::{Pid, Signal, kill_process_group};
 +use tokio::{
 +    io::{AsyncRead, AsyncWrite, ReadBuf},
++    sync::OwnedSemaphorePermit,
 +    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 +};
 +use tracing::debug;
@@ -4656,6 +4796,7 @@ index 0000000000000000000000000000000000000000..cee354dfcc200e9cf9350d4f6edf44ca
 +    stdout: Option<ChildStdout>,
 +    stderr: Option<ChildStderr>,
 +    status: Option<ExitStatus>,
++    permit: Option<OwnedSemaphorePermit>,
 +}
 +
 +/// Which child output pipe to read
@@ -4667,7 +4808,13 @@ index 0000000000000000000000000000000000000000..cee354dfcc200e9cf9350d4f6edf44ca
 +
 +impl GitProcess {
 +    /// Spawn a validated command; `protocol` is an already validated `GIT_PROTOCOL` value
-+    pub(crate) fn spawn(command: &GitCommand, protocol: Option<&str>) -> io::Result<Self> {
++    ///
++    /// The permit stays held until the child has been reaped, including while it is being stopped.
++    pub(crate) fn spawn(
++        command: &GitCommand,
++        protocol: Option<&str>,
++        permit: OwnedSemaphorePermit,
++    ) -> io::Result<Self> {
 +        let mut cmd = Command::new(&command.program);
 +        cmd.args(&command.args)
 +            .env_clear()
@@ -4697,6 +4844,7 @@ index 0000000000000000000000000000000000000000..cee354dfcc200e9cf9350d4f6edf44ca
 +            queue: VecDeque::new(),
 +            stdin_closing: false,
 +            status: None,
++            permit: Some(permit),
 +        })
 +    }
 +
@@ -4884,6 +5032,7 @@ index 0000000000000000000000000000000000000000..cee354dfcc200e9cf9350d4f6edf44ca
 +            return;
 +        };
 +        let group = self.group;
++        let permit = self.permit.take();
 +        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
 +            let _ = child.start_kill();
 +            return;
@@ -4895,6 +5044,7 @@ index 0000000000000000000000000000000000000000..cee354dfcc200e9cf9350d4f6edf44ca
 +                }
 +                let _ = child.kill().await;
 +            }
++            drop(permit);
 +        });
 +    }
 +}

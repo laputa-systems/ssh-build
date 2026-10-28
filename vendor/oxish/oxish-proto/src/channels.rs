@@ -128,6 +128,15 @@ impl ChannelOpenFailure<'static> {
         }
     }
 
+    /// Failure response for a channel open whose maximum packet size is too small to serve
+    pub fn packet_size_too_small(recipient_channel: u32) -> Self {
+        Self {
+            recipient_channel,
+            reason_code: ChannelOpenFailureReason::AdministrativelyProhibited,
+            description: "maximum packet size is too small",
+        }
+    }
+
     /// Failure response for a channel open with an unsupported channel type
     pub fn unknown_type(recipient_channel: u32) -> Self {
         Self {

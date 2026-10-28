@@ -27,8 +27,16 @@ sh scripts/package.sh                              # dist/release/ssh-<triple>.z
 The Linux gates (`readelf`, static, no `PT_INTERP`) run inside the Docker build, and bytes that
 fail them are never exported. `test/runtime.sh` must keep `CARGO_HOME` and `RUSTUP_HOME` pointing
 at the real home, because its isolated `HOME` would otherwise make cargo reinstall the toolchain.
-`scripts/package.sh` and `scripts/package-oxish.sh` refuse missing, wrong-arch or non-static input
-and ZIPs over `release-budgets.json`, then rewrite the shared, verified `SHA256SUMS`.
+Every build writes `<bin_dir>/build-record.json` (`scripts/build-record.sh`): commit, a hash of
+the build inputs, toolchain and executable hashes. `scripts/package.sh` and
+`scripts/package-oxish.sh` refuse binaries without a record, with a changed executable, or built
+from different inputs than the current tree (`ALLOW_DIRTY=1` permits a local package from an
+uncommitted tree). They also refuse wrong-arch or non-static input and ZIPs over
+`release-budgets.json`, and replace `dist/release` assets and the shared `SHA256SUMS` only after
+every target passes.
+
+`docker buildx build -f test/qualify-elf.Dockerfile --platform linux/arm64 .` checks that the
+Linux qualifier rejects an executable stack and a missing RELRO segment.
 
 ## Server
 

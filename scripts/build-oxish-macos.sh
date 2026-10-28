@@ -25,4 +25,5 @@ for bin in oxish-server oxish-session; do
     cp "$CARGO_TARGET_DIR/release/$bin" "$dest/$bin"
     codesign --force -s - "$dest/$bin"
 done
+sh scripts/build-record.sh write oxish "$dest" aarch64-apple-darwin
 echo "oxish server ready in $dest"

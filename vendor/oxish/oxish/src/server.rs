@@ -105,7 +105,7 @@ impl Server {
 
     #[instrument(name = "handshake", skip(self, stream, addr), fields(addr = %addr))]
     pub(crate) async fn accept(&self, stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
-        let Some(_pre_auth_ip) = PerIp::acquire(&self.pre_auth_by_ip, addr.ip()) else {
+        let Some(pre_auth_ip) = PerIp::acquire(&self.pre_auth_by_ip, addr.ip()) else {
             warn!(%addr, "too many unauthenticated connections from this address");
             return Err(anyhow::anyhow!("too many unauthenticated connections from this address"));
         };
@@ -144,6 +144,7 @@ impl Server {
         .await
         .context("authentication failed")?;
         drop(authenticating);
+        drop(pre_auth_ip);
 
         let Some(_session_ip) = PerIp::acquire(&self.sessions_by_ip, addr.ip()) else {
             warn!(%addr, "too many sessions from this address; closing connection");

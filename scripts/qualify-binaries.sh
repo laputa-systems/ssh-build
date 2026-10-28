@@ -55,7 +55,15 @@ for b in $bins; do
         [ "$needed" -eq 0 ]; chk $? "$b: static, no DT_NEEDED"
         undef=$(nm -D "$f" 2>/dev/null | grep -ci "evp\|RSA_\|EC_KEY\|BN_new\|libcrypto\|libssl" || true)
         [ "$undef" -eq 0 ]; chk $? "$b: no libcrypto symbols ($undef)"
-        readelf -l "$f" | grep -q "GNU_STACK.*RWE" && { echo "FAIL: $b: W+X GNU_STACK" >&2; fails=$((fails + 1)); } || echo "ok: $b: no W+X stack"
+        segments=$(readelf -lW "$f" 2>/dev/null)
+        flags_of() { printf '%s\n' "$segments" | awk -v kind="$1" '$1 == kind { f = ""; for (i = 7; i < NF; i++) f = f $i; print f }'; }
+        stack=$(flags_of GNU_STACK)
+        [ -n "$stack" ]; chk $? "$b: has a GNU_STACK header"
+        case $stack in *E*) false ;; *) true ;; esac; chk $? "$b: non-executable stack ($stack)"
+        [ -n "$(flags_of GNU_RELRO)" ]; chk $? "$b: has a GNU_RELRO segment"
+        wx=$(flags_of LOAD | grep -c 'W.*E\|E.*W' || true)
+        [ "$wx" -eq 0 ]; chk $? "$b: no writable and executable load segment"
+        readelf -dW "$f" 2>/dev/null | grep -q TEXTREL; [ $? -ne 0 ]; chk $? "$b: no text relocations"
         readelf -S "$f" | grep -q "\.note\.gnu\.property" && echo "ok: $b: property notes present" || echo "note: $b: no property notes"
         file_out=$(file -b "$f")
         echo "info: $b: $file_out"
