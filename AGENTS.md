@@ -25,6 +25,15 @@ sh scripts/package.sh         # dist/release: 3 ZIPs + manifests + verified SHA2
   `sources.lock.json`. Never commit `src/`, `dist/`, `.work/`, or keys.
 - `usr` lives at `~/usr`, not `~/d/usr`. No pushes, no releases from lanes.
 
+## Rust
+
+`rust-toolchain.toml` pins `nightly-2026-09-15` (rust-src, clippy) for all
+OxiSH builds; run cargo from the repo root so rustup finds it. Do not change
+the pin unless the owner asks. The server is Graviola-only:
+`sh scripts/check-crypto-graph.sh` fails on any other provider in the release
+graph or `Cargo.lock`; `vendor/oxish` is reproducible with
+`sh scripts/vendor-oxish.sh verify`.
+
 ## Verified foundation (S0, from pinned source)
 
 - OpenSSH `configure.ac:130`: `--without-openssl` exists (experimental).

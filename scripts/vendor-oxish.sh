@@ -53,8 +53,9 @@ apply_patches() {
     dest=$1
     for patch in "$patch_dir"/*.patch; do
         [ -f "$patch" ] || fail "no patches in $patch_dir"
-        (cd "$dest" && patch -p1 -s -N < "$patch") || fail "patch $patch does not apply to $rev"
+        (cd "$dest" && patch -p1 -s -N -E < "$patch") || fail "patch $patch does not apply to $rev"
     done
+    find "$dest" -depth -type d -empty -exec rmdir {} \;
 }
 
 case ${1:-} in
