@@ -45,9 +45,8 @@ Server extension:
 - S15 end-to-end: accepted on macOS arm64 (extracted server and client ZIPs)
   and on Linux arm64 (static-PIE client, server and git-build, as an
   unprivileged user, via `test/linux-e2e.Dockerfile`), against the pinned
-  git-build prerelease. Open: x86-64 Linux needs native hardware; under
-  emulation the server correctly refuses to start (no BMI1/AVX2) with a clear
-  message.
+  git-build prerelease; also on Linux x86-64 on a native host (BMI1/AVX2),
+  same step with `--platform linux/amd64`.
 - S16 builds: macOS arm64 (14.0 floor) and static-PIE musl (arm64, amd64)
   build; readelf and Mach-O gates ran. Static-PIE initially crashed at startup
   (Rust's bundled start files); fixed by linking with Alpine's gcc/musl.
@@ -56,7 +55,7 @@ Server extension:
 - S18 security review: see `SECURITY.md`; status stays experimental.
 - S19: `dl oxish` done (opt-in); final cleanup and report open.
 
-Next: native x86-64 Linux run, longer fuzzing, external review, release workflow (owner decisions).
+Next: longer fuzzing, external review, release workflow (owner decisions).
 Launch prompt: `Run the next open slice of plan.md in /Users/josh/d/ssh-build;
 brief per orchestrate, land green only, steer after each accept.`
 

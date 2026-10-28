@@ -85,9 +85,7 @@ maintainers.
 ## Blockers before calling it production-ready
 
 1. External review of the server and of the Graviola patch.
-2. Linux x86-64 execution of the end-to-end suite on native hardware (only arm64 Linux and
-   macOS arm64 were run; x86-64 Linux bytes build and pass the static checks).
-3. Longer fuzzing, including the channel state machine and the authorized-keys parser, in CI.
-4. A deployment guide for supervision, log handling, and key rotation procedures, tested on a
+2. Longer fuzzing, including the channel state machine and the authorized-keys parser, in CI.
+3. A deployment guide for supervision, log handling, and key rotation procedures, tested on a
    real host.
-5. Release workflow and signed releases; nothing has been published.
+4. Release workflow and signed releases; nothing has been published.
