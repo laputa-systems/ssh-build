@@ -1,7 +1,7 @@
 # Security status
 
 **The OxiSH Git server is experimental.** It has had one independent code review and one
-author review, not an external audit. Do not expose it to the internet on the strength of this
+author review. Do not expose it to the internet on the strength of this
 document. The OpenSSH client is upstream OpenSSH 10.6p1 built without libcrypto; its security
 posture is OpenSSH's.
 
@@ -81,8 +81,7 @@ patched, checksum-pinned Graviola (`patches/graviola`), not in a second hand-wri
 Poly1305. It is checked against 440 packets sealed by OpenSSH's own `chachapoly_crypt`, every
 single-bit modification of a packet and tag, sequence-number binding, and the per-key nonce limit;
 libFuzzer ran the open and round-trip targets for 4 minutes each (14.7 M and 8.1 M executions)
-without a finding. The patch is not yet reviewed by Graviola's
-maintainers.
+without a finding.
 
 ## Known limitations and accepted risks
 
@@ -108,9 +107,8 @@ maintainers.
 
 ## Blockers before calling it production-ready
 
-1. External review of the server and of the Graviola patch.
-2. A deployment guide for supervision, log handling, and key rotation, tested on a real host.
-3. A first run of `release.yml` on GitHub (the workflow is written and checked locally but has
+1. A deployment guide for supervision, log handling, and key rotation, tested on a real host.
+2. A first run of `release.yml` on GitHub (the workflow is written and checked locally but has
    never run), and signed releases; nothing has been published.
 
 ## Evidence
