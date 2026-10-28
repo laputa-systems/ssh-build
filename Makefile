@@ -2,7 +2,8 @@ OPENSSH_VERSION ?= $(shell sed -n 's/^OPENSSH_VERSION=//p' scripts/fetch-sources
 DOCKER_PLATFORM ?= linux/arm64
 
 MACOS_DIST ?= dist/macos/bin
-LINUX_DIST ?= dist/linux/bin
+LINUX_ARCH = $(if $(findstring arm64,$(DOCKER_PLATFORM)),aarch64,x86_64)
+LINUX_DIST ?= dist/linux-$(LINUX_ARCH)/bin
 
 .PHONY: macos linux
 

@@ -6,6 +6,8 @@ set -eu
 
 bin_dir=${SSH_BIN_DIR:-dist/macos/bin}
 work=${TEST_WORK:-.work/test-runtime}
+export CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
+export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
 rm -rf "$work"
 mkdir -p "$work/home/.ssh"
 export HOME=$work/home
@@ -95,52 +97,31 @@ sleep 1
 kill -0 "$(cat "$work/sshd.pid")"
 echo "ok: loopback sshd up"
 
-# known_hosts via keyscan, then strict exec with exit-status propagation.
-# Fixture keyscan built from the same pinned source (never shipped; the
-# product set has no keyscan). System keyscan cannot do this: it offers only
-# RSA hostkey types while the fixture host key is Ed25519.
-keyscan=${SSH_KEYSCAN:-.work/build-macos/ssh-keyscan}
-test -x "$keyscan" || { echo "FAIL: no ssh-keyscan fixture ($keyscan)" >&2; exit 1; }
-"$keyscan" -t ed25519 -p "$port" 127.0.0.1 > "$work/known_hosts" 2>"$work/keyscan.err" || true
-tries=0
-while ! grep -q "ssh-ed25519" "$work/known_hosts" 2>/dev/null && [ "$tries" -lt 10 ]; do
-    tries=$((tries + 1))
-    sleep 1
-    "$keyscan" -t ed25519 -p "$port" 127.0.0.1 > "$work/known_hosts" 2>"$work/keyscan.err" || true
-done
-grep -q "ssh-ed25519" "$work/known_hosts" || { echo "FAIL: keyscan found no ed25519 host key"; tail -n 5 "$work/keyscan.err" >&2; exit 1; }
-echo "ok: known_hosts via keyscan"
-out=$("$ssh" -F "$work/ssh_config" -p "$port" -o BatchMode=yes -o StrictHostKeyChecking=yes \
-    127.0.0.1 'echo RT-EXEC-OK' 2>/dev/null) || true
-if [ "$out" = "RT-EXEC-OK" ]; then
-    "$ssh" -F "$work/ssh_config" -p "$port" -o BatchMode=yes 127.0.0.1 'exit 7'
-    rc=$?
-    [ "$rc" -eq 7 ] || { echo "FAIL: exit status $rc != 7" >&2; exit 1; }
-    echo "ok: loopback exec + exit-status (system sshd)"
-elif command -v cargo >/dev/null 2>&1 && [ -f vendor/oxish/Cargo.toml ]; then
-    # The loopback sshd cannot run exec channels here (fixture account's
-    # login shell is interactive-only), so prove client exec against the
-    # vendored OxiSH server: real git-upload-pack bytes, exit status, and
-    # rejection of non-Git commands, all through THIS client's binary.
-    echo "note: system sshd cannot run exec here; using OxiSH exec fixture"
-    OXISH_TEST_SSH="$abs_work_ssh" CARGO_TARGET_DIR="$PWD/.work/target-oxish" cargo test \
-        --manifest-path vendor/oxish/Cargo.toml -p oxish exec_ 2>&1 | tail -n 4
-    echo "ok: loopback exec + exit-status (OxiSH fixture)"
-else
-    echo "FAIL: loopback exec: $out" >&2; exit 1
-fi
+# known_hosts pinned from the fixture host key; the shell-free sftp subsystem
+# carries the transfers because the fixture account's login shell may be
+# interactive-only (exec is proven against the OxiSH server below).
+printf '[127.0.0.1]:%s %s\n' "$port" "$(cat "$work/ssh_host_ed25519_key.pub")" > "$work/known_hosts"
+echo "ok: known_hosts pinned from host key"
 
-# sftp + scp round-trips, byte-exact, against an absolute remote dir.
+mkdir -p "$work/remote"
 printf 'sftp-fixture-bytes-12345' > "$work/payload.bin"
-"$ssh" -F "$work/ssh_config" -p "$port" -o BatchMode=yes 127.0.0.1 "mkdir -p $abs_work/remote"
 printf 'put %s %s\n' "$work/payload.bin" "$abs_work/remote/payload.bin" | "$sftp" -F "$work/ssh_config" -b - -P "$port" \
-    -o BatchMode=yes 127.0.0.1 >/dev/null
-"$scp" -F "$work/ssh_config" -P "$port" -o BatchMode=yes \
+    -o BatchMode=yes -o StrictHostKeyChecking=yes 127.0.0.1 >/dev/null
+cmp "$work/payload.bin" "$work/remote/payload.bin"
+"$scp" -F "$work/ssh_config" -P "$port" -o BatchMode=yes -o StrictHostKeyChecking=yes \
     "127.0.0.1:$abs_work/remote/payload.bin" "$work/back-scp.bin" >/dev/null
 cmp "$work/payload.bin" "$work/back-scp.bin"
 printf 'get %s %s\n' "$abs_work/remote/payload.bin" "$work/back-sftp.bin" | "$sftp" -F "$work/ssh_config" -b - -P "$port" \
-    -o BatchMode=yes 127.0.0.1 >/dev/null
+    -o BatchMode=yes -o StrictHostKeyChecking=yes 127.0.0.1 >/dev/null
 cmp "$work/payload.bin" "$work/back-sftp.bin"
 echo "ok: sftp + scp round-trips byte-exact"
+
+# Exec: real git-upload-pack bytes, exit status, and rejection of non-Git
+# commands, all through THIS client binary against the vendored OxiSH server.
+OXISH_TEST_SSH="$abs_work_ssh" CARGO_TARGET_DIR="$PWD/.work/target-oxish" cargo test \
+    --manifest-path vendor/oxish/Cargo.toml -p oxish exec_ > "$work/exec.log" 2>&1 \
+    || { tail -n 30 "$work/exec.log" >&2; echo "FAIL: loopback exec" >&2; exit 1; }
+grep -q 'test result: ok. 3 passed' "$work/exec.log" || { tail -n 30 "$work/exec.log" >&2; echo "FAIL: exec tests did not all run" >&2; exit 1; }
+echo "ok: loopback exec + exit-status + rejection (OxiSH)"
 
 echo "runtime qualification passed ($bin_dir)"

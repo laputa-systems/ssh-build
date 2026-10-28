@@ -46,6 +46,12 @@ for b in $bins; do
         readelf -S "$f" | grep -q "\.note\.gnu\.property" && echo "ok: $b: property notes present" || echo "note: $b: no property notes"
         file_out=$(file -b "$f")
         echo "info: $b: $file_out"
+        case $arch in
+            x86_64|amd64) elf_arch="x86-64" ;;
+            aarch64|arm64) elf_arch="ARM aarch64" ;;
+            *) elf_arch=$arch ;;
+        esac
+        echo "$file_out" | grep -q "$elf_arch"; chk $? "$b: arch $elf_arch"
         echo "$file_out" | grep -qi "static"; chk $? "$b: statically linked"
     fi
 done
