@@ -27,6 +27,8 @@ Server extension:
   `--selftest`; AWS-LC crate and features deleted).
 - S10 Git policy: accepted (`cargo test -p oxish git::`; absolute-path
   executable escape closed; forced commands and shell removed).
+- Independent review (S18) found no P1; the P2 pre-auth lockout and six P3
+  items are fixed with tests (see `SECURITY.md`).
 - S11 channel lifecycle: accepted with gaps (stderr as extended data,
   window-bound stdin queue, EOF after both pipes, exit status/signal,
   SIGTERM-then-SIGKILL on disconnect, tests `channel_*`). Open: explicit tests
@@ -40,17 +42,21 @@ Server extension:
   ChaCha20/Poly1305 remains.
 - S14 protocol v2: accepted (packet trace in `test/e2e-git.sh`; only
   `version=2` passes through).
-- S15 end-to-end: accepted on macOS arm64 against the pinned git-build
-  prerelease, including on the extracted server and client ZIPs. Open: the same
-  run on Linux bytes needs a native Linux runner.
-- S16 builds: macOS arm64 and static-PIE musl (arm64, amd64) build; readelf and
-  Mach-O gates ran. Open: Linux binaries were not executed.
+- S15 end-to-end: accepted on macOS arm64 (extracted server and client ZIPs)
+  and on Linux arm64 (static-PIE client, server and git-build, as an
+  unprivileged user, via `test/linux-e2e.Dockerfile`), against the pinned
+  git-build prerelease. Open: x86-64 Linux needs native hardware; under
+  emulation the server correctly refuses to start (no BMI1/AVX2) with a clear
+  message.
+- S16 builds: macOS arm64 (14.0 floor) and static-PIE musl (arm64, amd64)
+  build; readelf and Mach-O gates ran. Static-PIE initially crashed at startup
+  (Rust's bundled start files); fixed by linking with Alpine's gcc/musl.
 - S17 packaging: accepted locally (`sh scripts/package-oxish.sh`; one
   consolidated, verified `SHA256SUMS`). Nothing published.
 - S18 security review: see `SECURITY.md`; status stays experimental.
 - S19: `dl oxish` done (opt-in); final cleanup and report open.
 
-Next: close S18 findings, S19 cleanup, final report.
+Next: native x86-64 Linux run, longer fuzzing, external review, release workflow (owner decisions).
 Launch prompt: `Run the next open slice of plan.md in /Users/josh/d/ssh-build;
 brief per orchestrate, land green only, steer after each accept.`
 

@@ -58,8 +58,10 @@ echo "ssh: $("$ssh_dir/ssh" -V 2>&1)"
 for name in rw ro stranger; do
     "$ssh_dir/ssh-keygen" -q -t ed25519 -N "" -C "e2e-$name" -f "$work/keys/$name"
 done
-"$oxish_dir/oxish-server" --generate-host-key "$work/keys/host" 2>/dev/null
-"$oxish_dir/oxish-server" --generate-host-key "$work/keys/decoy" 2>/dev/null
+for name in host decoy; do
+    "$oxish_dir/oxish-server" --generate-host-key "$work/keys/$name" 2> "$work/genkey.err" \
+        || { cat "$work/genkey.err" >&2; fail "oxish-server could not generate a host key"; }
+done
 if "$oxish_dir/oxish-server" --generate-host-key "$work/keys/host" 2>/dev/null; then
     fail "an existing host key was overwritten"
 fi
