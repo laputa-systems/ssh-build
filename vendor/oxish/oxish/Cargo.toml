@@ -10,19 +10,12 @@ readme = "../README.md"
 keywords = ["ssh", "protocol", "cryptography"]
 categories = ["network-programming", "cryptography"]
 
-[features]
-default = ["graviola"]
-aws-lc = ["dep:aws-lc"]
-aws-lc-fips = ["aws-lc/fips"]
-graviola = ["dep:graviola"]
-
 [dependencies]
 anyhow = { workspace = true }
-aws-lc = { package = "oxish-aws-lc", version = "0.2", path = "../oxish-aws-lc", optional = true }
 bitflags = { workspace = true }
 clap = { workspace = true }
 data-encoding = { workspace = true }
-graviola = { package = "oxish-graviola", version = "0.2", path = "../oxish-graviola", optional = true }
+graviola = { package = "oxish-graviola", version = "0.2", path = "../oxish-graviola" }
 proto = { package = "oxish-proto", version = "0.2", path = "../oxish-proto" }
 serde = { workspace = true }
 thiserror = { workspace = true }

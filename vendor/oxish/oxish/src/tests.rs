@@ -37,9 +37,6 @@ use crate::{
 #[tokio::test]
 async fn openssh_keygen_agrees() {
     let providers = [
-        #[cfg(any(feature = "aws-lc", feature = "aws-lc-fips"))]
-        aws_lc::DEFAULT_PROVIDER,
-        #[cfg(feature = "graviola")]
         graviola::DEFAULT_PROVIDER,
     ];
 
@@ -92,20 +89,7 @@ async fn openssh_keygen_agrees() {
     }
 }
 
-/// Exercise a full handshake and session against the aws-lc-rs provider
-#[cfg(feature = "aws-lc")]
-#[tokio::test]
-async fn handshake_ecdsa_aws_lc() {
-    handshake(
-        aws_lc::DEFAULT_PROVIDER,
-        PublicKeyAlgorithm::EcdsaSha2Nistp256,
-    )
-    .await
-    .unwrap();
-}
-
 /// Exercise a full handshake and session against the graviola provider
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn handshake_ecdsa_graviola() {
     handshake(
@@ -116,17 +100,7 @@ async fn handshake_ecdsa_graviola() {
     .unwrap();
 }
 
-/// Exercise an ssh-ed25519 client key against the aws-lc-rs provider
-#[cfg(feature = "aws-lc")]
-#[tokio::test]
-async fn handshake_ed25519_aws_lc() {
-    handshake(aws_lc::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-        .await
-        .unwrap();
-}
-
 /// Exercise an ssh-ed25519 client key against the graviola provider
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn handshake_ed25519_graviola() {
     handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
@@ -134,22 +108,13 @@ async fn handshake_ed25519_graviola() {
         .unwrap();
 }
 
-/// Exercise the curve25519-sha256 key exchange against the aws-lc-rs provider
-#[cfg(feature = "aws-lc")]
-#[tokio::test]
-async fn handshake_x25519_aws_lc() {
-    handshake_x25519(aws_lc::DEFAULT_PROVIDER).await.unwrap();
-}
-
 /// Exercise the curve25519-sha256 key exchange against the graviola provider
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn handshake_x25519_graviola() {
     handshake_x25519(graviola::DEFAULT_PROVIDER).await.unwrap();
 }
 
 /// Exercise the chacha20-poly1305@openssh.com cipher against the graviola provider
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn handshake_chacha_graviola() {
     subscribe();
@@ -215,7 +180,6 @@ async fn handshake_x25519(provider: &'static dyn CryptoProvider) -> anyhow::Resu
     Ok(())
 }
 
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn no_spawn() {
     subscribe();
@@ -245,7 +209,6 @@ async fn no_spawn() {
 }
 
 /// Check that a `command` key option replaces the command the client asked to run
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn force_command() {
     subscribe();
@@ -280,7 +243,6 @@ async fn force_command() {
 
 /// Exercise non-PTY `exec` end to end: clone a fixture repo through the server,
 /// proving `git-upload-pack` runs with stdin/stdout forwarding and exit status.
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn exec_git_clone() {
     subscribe();
@@ -359,7 +321,6 @@ async fn exec_git_clone() {
 }
 
 /// A non-Git `exec` request must be rejected: failure reply plus non-zero exit.
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn exec_rejects_non_git() {
     subscribe();
@@ -385,7 +346,6 @@ async fn exec_rejects_non_git() {
 }
 
 /// An authorized-key forced command wins over the requested `exec` command.
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn exec_forced_command() {
     subscribe();
@@ -453,7 +413,6 @@ async fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 /// Exercise a client-initiated rekey against the graviola provider
-#[cfg(feature = "graviola")]
 #[tokio::test]
 #[ignore = "slow"]
 async fn rekey_graviola() {
@@ -695,15 +654,6 @@ async fn join_server(server: JoinHandle<anyhow::Result<()>>) {
     }
 }
 
-#[cfg(feature = "aws-lc")]
-#[tokio::test]
-async fn host_keys_from_files_aws_lc() {
-    host_keys_from_files(aws_lc::DEFAULT_PROVIDER)
-        .await
-        .unwrap();
-}
-
-#[cfg(feature = "graviola")]
 #[tokio::test]
 async fn host_keys_from_files_graviola() {
     host_keys_from_files(graviola::DEFAULT_PROVIDER)
@@ -746,9 +696,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
 #[tokio::test]
 async fn verify_keys() {
     let providers = [
-        #[cfg(feature = "aws-lc")]
-        aws_lc::DEFAULT_PROVIDER,
-        #[cfg(feature = "graviola")]
         graviola::DEFAULT_PROVIDER,
     ];
 

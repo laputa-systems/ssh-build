@@ -20,22 +20,8 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, trace, warn};
 
-/// Default cryptography provider, as determined based on the enabled features
-#[cfg(any(feature = "aws-lc", feature = "aws-lc-fips"))]
-pub use aws_lc::DEFAULT_PROVIDER;
-/// Default cryptography provider, as determined based on the enabled features
-#[cfg(all(
-    feature = "graviola",
-    not(feature = "aws-lc"),
-    not(feature = "aws-lc-fips")
-))]
+/// The only cryptography provider: Graviola
 pub use graviola::DEFAULT_PROVIDER;
-#[cfg(all(
-    not(feature = "aws-lc"),
-    not(feature = "aws-lc-fips"),
-    not(feature = "graviola")
-))]
-compile_error!("no crypto providers enabled -- enable at least one to fix this error");
 
 mod authentication;
 pub use authentication::{AuthError, User, UserStore, Username};

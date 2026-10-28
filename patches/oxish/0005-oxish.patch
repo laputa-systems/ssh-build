@@ -1,3 +1,56 @@
+diff --git a/oxish/Cargo.toml b/oxish/Cargo.toml
+index aa1cd85cf95f5198c12b7c12302b7fcff449e7f8..1b25c9e013146253bc437695bc51b35411e0e619 100644
+--- a/oxish/Cargo.toml
++++ b/oxish/Cargo.toml
+@@ -10,19 +10,12 @@ readme = "../README.md"
+ keywords = ["ssh", "protocol", "cryptography"]
+ categories = ["network-programming", "cryptography"]
+ 
+-[features]
+-default = ["graviola"]
+-aws-lc = ["dep:aws-lc"]
+-aws-lc-fips = ["aws-lc/fips"]
+-graviola = ["dep:graviola"]
+-
+ [dependencies]
+ anyhow = { workspace = true }
+-aws-lc = { package = "oxish-aws-lc", version = "0.2", path = "../oxish-aws-lc", optional = true }
+ bitflags = { workspace = true }
+ clap = { workspace = true }
+ data-encoding = { workspace = true }
+-graviola = { package = "oxish-graviola", version = "0.2", path = "../oxish-graviola", optional = true }
++graviola = { package = "oxish-graviola", version = "0.2", path = "../oxish-graviola" }
+ proto = { package = "oxish-proto", version = "0.2", path = "../oxish-proto" }
+ serde = { workspace = true }
+ thiserror = { workspace = true }
+diff --git a/oxish/src/lib.rs b/oxish/src/lib.rs
+index af3a4a7fdb54654311788861d9f8d8e68df8668b..8121c97385e773e70107296c374a15390db6532c 100644
+--- a/oxish/src/lib.rs
++++ b/oxish/src/lib.rs
+@@ -20,22 +20,8 @@ use thiserror::Error;
+ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+ use tracing::{debug, trace, warn};
+ 
+-/// Default cryptography provider, as determined based on the enabled features
+-#[cfg(any(feature = "aws-lc", feature = "aws-lc-fips"))]
+-pub use aws_lc::DEFAULT_PROVIDER;
+-/// Default cryptography provider, as determined based on the enabled features
+-#[cfg(all(
+-    feature = "graviola",
+-    not(feature = "aws-lc"),
+-    not(feature = "aws-lc-fips")
+-))]
++/// The only cryptography provider: Graviola
+ pub use graviola::DEFAULT_PROVIDER;
+-#[cfg(all(
+-    not(feature = "aws-lc"),
+-    not(feature = "aws-lc-fips"),
+-    not(feature = "graviola")
+-))]
+-compile_error!("no crypto providers enabled -- enable at least one to fix this error");
+ 
+ mod authentication;
+ pub use authentication::{AuthError, User, UserStore, Username};
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
 index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..910812c5dd5908ae31310a4adb38edbf006d00f0 100644
 --- a/oxish/src/session/connections.rs
@@ -441,15 +494,77 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..0b4808cd952a81c885e6b134d55771e3
                                  Err(error) => Err(error.into()),
                              },
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3ab9d85ef2 100644
+index 151147cfbfaf967cbbea73dbd209ff50a17105cd..cf16bc96d0cd81215c49b5f4c5b7efec66ca5c02 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
-@@ -148,6 +148,48 @@ async fn handshake_x25519_graviola() {
+@@ -37,9 +37,6 @@ use crate::{
+ #[tokio::test]
+ async fn openssh_keygen_agrees() {
+     let providers = [
+-        #[cfg(any(feature = "aws-lc", feature = "aws-lc-fips"))]
+-        aws_lc::DEFAULT_PROVIDER,
+-        #[cfg(feature = "graviola")]
+         graviola::DEFAULT_PROVIDER,
+     ];
+ 
+@@ -92,20 +89,7 @@ async fn openssh_keygen_agrees() {
+     }
+ }
+ 
+-/// Exercise a full handshake and session against the aws-lc-rs provider
+-#[cfg(feature = "aws-lc")]
+-#[tokio::test]
+-async fn handshake_ecdsa_aws_lc() {
+-    handshake(
+-        aws_lc::DEFAULT_PROVIDER,
+-        PublicKeyAlgorithm::EcdsaSha2Nistp256,
+-    )
+-    .await
+-    .unwrap();
+-}
+-
+ /// Exercise a full handshake and session against the graviola provider
+-#[cfg(feature = "graviola")]
+ #[tokio::test]
+ async fn handshake_ecdsa_graviola() {
+     handshake(
+@@ -116,17 +100,7 @@ async fn handshake_ecdsa_graviola() {
+     .unwrap();
+ }
+ 
+-/// Exercise an ssh-ed25519 client key against the aws-lc-rs provider
+-#[cfg(feature = "aws-lc")]
+-#[tokio::test]
+-async fn handshake_ed25519_aws_lc() {
+-    handshake(aws_lc::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
+-        .await
+-        .unwrap();
+-}
+-
+ /// Exercise an ssh-ed25519 client key against the graviola provider
+-#[cfg(feature = "graviola")]
+ #[tokio::test]
+ async fn handshake_ed25519_graviola() {
+     handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
+@@ -134,20 +108,53 @@ async fn handshake_ed25519_graviola() {
+         .unwrap();
+ }
+ 
+-/// Exercise the curve25519-sha256 key exchange against the aws-lc-rs provider
+-#[cfg(feature = "aws-lc")]
+-#[tokio::test]
+-async fn handshake_x25519_aws_lc() {
+-    handshake_x25519(aws_lc::DEFAULT_PROVIDER).await.unwrap();
+-}
+-
+ /// Exercise the curve25519-sha256 key exchange against the graviola provider
+-#[cfg(feature = "graviola")]
+ #[tokio::test]
+ async fn handshake_x25519_graviola() {
      handshake_x25519(graviola::DEFAULT_PROVIDER).await.unwrap();
  }
  
 +/// Exercise the chacha20-poly1305@openssh.com cipher against the graviola provider
-+#[cfg(feature = "graviola")]
 +#[tokio::test]
 +async fn handshake_chacha_graviola() {
 +    subscribe();
@@ -493,13 +608,28 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
  async fn handshake_x25519(provider: &'static dyn CryptoProvider) -> anyhow::Result<()> {
      subscribe();
  
-@@ -236,6 +278,180 @@ async fn force_command() {
+@@ -173,7 +180,6 @@ async fn handshake_x25519(provider: &'static dyn CryptoProvider) -> anyhow::Resu
+     Ok(())
+ }
+ 
+-#[cfg(feature = "graviola")]
+ #[tokio::test]
+ async fn no_spawn() {
+     subscribe();
+@@ -203,7 +209,6 @@ async fn no_spawn() {
+ }
+ 
+ /// Check that a `command` key option replaces the command the client asked to run
+-#[cfg(feature = "graviola")]
+ #[tokio::test]
+ async fn force_command() {
+     subscribe();
+@@ -236,8 +241,178 @@ async fn force_command() {
      );
  }
  
 +/// Exercise non-PTY `exec` end to end: clone a fixture repo through the server,
 +/// proving `git-upload-pack` runs with stdin/stdout forwarding and exit status.
-+#[cfg(feature = "graviola")]
 +#[tokio::test]
 +async fn exec_git_clone() {
 +    subscribe();
@@ -578,7 +708,6 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
 +}
 +
 +/// A non-Git `exec` request must be rejected: failure reply plus non-zero exit.
-+#[cfg(feature = "graviola")]
 +#[tokio::test]
 +async fn exec_rejects_non_git() {
 +    subscribe();
@@ -604,7 +733,6 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
 +}
 +
 +/// An authorized-key forced command wins over the requested `exec` command.
-+#[cfg(feature = "graviola")]
 +#[tokio::test]
 +async fn exec_forced_command() {
 +    subscribe();
@@ -672,9 +800,11 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
 +}
 +
  /// Exercise a client-initiated rekey against the graviola provider
- #[cfg(feature = "graviola")]
+-#[cfg(feature = "graviola")]
  #[tokio::test]
-@@ -360,13 +576,16 @@ async fn setup(
+ #[ignore = "slow"]
+ async fn rekey_graviola() {
+@@ -360,13 +535,16 @@ async fn setup(
  struct CliClient {
      addr: SocketAddr,
      cmd: Command,
@@ -694,7 +824,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
              .args(["-p", &addr.port().to_string()]) // port to connect to
              .arg("-i") // identity (private key) file to authenticate with
              .arg(key_path)
-@@ -376,7 +595,7 @@ impl CliClient {
+@@ -376,7 +554,7 @@ impl CliClient {
              .args(["-o", "IdentitiesOnly=yes"]) // don't offer agent keys
              .args(["-o", "LogLevel=DEBUG3"]); // verbose client diagnostics, captured on stderr for failure triage
  
@@ -703,7 +833,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
      }
  
      async fn assert_run(
-@@ -404,9 +623,37 @@ impl CliClient {
+@@ -404,9 +582,37 @@ impl CliClient {
          wait_for: Duration,
          server: JoinHandle<anyhow::Result<()>>,
      ) -> anyhow::Result<(ExitStatus, String, String)> {
@@ -744,7 +874,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
              .stdin(Stdio::piped())
              .stdout(Stdio::piped())
              .stderr(Stdio::piped())
-@@ -424,17 +671,7 @@ impl CliClient {
+@@ -424,17 +630,7 @@ impl CliClient {
  
          let output = timeout(wait_for, child.wait_with_output()).await??;
  
@@ -763,10 +893,16 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
  
          let stdout = String::from_utf8_lossy(&output.stdout);
          let stderr = String::from_utf8_lossy(&output.stderr);
-@@ -442,6 +679,22 @@ impl CliClient {
+@@ -442,15 +638,22 @@ impl CliClient {
      }
  }
  
+-#[cfg(feature = "aws-lc")]
+-#[tokio::test]
+-async fn host_keys_from_files_aws_lc() {
+-    host_keys_from_files(aws_lc::DEFAULT_PROVIDER)
+-        .await
+-        .unwrap();
 +/// Wait for the server task to finish after the client disconnected.
 +///
 +/// The server task completes on its own once the ssh client tears down the connection: cleanly
@@ -781,11 +917,22 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..0d96fc263b3e1f4c725c198e91d24e3a
 +        Ok(Err(err)) => resume_unwind(err.into_panic()),
 +        Err(_elapsed) => panic!("server still running after client disconnected"),
 +    }
-+}
-+
- #[cfg(feature = "aws-lc")]
+ }
+ 
+-#[cfg(feature = "graviola")]
  #[tokio::test]
- async fn host_keys_from_files_aws_lc() {
+ async fn host_keys_from_files_graviola() {
+     host_keys_from_files(graviola::DEFAULT_PROVIDER)
+@@ -493,9 +696,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+ #[tokio::test]
+ async fn verify_keys() {
+     let providers = [
+-        #[cfg(feature = "aws-lc")]
+-        aws_lc::DEFAULT_PROVIDER,
+-        #[cfg(feature = "graviola")]
+         graviola::DEFAULT_PROVIDER,
+     ];
+ 
 diff --git a/oxish/src/unix/exec.rs b/oxish/src/unix/exec.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..8baa630a496e14cf0ad8208c3894d09b470d5348
