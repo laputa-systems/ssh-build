@@ -1,0 +1,250 @@
+name: release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: true
+
+env:
+  GIT_TERMINAL_PROMPT: 0
+  REPOSITORY: ${{ github.repository }}
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+    steps:
+      - name: Refuse dispatches off the default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          default_branch=$(gh api "repos/$REPOSITORY" --jq '.default_branch')
+          if [[ "$GITHUB_REF_TYPE" != "branch" || "$GITHUB_REF" != "refs/heads/$default_branch" ]]; then
+            echo "refusing $GITHUB_REF: releases only run from refs/heads/$default_branch" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-aarch64
+            runner: macos-26
+            kind: macos
+            triple: aarch64-apple-darwin
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            kind: linux
+            triple: aarch64-unknown-linux-musl
+            docker_platform: linux/arm64
+          - name: linux-amd64
+            runner: ubuntu-latest
+            kind: linux
+            triple: x86_64-unknown-linux-musl
+            docker_platform: linux/amd64
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install jaq
+        run: |
+          sh scripts/install-jaq.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Docker Buildx
+        if: matrix.kind == 'linux'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build macOS distributions
+        if: matrix.kind == 'macos'
+        run: |
+          sh scripts/fetch-sources.sh
+          make macos
+          make oxish-macos
+
+      - name: Build Linux distributions
+        if: matrix.kind == 'linux'
+        run: |
+          make linux DOCKER_PLATFORM=${{ matrix.docker_platform }}
+          make oxish-linux DOCKER_PLATFORM=${{ matrix.docker_platform }}
+
+      - name: Package distributions
+        env:
+          ONLY_TARGET: ${{ matrix.triple }}
+        run: |
+          sh scripts/package.sh out/
+          sh scripts/package-oxish.sh out/
+
+      - name: Exercise the distributions from their ZIPs
+        run: |
+          rm -rf zipcheck
+          mkdir -p zipcheck/ssh zipcheck/oxish
+          unzip -q "out/ssh-${{ matrix.triple }}.zip" -d zipcheck/ssh
+          unzip -q "out/oxish-${{ matrix.triple }}.zip" -d zipcheck/oxish
+          SSH_BIN_DIR="$PWD/zipcheck/ssh" sh test/runtime.sh
+          SSH_BIN_DIR="$PWD/zipcheck/ssh" OXISH_BIN_DIR="$PWD/zipcheck/oxish/bin" sh test/e2e-git.sh
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.triple }}
+          path: |
+            out/ssh-${{ matrix.triple }}.zip
+            out/ssh-${{ matrix.triple }}.manifest
+            out/oxish-${{ matrix.triple }}.zip
+            out/oxish-${{ matrix.triple }}.manifest
+          if-no-files-found: error
+
+  release:
+    name: Create pre-release
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Inventory release assets
+        run: |
+          expected="oxish-aarch64-apple-darwin.manifest
+          oxish-aarch64-apple-darwin.zip
+          oxish-aarch64-unknown-linux-musl.manifest
+          oxish-aarch64-unknown-linux-musl.zip
+          oxish-x86_64-unknown-linux-musl.manifest
+          oxish-x86_64-unknown-linux-musl.zip
+          ssh-aarch64-apple-darwin.manifest
+          ssh-aarch64-apple-darwin.zip
+          ssh-aarch64-unknown-linux-musl.manifest
+          ssh-aarch64-unknown-linux-musl.zip
+          ssh-x86_64-unknown-linux-musl.manifest
+          ssh-x86_64-unknown-linux-musl.zip"
+          actual="$(cd dist && find . -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "missing, duplicate, or extra release assets:" >&2
+            echo "$actual" >&2
+            exit 1
+          fi
+
+      - name: Check every manifest names this commit and a clean tree
+        run: |
+          for manifest in dist/*.manifest; do
+            grep -qx "build_commit=$GITHUB_SHA" "$manifest" || { echo "$manifest was not built from $GITHUB_SHA" >&2; exit 1; }
+            grep -qx "build_dirty=false" "$manifest" || { echo "$manifest was built from a dirty tree" >&2; exit 1; }
+          done
+
+      - name: Stage Linux ELF artifacts
+        run: |
+          rm -rf stage
+          for archive in dist/ssh-*-linux-musl.zip; do
+            triple=${archive#dist/ssh-}
+            triple=${triple%.zip}
+            mkdir -p "stage/ssh/$triple" "stage/oxish/$triple"
+            unzip -q "$archive" -d "stage/ssh/$triple"
+            unzip -q "dist/oxish-$triple.zip" -d "stage/oxish/$triple"
+          done
+
+      - name: Verify Linux ELF artifacts are fully static
+        run: |
+          shopt -s globstar nullglob
+          command -v readelf >/dev/null
+          X86_64_COUNT=0
+          AARCH64_COUNT=0
+          for binary in stage/**/*; do
+            [[ -f "$binary" ]] || continue
+            if ! readelf -h "$binary" >/dev/null 2>&1; then
+              continue
+            fi
+            machine=$(readelf -h "$binary" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')
+            case "$machine" in
+              "Advanced Micro Devices X86-64") X86_64_COUNT=$((X86_64_COUNT + 1)) ;;
+              AArch64) AARCH64_COUNT=$((AARCH64_COUNT + 1)) ;;
+              *) printf '%s has unsupported ELF machine %s\n' "$binary" "$machine" >&2; exit 1 ;;
+            esac
+            program_headers=$(readelf -lW "$binary")
+            if [[ "$program_headers" == *INTERP* ]]; then
+              printf '%s has a dynamic ELF interpreter\n' "$binary" >&2
+              exit 1
+            fi
+            dynamic_section=$(readelf -dW "$binary")
+            if [[ "$dynamic_section" == *NEEDED* ]]; then
+              printf '%s has a dynamic library dependency\n' "$binary" >&2
+              exit 1
+            fi
+          done
+          if [[ "$X86_64_COUNT" -lt 1 || "$AARCH64_COUNT" -lt 1 ]]; then
+            printf 'Expected at least one x86_64 and one aarch64 Linux ELF artifact, found x86_64=%s aarch64=%s\n' "$X86_64_COUNT" "$AARCH64_COUNT" >&2
+            exit 1
+          fi
+
+      - name: Qualify Linux ELF hardening
+        run: |
+          for arch in x86_64 aarch64; do
+            triple=$arch-unknown-linux-musl
+            EXPECT_ARCH=$arch sh scripts/qualify-binaries.sh "stage/ssh/$triple" linux
+            EXPECT_ARCH=$arch QUALIFY_BINS="oxish-server oxish-session" sh scripts/qualify-binaries.sh "stage/oxish/$triple/bin" linux
+          done
+
+      - name: Consolidate SHA256SUMS
+        run: |
+          (cd dist && sha256sum oxish-*.zip oxish-*.manifest ssh-*.zip ssh-*.manifest | sort -k 2 > SHA256SUMS)
+          (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: Create tag at the triggering commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: release-${{ github.sha }}
+        run: |
+          if gh api "repos/$REPOSITORY/git/matching-refs/tags/$RELEASE_TAG" --jq '.[].ref' | grep -q .; then
+            echo "tag $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+          gh api "repos/$REPOSITORY/git/refs" -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA"
+
+      - name: Create pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: release-${{ github.sha }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/oxish-*.zip dist/oxish-*.manifest dist/ssh-*.zip dist/ssh-*.manifest dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
+            --verify-tag \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG"

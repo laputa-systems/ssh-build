@@ -1,0 +1,46 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions: {}
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.head_ref || github.run_id }}"
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  server:
+    name: server (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, ubuntu-24.04-arm, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install jaq
+        run: |
+          sh scripts/install-jaq.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Vendored sources match their pins and patches
+        run: |
+          sh scripts/vendor-oxish.sh verify
+          sh scripts/vendor-graviola.sh verify
+      - name: Graviola is the only crypto provider
+        run: sh scripts/check-crypto-graph.sh
+      - name: Server tests
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/.work/target-oxish
+        run: cargo test --locked --manifest-path vendor/oxish/Cargo.toml

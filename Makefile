@@ -6,7 +6,7 @@ LINUX_ARCH = $(if $(findstring arm64,$(DOCKER_PLATFORM)),aarch64,x86_64)
 LINUX_DIST ?= dist/linux-$(LINUX_ARCH)/bin
 LINUX_TRIPLE = $(LINUX_ARCH)-unknown-linux-musl
 
-.PHONY: macos linux oxish-macos oxish-linux
+.PHONY: macos linux oxish-macos oxish-linux lint
 
 macos:
 	@set -eu; \
@@ -50,3 +50,9 @@ oxish-linux:
 		test -x "$(OXISH_LINUX_DIST)/oxish-server"; \
 		sh scripts/build-record.sh write oxish "$(OXISH_LINUX_DIST)" $(LINUX_TRIPLE); \
 		echo "wrote $(OXISH_LINUX_DIST)"
+
+lint:
+	@set -eu; \
+		for script in scripts/*.sh test/*.sh; do sh -n "$$script"; done; \
+		sh scripts/check-crypto-graph.sh --selftest; \
+		sh scripts/audit-release.sh

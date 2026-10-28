@@ -3310,7 +3310,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..7fa838479fce226ff94a76cd5d6f5ddc
 +/// How long buffered output may wait for a peer that is not reading
 +const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd0531c7f1 100644
+index 151147cfbfaf967cbbea73dbd209ff50a17105cd..415d0007d6f8234ddb5771f18d2c4b4c34207df0 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
 @@ -1,20 +1,17 @@
@@ -3685,7 +3685,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -134,323 +381,639 @@ async fn handshake_ed25519_graviola() {
+@@ -134,323 +381,644 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -3747,10 +3747,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
  #[tokio::test]
 -async fn no_spawn() {
 -    subscribe();
-+async fn handshake_hybrid_post_quantum_graviola() {
-+    negotiates(["-o", "KexAlgorithms=mlkem768x25519-sha256"], "kex: algorithm: mlkem768x25519-sha256").await;
-+}
- 
+-
 -    let (_key_dir, client, server) = setup(
 -        &PublicKeyAlgorithm::Ed25519,
 -        None,
@@ -3762,11 +3759,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 -    )
 -    .await
 -    .expect("failed to set up test");
-+#[tokio::test]
-+async fn handshake_chacha_graviola() {
-+    negotiates(["-c", "chacha20-poly1305@openssh.com"], "cipher: chacha20-poly1305@openssh.com").await;
-+}
- 
+-
 -    client
 -        .assert_run(
 -            COMMAND,
@@ -3775,23 +3768,13 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 -            Duration::from_secs(10),
 -            server,
 -        )
-+#[tokio::test]
-+async fn channel_stderr_arrives_on_stderr_with_exit_status() {
-+    let world = script_world("echo to-stdout; echo to-stderr >&2; exit 3").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
-+    let run = client.run(Some(SERVICE), b"").await.unwrap();
-+    assert_eq!(run.status.code(), Some(3), "{}", run.stderr);
-+    assert_eq!(run.stdout(), "to-stdout\n");
-+    assert_eq!(run.stderr, "to-stderr\n");
- }
- 
+-        .await
+-        .unwrap();
+-}
+-
 -/// Check that a `command` key option replaces the command the client asked to run
 -#[cfg(feature = "graviola")]
- #[tokio::test]
+-#[tokio::test]
 -async fn force_command() {
 -    subscribe();
 -
@@ -3808,13 +3791,8 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 -    // the client's input back cannot satisfy these assertions.
 -    let (_, stdout, stderr) = client
 -        .run(COMMAND, Duration::from_secs(10), server)
-+async fn channel_command_killed_by_a_signal_is_reported_after_its_output() {
-+    let world = script_world("echo before; echo diagnostics >&2; kill -9 $$").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
+-        .await
+-        .unwrap();
 -
 -    assert!(
 -        stdout.contains(FORCED),
@@ -3826,15 +3804,11 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 -        "client command ran despite the forced command.\n\
 -        --- stdout ---\n{stdout}",
 -    );
-+    let run = client.run(Some(SERVICE), b"").await.unwrap();
-+    assert_eq!(run.stdout(), "before\n", "output written before the signal must arrive");
-+    assert!(run.stderr.contains("diagnostics"), "{}", run.stderr);
-+    assert!(!run.status.success(), "a signaled command must not look successful");
- }
- 
+-}
+-
 -/// Exercise a client-initiated rekey against the graviola provider
 -#[cfg(feature = "graviola")]
- #[tokio::test]
+-#[tokio::test]
 -#[ignore = "slow"]
 -async fn rekey_graviola() {
 -    subscribe();
@@ -3860,13 +3834,8 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 -            Duration::from_secs(30),
 -            server,
 -        )
-+async fn channel_half_close_still_delivers_later_output() {
-+    let world = script_world("PATH=/usr/bin:/bin; wc -c | tr -d ' '; sleep 1; echo after-eof").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
+-        .await
+-        .unwrap();
 -
 -    // The client logs "SSH2_MSG_KEXINIT received" once per key exchange the server answered,
 -    // but the matching "SSH2_MSG_NEWKEYS received" line only appears when a key exchange ran
@@ -3891,11 +3860,8 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 -             --- stderr ({stderr_len} bytes) ---\n{stderr}",
 -        stderr_len = stderr.len(),
 -    );
-+    let run = client.run(Some(SERVICE), b"12345").await.unwrap();
-+    assert!(run.status.success(), "{}", run.stderr);
-+    assert_eq!(run.stdout(), "5\nafter-eof\n");
- }
- 
+-}
+-
 -async fn handshake(
 -    provider: &'static dyn CryptoProvider,
 -    algorithm: PublicKeyAlgorithm<'_>,
@@ -3919,9 +3885,79 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 -            !stdout.contains(KX_WARNING_MARKER),
 -            "unexpected key exchange warning banner in session output:\n{stdout}"
 -        );
--    }
++async fn handshake_hybrid_post_quantum_graviola() {
++    let offered = Command::new(CliClient::ssh()).args(["-Q", "kex"]).output().await.unwrap();
++    if !String::from_utf8_lossy(&offered.stdout).contains("mlkem768x25519-sha256") {
++        eprintln!("skipping: the test ssh client cannot offer mlkem768x25519-sha256 (release e2e requires it)");
++        return;
+     }
 -
 -    Ok(())
++    negotiates(["-o", "KexAlgorithms=mlkem768x25519-sha256"], "kex: algorithm: mlkem768x25519-sha256").await;
+ }
+ 
+-async fn setup(
+-    algorithm: &PublicKeyAlgorithm<'_>,
+-    options: Option<&str>,
+-    config: Option<Config>,
+-    provider: &'static dyn CryptoProvider,
+-) -> anyhow::Result<(TempDir, CliClient, JoinHandle<anyhow::Result<()>>)> {
+-    let (key_dir, store) = store(algorithm, options, provider).await?;
+-    let (_, pkcs8) = provider.generate_signing_key(algorithm)?;
+-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+-    let addr = listener.local_addr()?;
+-    let client = CliClient::new(addr, &key_dir.path().join("key"));
++#[tokio::test]
++async fn handshake_chacha_graviola() {
++    negotiates(["-c", "chacha20-poly1305@openssh.com"], "cipher: chacha20-poly1305@openssh.com").await;
++}
+ 
+-    let server = Server::new(
+-        store,
+-        HostKeys::new([Zeroizing::new(pkcs8)].into_iter(), provider)?,
+-        SESSION_BINARY
+-            .get_or_try_init(build_session_binary)
++#[tokio::test]
++async fn channel_stderr_arrives_on_stderr_with_exit_status() {
++    let world = script_world("echo to-stdout; echo to-stderr >&2; exit 3").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some(SERVICE), b"").await.unwrap();
++    assert_eq!(run.status.code(), Some(3), "{}", run.stderr);
++    assert_eq!(run.stdout(), "to-stdout\n");
++    assert_eq!(run.stderr, "to-stderr\n");
++}
++
++#[tokio::test]
++async fn channel_command_killed_by_a_signal_is_reported_after_its_output() {
++    let world = script_world("echo before; echo diagnostics >&2; kill -9 $$").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some(SERVICE), b"").await.unwrap();
++    assert_eq!(run.stdout(), "before\n", "output written before the signal must arrive");
++    assert!(run.stderr.contains("diagnostics"), "{}", run.stderr);
++    assert!(!run.status.success(), "a signaled command must not look successful");
++}
++
++#[tokio::test]
++async fn channel_half_close_still_delivers_later_output() {
++    let world = script_world("PATH=/usr/bin:/bin; wc -c | tr -d ' '; sleep 1; echo after-eof").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some(SERVICE), b"12345").await.unwrap();
++    assert!(run.status.success(), "{}", run.stderr);
++    assert_eq!(run.stdout(), "5\nafter-eof\n");
++}
++
 +#[tokio::test]
 +async fn channel_stdout_and_stderr_both_drain_completely() {
 +    let world = script_world(
@@ -3939,19 +3975,8 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 +    assert!(run.stdout.iter().all(|&b| b == b'o'));
 +    assert_eq!(run.stderr.len(), 2_000_000);
 +    assert!(run.stderr.bytes().all(|b| b == b'e'));
- }
- 
--async fn setup(
--    algorithm: &PublicKeyAlgorithm<'_>,
--    options: Option<&str>,
--    config: Option<Config>,
--    provider: &'static dyn CryptoProvider,
--) -> anyhow::Result<(TempDir, CliClient, JoinHandle<anyhow::Result<()>>)> {
--    let (key_dir, store) = store(algorithm, options, provider).await?;
--    let (_, pkcs8) = provider.generate_signing_key(algorithm)?;
--    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
--    let addr = listener.local_addr()?;
--    let client = CliClient::new(addr, &key_dir.path().join("key"));
++}
++
 +#[tokio::test]
 +async fn channel_large_stdin_reaches_a_slow_reader_while_output_flows() {
 +    let world = script_world(
@@ -3970,12 +3995,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
 +    assert!(stdout.starts_with(&"x".repeat(2_000_000)));
 +    assert_eq!(&stdout[2_000_000..], "6000000\n");
 +}
- 
--    let server = Server::new(
--        store,
--        HostKeys::new([Zeroizing::new(pkcs8)].into_iter(), provider)?,
--        SESSION_BINARY
--            .get_or_try_init(build_session_binary)
++
 +#[tokio::test]
 +async fn channel_command_that_ignores_stdin_does_not_wedge_the_session() {
 +    let world = script_world("echo done").await;
@@ -4605,7 +4625,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
  #[tokio::test]
  async fn host_keys_from_files_graviola() {
      host_keys_from_files(graviola::DEFAULT_PROVIDER)
-@@ -493,9 +1056,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+@@ -493,9 +1061,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
  #[tokio::test]
  async fn verify_keys() {
      let providers = [
@@ -4615,7 +4635,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -522,130 +1082,6 @@ async fn verify_keys() {
+@@ -522,130 +1087,6 @@ async fn verify_keys() {
      }
  }
  
@@ -4746,7 +4766,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..9c5c70b4345fd94e007a80a3bb13c8bd
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  
  /// Build and locate the `oxish-session` binary
-@@ -704,8 +1140,3 @@ fn subscribe() {
+@@ -704,8 +1145,3 @@ fn subscribe() {
      });
  }
  

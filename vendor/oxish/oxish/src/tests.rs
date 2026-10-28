@@ -404,6 +404,11 @@ async fn handshake_x25519_graviola() {
 
 #[tokio::test]
 async fn handshake_hybrid_post_quantum_graviola() {
+    let offered = Command::new(CliClient::ssh()).args(["-Q", "kex"]).output().await.unwrap();
+    if !String::from_utf8_lossy(&offered.stdout).contains("mlkem768x25519-sha256") {
+        eprintln!("skipping: the test ssh client cannot offer mlkem768x25519-sha256 (release e2e requires it)");
+        return;
+    }
     negotiates(["-o", "KexAlgorithms=mlkem768x25519-sha256"], "kex: algorithm: mlkem768x25519-sha256").await;
 }
 

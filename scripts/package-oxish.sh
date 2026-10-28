@@ -2,6 +2,7 @@
 # Package the OxiSH Git server for every target as oxish-<triple>.zip plus a manifest, enforce
 # the size budgets, then refresh and verify the consolidated SHA256SUMS in <out_dir>.
 # Usage: sh scripts/package-oxish.sh [out_dir]      (default: dist/release)
+# ONLY_TARGET=<triple> packages a single target (a CI job builds only its own).
 # Inputs: dist/oxish-macos/bin, dist/oxish-linux-x86_64/bin, dist/oxish-linux-aarch64/bin.
 # Each input directory needs the build-record.json its build wrote (scripts/build-record.sh);
 # stale, modified or foreign binaries are refused, and nothing in <out_dir> changes unless every
@@ -42,6 +43,7 @@ mkdir -p "$stage_root"
 
 package_target() {
     triple=$1
+    [ -z "${ONLY_TARGET:-}" ] || [ "$ONLY_TARGET" = "$triple" ] || return 0
     bin_dir=$repo_root/$2
     expected=$3
 
@@ -125,7 +127,7 @@ package_target aarch64-apple-darwin dist/oxish-macos/bin "arm64"
 package_target x86_64-unknown-linux-musl dist/oxish-linux-x86_64/bin "x86-64"
 package_target aarch64-unknown-linux-musl dist/oxish-linux-aarch64/bin "ARM aarch64"
 
-rm -f "$out_dir"/oxish-*.zip "$out_dir"/oxish-*.manifest
+rm -f "$out_dir"/oxish-${ONLY_TARGET:-*}.zip "$out_dir"/oxish-${ONLY_TARGET:-*}.manifest
 mv "$stage"/oxish-* "$out_dir"/
 sh "$script_dir/write-sums.sh" "$out_dir"
-echo "Packaged 3 server ZIPs and manifests in $out_dir"
+echo "Packaged ${ONLY_TARGET:-3 targets} (oxish) in $out_dir"

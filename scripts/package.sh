@@ -2,6 +2,7 @@
 # Package every target as ssh-<triple>.zip plus a build manifest, enforce the
 # size budgets, then write and verify <out_dir>/SHA256SUMS over all assets.
 # Usage: sh scripts/package.sh [out_dir]      (default: dist/release)
+# ONLY_TARGET=<triple> packages a single target (a CI job builds only its own).
 # Inputs: dist/macos/bin, dist/linux-x86_64/bin, dist/linux-aarch64/bin.
 # Each input directory needs the build-record.json its build wrote (scripts/build-record.sh);
 # stale, modified or foreign binaries are refused, and nothing in <out_dir> changes unless every
@@ -31,6 +32,7 @@ trap 'rm -rf "$stage"' EXIT
 
 package_target() {
     triple=$1
+    [ -z "${ONLY_TARGET:-}" ] || [ "$ONLY_TARGET" = "$triple" ] || return 0
     bin_dir=$repo_root/$2
     expected=$3
 
@@ -86,8 +88,8 @@ package_target aarch64-apple-darwin dist/macos/bin "arm64"
 package_target x86_64-unknown-linux-musl dist/linux-x86_64/bin "x86-64"
 package_target aarch64-unknown-linux-musl dist/linux-aarch64/bin "ARM aarch64"
 
-rm -f "$out_dir"/ssh-*.zip "$out_dir"/ssh-*.manifest
+rm -f "$out_dir"/ssh-${ONLY_TARGET:-*}.zip "$out_dir"/ssh-${ONLY_TARGET:-*}.manifest
 mv "$stage"/ssh-* "$out_dir"/
 sh "$script_dir/write-sums.sh" "$out_dir"
 
-echo "Packaged 3 ZIPs and manifests in $out_dir"
+echo "Packaged ${ONLY_TARGET:-3 targets} (ssh) in $out_dir"
