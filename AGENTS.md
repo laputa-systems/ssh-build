@@ -16,6 +16,24 @@ sh scripts/qualify-binaries.sh dist/<target>/bin  # linkage/static/hardening gat
 sh scripts/package.sh         # dist/release: 3 ZIPs + manifests + verified SHA256SUMS
 ```
 
+## OxiSH Git server (experimental)
+
+Separate distribution (`oxish-<triple>.zip`), Graviola-only, Git-only; see `README.md` and
+`SECURITY.md`.
+
+```sh
+sh scripts/vendor-oxish.sh verify|export       # vendor/oxish == pinned upstream + patches/oxish
+sh scripts/vendor-graviola.sh verify|export    # vendor/graviola == pinned crate + patches/graviola
+sh scripts/check-crypto-graph.sh [--selftest]  # Graviola is the only crypto provider
+make oxish-macos | make oxish-linux DOCKER_PLATFORM=linux/arm64|amd64
+sh scripts/package-oxish.sh                    # server ZIPs + manifests, shared SHA256SUMS
+SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/e2e-git.sh   # pinned git-build, no system ssh/git
+```
+
+Edit `vendor/` freely, then run both `export` scripts; the patches are what reviewers read and
+`verify` is the gate. Never edit `vendor/graviola` beyond the SSH packet module. Linux e2e runs in a
+BuildKit step: `test/linux-e2e.Dockerfile` (`docker run` is unreliable on this machine).
+
 ## Conventions
 
 - Canonical version source is `scripts/fetch-sources.sh:4` (`OPENSSH_VERSION=`)
