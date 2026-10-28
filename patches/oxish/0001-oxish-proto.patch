@@ -1,0 +1,54 @@
+diff --git a/oxish-proto/src/named.rs b/oxish-proto/src/named.rs
+index 52049383ee18401b27b0fa6dad077133fcaaba69..f50805ba99ef34cd18b2c293851bbe23f33a1685 100644
+--- a/oxish-proto/src/named.rs
++++ b/oxish-proto/src/named.rs
+@@ -310,6 +310,12 @@ pub enum EncryptionAlgorithm<'a> {
+     ///
+     /// As defined in <https://www.rfc-editor.org/rfc/rfc5647>.
+     Aes128Gcm,
++    /// `chacha20-poly1305@openssh.com` encryption algorithm
++    ///
++    /// As defined in the OpenSSH PROTOCOL.chacha20poly1305@openssh.com
++    /// specification: raw ChaCha (64-bit nonce/counter) with a header key
++    /// for the packet length and Poly1305 over the ciphertext.
++    Chacha20Poly1305,
+     /// An encryption algorithm not known to this implementation
+     Unknown(Cow<'a, str>),
+ }
+@@ -319,6 +325,7 @@ impl EncryptionAlgorithm<'_> {
+     pub fn to_owned(&self) -> EncryptionAlgorithm<'static> {
+         match self {
+             Self::Aes128Gcm => EncryptionAlgorithm::Aes128Gcm,
++            Self::Chacha20Poly1305 => EncryptionAlgorithm::Chacha20Poly1305,
+             Self::Unknown(name) => EncryptionAlgorithm::Unknown(Cow::Owned(name.to_string())),
+         }
+     }
+@@ -330,6 +337,12 @@ impl EncryptionAlgorithm<'_> {
+                 key_len: 16,
+                 iv_len: 12,
+             }),
++            // Two 256-bit keys (packet body + packet length); the sequence
++            // number is the nonce, so no initial IV is derived.
++            Self::Chacha20Poly1305 => Some(KeyLengths {
++                key_len: 64,
++                iv_len: 0,
++            }),
+             Self::Unknown(_) => None,
+         }
+     }
+@@ -339,6 +352,7 @@ impl<'a> Named<'a> for EncryptionAlgorithm<'a> {
+     fn typed(name: &'a str) -> Self {
+         match name {
+             "aes128-gcm@openssh.com" => Self::Aes128Gcm,
++            "chacha20-poly1305@openssh.com" => Self::Chacha20Poly1305,
+             _ => Self::Unknown(Cow::Borrowed(name)),
+         }
+     }
+@@ -346,6 +360,7 @@ impl<'a> Named<'a> for EncryptionAlgorithm<'a> {
+     fn name(&self) -> &str {
+         match self {
+             Self::Aes128Gcm => "aes128-gcm@openssh.com",
++            Self::Chacha20Poly1305 => "chacha20-poly1305@openssh.com",
+             Self::Unknown(name) => name,
+         }
+     }
