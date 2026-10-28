@@ -32,8 +32,10 @@ materialize_base() {
     dest=$1
     rm -rf "$dest"
     mkdir -p "$dest"
-    tar -xzf "$crate" -C "$dest" --strip-components=1 \
-        "graviola-$version/Cargo.toml" "graviola-$version/README.md" "graviola-$version/src"
+    tar -xzf "$crate" -C "$dest" --strip-components=1
+    for entry in "$dest"/* "$dest"/.[!.]*; do
+        case ${entry##*/} in Cargo.toml|README.md|src) ;; *) rm -rf "$entry" ;; esac
+    done
 }
 
 case ${1:-} in
