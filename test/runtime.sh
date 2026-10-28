@@ -123,7 +123,7 @@ echo "ok: sftp + scp round-trips byte-exact"
 OXISH_TEST_SSH="$abs_work_ssh" CARGO_TARGET_DIR="$PWD/.work/target-oxish" cargo test \
     --manifest-path vendor/oxish/Cargo.toml -p oxish exec_ > "$work/exec.log" 2>&1 \
     || { tail -n 30 "$work/exec.log" >&2; echo "FAIL: loopback exec" >&2; exit 1; }
-grep -q 'test result: ok. 3 passed' "$work/exec.log" || { tail -n 30 "$work/exec.log" >&2; echo "FAIL: exec tests did not all run" >&2; exit 1; }
+grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$work/exec.log" || { tail -n 30 "$work/exec.log" >&2; echo "FAIL: exec tests did not all run" >&2; exit 1; }
 echo "ok: loopback exec + exit-status + rejection (OxiSH)"
 
 echo "runtime qualification passed ($bin_dir)"

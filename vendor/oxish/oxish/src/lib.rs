@@ -23,15 +23,17 @@ use tracing::{debug, trace, warn};
 /// The only cryptography provider: Graviola
 pub use graviola::DEFAULT_PROVIDER;
 
+mod git;
+pub use git::{GitAccess, GitCommand, GitPolicy, GitService, PolicyError, validate_protocol};
 mod authentication;
-pub use authentication::{AuthError, User, UserStore, Username};
+pub use authentication::{Account, AuthError, Username};
 mod session;
 pub use session::Session;
 mod server;
-pub use server::{Config, RootPolicy, Server};
+pub use server::{Config, Server};
 #[cfg(unix)]
 mod unix;
-pub use platform::{DefaultStore, resume};
+pub use platform::resume;
 #[cfg(unix)]
 use unix as platform;
 

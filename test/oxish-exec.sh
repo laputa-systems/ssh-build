@@ -25,7 +25,7 @@ export OXISH_TEST_SSH="$SSH_BIN"
 # Keep build artifacts out of the committed vendor tree.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/.work/target-oxish}"
 
-# exec_git_clone (full `git clone` through `git-upload-pack`, asserting file
+# exec_git_* (clone, push, fetch through the product server, asserting file
 # bytes + commit SHA + exit 0), exec_rejects_non_git (`rm -rf /` must fail),
 # and exec_forced_command (authorized-key command wins).
 cargo test \

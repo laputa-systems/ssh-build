@@ -1,5 +1,7 @@
 use core::{fmt, ops::Deref, time::Duration};
-use std::{borrow::Cow, ffi::CStr, io, path::PathBuf, str};
+use std::{borrow::Cow, io, path::Path, str};
+
+use anyhow::Context as _;
 
 use proto::{
     Disconnect, DisconnectReason, IncomingPacket, MessageType, ProtoError, WriteState,
@@ -17,14 +19,13 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::{Connection, Error, RootPolicy, receive};
+use crate::{Connection, Error, receive};
 
-#[instrument(name = "authentication", skip(session_id, conn, store, provider), fields(addr = %conn.addr))]
+#[instrument(name = "authentication", skip(session_id, conn, account, provider), fields(addr = %conn.addr))]
 pub(crate) async fn authenticate<T: AsyncRead + AsyncWrite + Unpin>(
     session_id: &Digest,
     conn: &mut Connection<T>,
-    store: &dyn UserStore,
-    root_policy: RootPolicy,
+    account: &Account,
     provider: &dyn CryptoProvider,
 ) -> anyhow::Result<Authenticated> {
     let mut state = AuthenticationState::default();
@@ -36,8 +37,7 @@ pub(crate) async fn authenticate<T: AsyncRead + AsyncWrite + Unpin>(
                     packet,
                     session_id,
                     &mut conn.write,
-                    store,
-                    root_policy,
+                    account,
                     provider,
                 )
                 .await;
@@ -97,7 +97,6 @@ enum AuthenticationState {
     #[default]
     AwaitServiceRequest,
     AwaitAuthRequest {
-        cached: Option<CachedUser>,
         attempts: u8,
     },
     Complete(Authenticated),
@@ -109,8 +108,7 @@ impl AuthenticationState {
         packet: IncomingPacket<'_>,
         session_id: &Digest,
         write: &mut WriteState,
-        store: &dyn UserStore,
-        root_policy: RootPolicy,
+        account: &Account,
         provider: &dyn CryptoProvider,
     ) -> Result<Self, Error> {
         match (self, packet.message_type) {
@@ -122,10 +120,7 @@ impl AuthenticationState {
                         write.encode(&ServiceAccept {
                             service_name: ServiceName::UserAuth,
                         })?;
-                        Ok(Self::AwaitAuthRequest {
-                            cached: None,
-                            attempts: 6,
-                        })
+                        Ok(Self::AwaitAuthRequest { attempts: MAX_ATTEMPTS })
                     }
                     service_name => {
                         error!(?service_name, "unsupported service requested");
@@ -137,10 +132,7 @@ impl AuthenticationState {
                 }
             }
             (
-                Self::AwaitAuthRequest {
-                    mut cached,
-                    mut attempts,
-                },
+                Self::AwaitAuthRequest { mut attempts },
                 MessageType::UserAuthRequest,
             ) => {
                 attempts -= 1;
@@ -169,29 +161,18 @@ impl AuthenticationState {
                         "unsupported authentication method requested"
                     );
                     send_auth_failed(write)?;
-                    return Ok(Self::AwaitAuthRequest { cached, attempts });
+                    return Ok(Self::AwaitAuthRequest { attempts });
                 };
 
-                let user = match &mut cached {
-                    Some(user) if &*user.data.name == user_auth_request.user_name => user,
-                    _ => {
-                        let Ok(name) = Username::try_from(user_auth_request.user_name.to_owned())
-                        else {
-                            send_auth_failed(write)?;
-                            return Ok(Self::AwaitAuthRequest { cached, attempts });
-                        };
+                let requested_user_matches = user_auth_request.user_name == &*account.name;
+                if !requested_user_matches {
+                    warn!(requested = user_auth_request.user_name, "requested user is not the Git account");
+                }
 
-                        let Some(user) = store.lookup(name, root_policy) else {
-                            send_auth_failed(write)?;
-                            return Ok(Self::AwaitAuthRequest { cached, attempts });
-                        };
-
-                        let keys = store.keys(&user, provider);
-                        cached.insert(CachedUser { data: user, keys })
-                    }
+                let authorized_key = match requested_user_matches {
+                    true => account.keys.iter().find(|key| key.matches(&public_key)),
+                    false => None,
                 };
-
-                let authorized_key = user.keys.iter().find(|key| key.matches(&public_key));
                 let (sig, authorized_key) = match (public_key.signature, authorized_key) {
                     // Signature, authorized key => verify signature
                     (Some(sig), Some(key)) if &sig.algorithm == key.algorithm() => {
@@ -205,7 +186,7 @@ impl AuthenticationState {
                             Err(_) => {
                                 warn!(algorithm = ?public_key.algorithm, "unsupported public key algorithm");
                                 send_auth_failed(write)?;
-                                return Ok(Self::AwaitAuthRequest { cached, attempts });
+                                return Ok(Self::AwaitAuthRequest { attempts });
                             }
                         },
                     ),
@@ -216,7 +197,7 @@ impl AuthenticationState {
                             "mismatched signature algorithm in authentication request"
                         );
                         send_auth_failed(write)?;
-                        return Ok(Self::AwaitAuthRequest { cached, attempts });
+                        return Ok(Self::AwaitAuthRequest { attempts });
                     }
                     // No signature, authorized key => send pk-ok and wait for signature
                     (None, Some(_)) => {
@@ -226,18 +207,18 @@ impl AuthenticationState {
                         };
                         debug!(ok = ?pk_ok, "sending pk-ok for user");
                         write.encode(&pk_ok)?;
-                        return Ok(Self::AwaitAuthRequest { cached, attempts });
+                        return Ok(Self::AwaitAuthRequest { attempts });
                     }
                     // No signature, no authorized key => fail authentication
                     (None, None) => {
                         send_auth_failed(write)?;
-                        return Ok(Self::AwaitAuthRequest { cached, attempts });
+                        return Ok(Self::AwaitAuthRequest { attempts });
                     }
                 };
 
                 let message = SignatureData {
                     session_id: session_id.as_ref(),
-                    user_name: &user.data.name,
+                    user_name: user_auth_request.user_name,
                     service_name: user_auth_request.service_name,
                     algorithm: public_key.algorithm,
                     public_key: public_key.key_blob,
@@ -249,27 +230,21 @@ impl AuthenticationState {
                     Err(error) => {
                         debug!(%error, "failed to encode signature");
                         send_auth_failed(write)?;
-                        return Ok(Self::AwaitAuthRequest { cached, attempts });
+                        return Ok(Self::AwaitAuthRequest { attempts });
                     }
                 };
 
                 let options = authorized_key.options.clone();
                 match spawn_blocking(move || authorized_key.verify(message, signature)).await {
                     Ok(Ok(())) => {
-                        let Some(user) = cached else {
-                            return Err(ProtoError::Unreachable("must have cached user").into());
-                        };
-                        info!(user = %user.data.name, "authentication successful");
+                        info!(user = %account.name, "authentication successful");
 
                         write.encode(&MessageType::UserAuthSuccess)?;
-                        Ok(Self::Complete(Authenticated {
-                            user: user.data,
-                            options,
-                        }))
+                        Ok(Self::Complete(Authenticated { options }))
                     }
                     _ => {
                         send_auth_failed(write)?;
-                        Ok(Self::AwaitAuthRequest { cached, attempts })
+                        Ok(Self::AwaitAuthRequest { attempts })
                     }
                 }
             }
@@ -315,79 +290,91 @@ fn send_auth_failed(write: &mut WriteState) -> Result<(), ProtoError> {
     })
 }
 
-/// User store that only contains a single user
-pub(crate) struct SingleUser(pub(crate) CachedUser);
-
-impl SingleUser {
-    #[cfg(test)]
-    pub(crate) fn with_keys(data: User, keys: Vec<AuthorizedKey>) -> Self {
-        Self(CachedUser { data, keys })
-    }
-}
-
-impl UserStore for SingleUser {
-    fn lookup(&self, name: Username, _: RootPolicy) -> Option<User> {
-        match self.0.data.name == name {
-            true => Some(self.0.data.clone()),
-            false => {
-                warn!(
-                    requested = %name,
-                    authorized = %self.0.data.name,
-                    "requested user does not match authorized user",
-                );
-                None
-            }
-        }
-    }
-
-    fn keys(&self, _: &User, _: &dyn CryptoProvider) -> Vec<AuthorizedKey> {
-        self.0.keys.clone()
-    }
-
-    fn drop_privileges(&self) -> bool {
-        false
-    }
-}
-
-/// A user store resolves a username to a `User` type containing data used for authentication
-pub trait UserStore: Send + Sync + 'static {
-    /// Lookup a user by name, returning `None` if the user does not exist or cannot be retrieved
-    fn lookup(&self, name: Username, root_policy: RootPolicy) -> Option<User>;
-
-    /// Lookup the authorized keys for a user
-    fn keys(&self, user: &User, provider: &dyn CryptoProvider) -> Vec<AuthorizedKey>;
-
-    /// Whether the user store should set the UID of the process to the authenticated user
-    fn drop_privileges(&self) -> bool;
-}
-
-pub(crate) struct CachedUser {
-    pub(crate) data: User,
+/// The one account that may authenticate, with the keys that may authenticate as it
+pub struct Account {
+    pub(crate) name: Username,
     pub(crate) keys: Vec<AuthorizedKey>,
 }
 
-/// A successfully authenticated user, together with the options on the key they authenticated with
-pub(crate) struct Authenticated {
-    /// The authenticated user
-    pub(crate) user: User,
-    /// Options from the `authorized_keys` entry that matched
-    pub(crate) options: KeyOptions,
+impl Account {
+    /// Build an account from already validated keys
+    pub fn new(name: Username, keys: Vec<AuthorizedKey>) -> Self {
+        Self { name, keys }
+    }
+
+    /// Load the account's keys from an `authorized_keys`-format file
+    ///
+    /// Fails closed: the file and its directory must belong to the server user and not be
+    /// writable by anyone else, the file must not be a symlink, and every non-comment line
+    /// must be a valid key carrying an explicit `git-access` option. Any other option, a
+    /// duplicate option, or an unparsable line is an error rather than a skipped entry.
+    pub fn from_file(
+        name: Username,
+        path: &Path,
+        provider: &dyn CryptoProvider,
+    ) -> anyhow::Result<Self> {
+        use std::{
+            fs::OpenOptions,
+            io::Read as _,
+            os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
+        };
+
+        let euid = rustix::process::geteuid().as_raw();
+        let check = |meta: &std::fs::Metadata, what: &Path| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                meta.uid() == euid && meta.mode() & 0o022 == 0,
+                "{} must be owned by the server user and not writable by others",
+                what.display()
+            );
+            Ok(())
+        };
+
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        check(&std::fs::metadata(parent).context("authorized keys directory")?, parent)?;
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .with_context(|| format!("failed to open authorized keys file `{}`", path.display()))?;
+        let meta = file.metadata()?;
+        anyhow::ensure!(meta.is_file(), "{} is not a regular file", path.display());
+        check(&meta, path)?;
+        anyhow::ensure!(meta.len() <= MAX_KEY_FILE_BYTES, "{} is too large", path.display());
+
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .with_context(|| format!("failed to read `{}`", path.display()))?;
+
+        let mut keys = Vec::new();
+        for (index, line) in contents.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let number = index + 1;
+            let key = AuthorizedKey::from_str(line, provider)
+                .with_context(|| format!("{}:{number}: invalid key or unsupported option", path.display()))?;
+            anyhow::ensure!(
+                key.options.git_access.is_some(),
+                "{}:{number}: missing git-access option",
+                path.display()
+            );
+            keys.push(key);
+        }
+        anyhow::ensure!(!keys.is_empty(), "{} contains no keys", path.display());
+        anyhow::ensure!(keys.len() <= MAX_KEYS, "{} has too many keys", path.display());
+        Ok(Self { name, keys })
+    }
 }
 
-/// User data as retrieved from the system database
-#[non_exhaustive]
-#[derive(Clone, Debug)]
-pub struct User {
-    /// The user's name
-    pub name: Username,
-    /// The user's UID
-    pub id: u32,
-    /// The user's GID
-    pub gid: u32,
-    /// The user's home directory
-    pub home_dir: PathBuf,
-    /// The user's shell
-    pub shell: PathBuf,
+/// A successfully authenticated connection, with the options on the key it authenticated with
+pub(crate) struct Authenticated {
+    /// Options from the `authorized_keys` entry that matched
+    pub(crate) options: KeyOptions,
 }
 
 /// A validated username
@@ -396,29 +383,11 @@ pub struct User {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Username(String);
 
-impl Username {
-    pub(crate) fn nobody() -> Self {
-        Self("nobody".to_owned())
-    }
-}
-
-impl TryFrom<&CStr> for Username {
-    type Error = Error;
-
-    fn try_from(value: &CStr) -> Result<Self, Self::Error> {
-        let Ok(name) = value.to_str() else {
-            return Err(Error::InvalidUsername);
-        };
-
-        Self::try_from(name.to_owned())
-    }
-}
-
 impl TryFrom<String> for Username {
     type Error = Error;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.chars().any(|c| c.is_control() || c == '/') {
+        match value.is_empty() || value.chars().any(|c| c.is_control() || c == '/') {
             true => Err(Error::InvalidUsername),
             false => Ok(Self(value)),
         }
@@ -450,12 +419,88 @@ pub enum AuthError {
     TooManyAttempts,
 }
 
+/// Authentication requests allowed per connection, including probes without a signature
+const MAX_ATTEMPTS: u8 = 6;
+
+const MAX_KEY_FILE_BYTES: u64 = 1 << 20;
+const MAX_KEYS: usize = 1024;
+
 const SUPPORTED_METHODS: &[MethodName<'_>] = &[MethodName::PublicKey];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::DEFAULT_PROVIDER;
+
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMPdEXeWrpzl1Lgk7akX7+7x4B1eoyV5tyD6674DIh3R user@host";
+
+    fn load(contents: &str, mode: u32) -> anyhow::Result<Account> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join("authorized_keys");
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let name = Username::try_from("git".to_owned()).unwrap();
+        Account::from_file(name, &path, DEFAULT_PROVIDER)
+    }
+
+    #[test]
+    fn authorized_keys_require_an_explicit_git_access() {
+        assert_eq!(load(&format!("git-access=\"read\" {KEY}\n"), 0o600).unwrap().keys.len(), 1);
+        let two = format!("# comment\n\ngit-access=\"read\" {KEY}\ngit-access=\"write\" {KEY}\n");
+        assert_eq!(load(&two, 0o600).unwrap().keys.len(), 2);
+        for bad in [
+            format!("{KEY}\n"),
+            format!("command=\"id\" {KEY}\n"),
+            format!("git-access=\"read\",command=\"id\" {KEY}\n"),
+            format!("git-access=\"read\",git-access=\"write\" {KEY}\n"),
+            format!("git-access=\"admin\" {KEY}\n"),
+            format!("restrict,git-access=\"read\" {KEY}\n"),
+            format!("git-access=\"read\" {KEY}\ngarbage\n"),
+            String::new(),
+            "# only a comment\n".to_owned(),
+        ] {
+            assert!(load(&bad, 0o600).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn authorized_keys_file_must_be_private_and_not_a_symlink() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let line = format!("git-access=\"read\" {KEY}\n");
+        assert!(load(&line, 0o660).is_err());
+        assert!(load(&line, 0o666).is_err());
+        assert!(load(&line, 0o644).is_ok());
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let real = dir.path().join("real");
+        std::fs::write(&real, &line).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("link");
+        symlink(&real, &link).unwrap();
+        let name = Username::try_from("git".to_owned()).unwrap();
+        assert!(Account::from_file(name, &link, DEFAULT_PROVIDER).is_err());
+
+        let open_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(open_dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = open_dir.path().join("authorized_keys");
+        std::fs::write(&path, &line).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let name = Username::try_from("git".to_owned()).unwrap();
+        assert!(Account::from_file(name, &path, DEFAULT_PROVIDER).is_err());
+    }
+
+    #[test]
+    fn usernames_are_plain() {
+        for bad in ["", "a/b", "a\nb", "a\0b"] {
+            assert!(Username::try_from(bad.to_owned()).is_err(), "{bad:?}");
+        }
+        assert!(Username::try_from("git".to_owned()).is_ok());
+    }
 
     #[test]
     fn parse_fake_keys() {

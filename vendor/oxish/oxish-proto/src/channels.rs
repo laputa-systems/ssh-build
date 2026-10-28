@@ -119,6 +119,15 @@ impl ChannelOpenFailure<'static> {
         }
     }
 
+    /// Failure response for a channel open beyond the connection's channel limit
+    pub fn resource_shortage(recipient_channel: u32) -> Self {
+        Self {
+            recipient_channel,
+            reason_code: ChannelOpenFailureReason::ResourceShortage,
+            description: "too many open channels",
+        }
+    }
+
     /// Failure response for a channel open with an unsupported channel type
     pub fn unknown_type(recipient_channel: u32) -> Self {
         Self {
@@ -294,6 +303,12 @@ impl Encode for ChannelRequest<'_> {
         want_reply.encode(buffer);
         match r#type {
             ChannelRequestType::ExitStatus(status) => status.encode(buffer),
+            ChannelRequestType::ExitSignal(signal) => {
+                signal.name.as_bytes().encode(buffer);
+                false.encode(buffer);
+                b"".as_slice().encode(buffer);
+                b"".as_slice().encode(buffer);
+            }
             _ => warn!(r#type = ?r#type.name(), "channel request type cannot be encoded"),
         }
     }
@@ -311,6 +326,11 @@ pub enum ChannelRequestType<'a> {
     ///
     /// As defined in <https://www.rfc-editor.org/info/rfc4254/#section-6.10>.
     ExitStatus(u32),
+    /// `exit-signal`, report that a process was terminated by a signal
+    ///
+    /// As defined in <https://www.rfc-editor.org/info/rfc4254/#section-6.10>. Sent by the
+    /// server only.
+    ExitSignal(ExitSignal<'a>),
     /// `pty-req`, request a pseudo-terminal
     ///
     /// As defined in <https://www.rfc-editor.org/rfc/rfc4254#section-6.2>.
@@ -340,6 +360,7 @@ impl ChannelRequestType<'_> {
         match self {
             Self::AuthAgentReq => "auth-agent-req@openssh.com",
             Self::ExitStatus(_) => "exit-status",
+            Self::ExitSignal(_) => "exit-signal",
             Self::PtyReq(_) => "pty-req",
             Self::Env(_) => "env",
             Self::Exec(_) => "exec",
@@ -348,6 +369,15 @@ impl ChannelRequestType<'_> {
             Self::Unknown(name) => name,
         }
     }
+}
+
+/// Type-specific data for the `exit-signal` channel request
+///
+/// The signal name is given without the `SIG` prefix, e.g. `KILL`.
+#[derive(Clone, Copy, Debug)]
+pub struct ExitSignal<'a> {
+    /// Name of the terminating signal
+    pub name: &'a str,
 }
 
 /// Type-specific data for the `window-change` channel request
@@ -820,6 +850,46 @@ impl fmt::Debug for ChannelData<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChannelData")
             .field("recipient_channel", &self.recipient_channel)
+            .field("data", &format_args!("[{} bytes]", self.data.len()))
+            .finish()
+    }
+}
+
+/// The `SSH_MSG_CHANNEL_EXTENDED_DATA` message
+///
+/// See <https://www.rfc-editor.org/rfc/rfc4254#section-5.2>.
+pub struct ChannelExtendedData<'a> {
+    /// The channel the data belongs to
+    pub recipient_channel: u32,
+    /// The data type code; 1 is standard error
+    pub data_type_code: u32,
+    /// The data being transferred
+    pub data: &'a [u8],
+}
+
+/// Data type code of standard error in [`ChannelExtendedData`]
+pub const EXTENDED_DATA_STDERR: u32 = 1;
+
+impl Encode for ChannelExtendedData<'_> {
+    fn encode(&self, buffer: &mut Vec<u8>) {
+        let Self {
+            recipient_channel,
+            data_type_code,
+            data,
+        } = self;
+
+        MessageType::ChannelExtendedData.encode(buffer);
+        recipient_channel.encode(buffer);
+        data_type_code.encode(buffer);
+        data.encode(buffer);
+    }
+}
+
+impl fmt::Debug for ChannelExtendedData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChannelExtendedData")
+            .field("recipient_channel", &self.recipient_channel)
+            .field("data_type_code", &self.data_type_code)
             .field("data", &format_args!("[{} bytes]", self.data.len()))
             .finish()
     }

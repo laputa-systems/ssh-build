@@ -1,24 +1,26 @@
-use core::str::{self, FromStr};
+use core::time::Duration;
 
 #[cfg(debug_assertions)]
 use proto::SessionHostKey;
 use proto::{
     Disconnect, GlobalRequest, MessageType, Pretty,
     auth::KeyOptions,
-    channels::{ChannelRequest, ChannelRequestType},
     crypto::CryptoProvider,
     key_exchange::{RekeyState, Rekeyed},
 };
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    time::{Instant, sleep},
+};
 use tracing::{debug, info, instrument, trace, warn};
 
 #[cfg(debug_assertions)]
 use crate::KeyExchangeOutput;
-use crate::{Connection, Error, receive};
+use crate::{Connection, Error, GitPolicy, receive};
 
 mod connections;
 pub(crate) use connections::Channels;
-use connections::{IncomingChannelMessage, TerminalsFuture, WriteTarget};
+use connections::{ChannelsFuture, Grant, IncomingChannelMessage};
 
 /// A single SSH session's state
 ///
@@ -30,6 +32,7 @@ pub struct Session<T> {
     pub(crate) channels: Channels,
     pub(crate) post_quantum_kx: bool,
     pub(crate) options: KeyOptions,
+    pub(crate) policy: GitPolicy,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
@@ -39,6 +42,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
         conn: Connection<T>,
         provider: &'static dyn CryptoProvider,
         options: KeyOptions,
+        policy: GitPolicy,
     ) -> Result<Self, Error> {
         Ok(Self {
             provider,
@@ -52,6 +56,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
             post_quantum_kx: kx.post_quantum_kx,
             channels: Channels::default(),
             options,
+            policy,
         })
     }
 
@@ -60,9 +65,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
     /// This function never returns unless the connection is closed or an error occurs.
     #[instrument(name = "connection", skip(self), fields(addr = %self.conn.addr))]
     pub async fn run(mut self) -> Result<(), Error> {
+        let idle = sleep(IDLE_TIMEOUT);
+        tokio::pin!(idle);
         loop {
             tokio::select! {
                 result = receive(&mut self.conn.stream, &mut self.conn.read) => {
+                    idle.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
                     let packet = result?;
                     let kx = packet.message_type == MessageType::KeyExchangeInit
                         || self.kx.in_progress();
@@ -109,21 +117,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                     match channel_message {
                         IncomingChannelMessage::Open(open) => self.channels.open(open, &mut self.conn.write),
                         IncomingChannelMessage::Request(request) => {
-                            let banner = banner(&request, self.kx.client_identity(), self.post_quantum_kx);
-                            self.channels.request(request, &mut self.conn.write, banner.as_deref(), &self.options)
+                            let grant = Grant { policy: &self.policy, options: &self.options };
+                            self.channels.request(request, &mut self.conn.write, &grant)
                         }
-                        IncomingChannelMessage::Data(data) => match self.channels.data(&data, &mut self.conn.write) {
-                            Ok(Some(WriteTarget::Terminal(session, data))) => match session.write(data).await {
-                                Ok(_) => Ok(()),
-                                Err(error) => Err(error.into()),
-                            },
-                            Ok(Some(WriteTarget::Exec(proc, data))) => match proc.write(data).await {
-                                Ok(_) => Ok(()),
-                                Err(error) => Err(error.into()),
-                            },
-                            Ok(None) => Ok(()),
-                            Err(error) => Err(error.into()),
-                        }
+                        IncomingChannelMessage::Data(data) => self.channels.data(&data).map_err(Into::into),
                         IncomingChannelMessage::WindowAdjust(adjust) => self.channels.adjust_window(&adjust).map_err(Into::into),
                         IncomingChannelMessage::Eof(eof) => self.channels.eof(&eof).map_err(Into::into),
                         IncomingChannelMessage::Close(close) => self.channels.close(&close, &mut self.conn.write),
@@ -131,130 +128,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
 
                     self.conn.flush().await?;
                 }
-                result = TerminalsFuture::new(self.channels.channels_mut(), &mut self.conn.write), if !self.kx.in_progress() => {
+                result = ChannelsFuture::new(&mut self.channels, &mut self.conn.write), if !self.kx.in_progress() => {
+                    idle.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
                     result?;
                     self.conn.flush().await?;
+                }
+                () = &mut idle, if !self.channels.busy() => {
+                    info!("closing idle connection");
+                    return Ok(());
                 }
             }
         }
     }
 }
 
-fn banner(
-    request: &ChannelRequest<'_>,
-    client_identity: &[u8],
-    post_quantum_kx: bool,
-) -> Option<String> {
-    if post_quantum_kx {
-        return None;
-    }
-
-    let width = match &request.r#type {
-        // A zero dimension means the client left it unspecified (RFC 4254 section 6.2)
-        ChannelRequestType::PtyReq(pty) => match pty.cols {
-            0 => 80,
-            cols => Ord::max(40, cols as usize),
-        },
-        _ => return None,
-    };
-
-    let mut banner = String::with_capacity(PREFIX.len() + NO_PQ_WARNING.len());
-    banner.push_str(PREFIX);
-    let mut left = width.saturating_sub(PREFIX.len());
-    for token in NO_PQ_WARNING.split(' ') {
-        if token.len() + 1 >= left {
-            banner.push_str("\r\n");
-            banner.push_str(PREFIX);
-            left = width.saturating_sub(PREFIX.len());
-        }
-
-        banner.push_str(token);
-        banner.push(' ');
-        left = left.saturating_sub(token.len() + 1);
-    }
-
-    banner.push_str("\r\n");
-    let Some(version) = client_identity.strip_prefix(b"SSH-2.0-OpenSSH_") else {
-        return Some(banner);
-    };
-
-    let Ok(version) = str::from_utf8(version) else {
-        return Some(banner);
-    };
-
-    let Some((major, minor)) = version.split_once('.') else {
-        return Some(banner);
-    };
-
-    let minor = match minor.split_once(|c: char| !c.is_ascii_digit()) {
-        Some((minor, _)) => minor,
-        None => minor,
-    };
-
-    let (Ok(major), Ok(minor)) = (u8::from_str(major), u8::from_str(minor)) else {
-        return Some(banner);
-    };
-
-    if (major, minor) < (9, 9) {
-        banner.push_str(PREFIX);
-        banner.push_str(NO_PQ_WARNING_OPENSSH);
-        banner.push_str("\r\n");
-    }
-
-    Some(banner)
-}
-
-const PREFIX: &str = "WARNING: ";
-const NO_PQ_WARNING: &str = "the client negotiated a key exchange algorithm that is not post-quantum secure; your session may be decrypted by a cryptographically relevant quantum computer in the future";
-const NO_PQ_WARNING_OPENSSH: &str =
-    "consider upgrading your client version to OpenSSH 9.9 or newer";
-
-#[cfg(test)]
-mod tests {
-    use std::borrow::Cow;
-    use std::collections::BTreeMap;
-
-    use proto::channels::PtyReq;
-
-    use super::*;
-
-    #[test]
-    fn banner_at_80_columns() {
-        let banner = banner(&pty_request(80), b"SSH-2.0-OpenSSH_10.0", false).unwrap();
-        assert_eq!(
-            banner,
-            "WARNING: the client negotiated a key exchange algorithm that is not \r\n\
-             WARNING: post-quantum secure; your session may be decrypted by a \r\n\
-             WARNING: cryptographically relevant quantum computer in the future \r\n"
-        );
-        assert!(banner.lines().all(|line| line.len() <= 80));
-    }
-
-    #[test]
-    fn banner_at_80_columns_with_openssh_warning() {
-        let banner = banner(&pty_request(80), b"SSH-2.0-OpenSSH_9.8p1", false).unwrap();
-        assert_eq!(
-            banner,
-            "WARNING: the client negotiated a key exchange algorithm that is not \r\n\
-             WARNING: post-quantum secure; your session may be decrypted by a \r\n\
-             WARNING: cryptographically relevant quantum computer in the future \r\n\
-             WARNING: consider upgrading your client version to OpenSSH 9.9 or newer\r\n"
-        );
-        assert!(banner.lines().all(|line| line.len() <= 80));
-    }
-
-    fn pty_request(cols: u32) -> ChannelRequest<'static> {
-        ChannelRequest {
-            recipient_channel: 0,
-            r#type: ChannelRequestType::PtyReq(PtyReq {
-                term: Cow::Borrowed("xterm-256color"),
-                cols,
-                rows: 24,
-                width_px: 0,
-                height_px: 0,
-                terminal_modes: BTreeMap::new(),
-            }),
-            want_reply: true,
-        }
-    }
-}
+/// How long a connection with no running command may stay silent
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);

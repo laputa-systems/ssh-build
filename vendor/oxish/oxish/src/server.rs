@@ -16,8 +16,8 @@ use tracing::{debug, instrument, warn};
 #[cfg(debug_assertions)]
 use crate::Session;
 use crate::{
-    Connection, Error, SessionState, SideState,
-    authentication::{Authenticated, UserStore, authenticate},
+    Connection, Error, GitPolicy, SessionState, SideState,
+    authentication::{Account, Authenticated, authenticate},
     platform::spawn,
 };
 
@@ -26,24 +26,34 @@ pub struct Server {
     pub(crate) provider: &'static dyn CryptoProvider,
     pub(crate) host_keys: HostKeys,
     pub(crate) session: PathBuf,
-    pub(crate) store: Box<dyn UserStore>,
+    pub(crate) account: Account,
+    pub(crate) policy: GitPolicy,
     pub(crate) authenticating: Semaphore,
     config: Config,
 }
 
 impl Server {
     /// Create a new SSH server from the necessary minimal state
+    ///
+    /// Refuses to run as root: the session process runs as the server's user, so a privileged
+    /// server would run untrusted Git commands with full privileges.
     pub fn new(
-        store: Box<dyn UserStore>,
+        account: Account,
         host_keys: HostKeys,
         session: PathBuf,
+        policy: GitPolicy,
         provider: &'static dyn CryptoProvider,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            rustix::process::geteuid().as_raw() != 0,
+            "refusing to run as root; use a dedicated unprivileged Git account"
+        );
         Ok(Self {
             provider,
             host_keys,
             session,
-            store,
+            account,
+            policy,
             authenticating: Semaphore::new(32),
             config: Config::default(),
         })
@@ -112,11 +122,10 @@ impl Server {
             Err(_) => return Err(anyhow::anyhow!("key exchange timed out")),
         };
 
-        let Authenticated { user, options } = authenticate(
+        let Authenticated { options } = authenticate(
             &kx.session_id,
             &mut conn,
-            &*self.store,
-            self.config.root_policy,
+            &self.account,
             self.provider,
         )
         .await
@@ -125,7 +134,7 @@ impl Server {
 
         #[cfg(debug_assertions)]
         if !self.config.spawn {
-            let session = Session::new(kx, conn, self.provider, options)?;
+            let session = Session::new(kx, conn, self.provider, options, self.policy.clone())?;
             return session.run().await.context("session failed");
         }
 
@@ -169,7 +178,7 @@ impl Server {
             options,
         };
 
-        let mut child = spawn(state, stream, user, self)
+        let mut child = spawn(state, stream, self)
             .await
             .context("failed to spawn session process")?;
 
@@ -194,8 +203,6 @@ pub struct Config {
     /// Whether to spawn a child process for each authenticated session
     #[cfg(debug_assertions)]
     pub spawn: bool,
-    /// Policy for authenticating as the root user
-    pub root_policy: RootPolicy,
 }
 
 impl Default for Config {
@@ -203,18 +210,6 @@ impl Default for Config {
         Self {
             #[cfg(debug_assertions)]
             spawn: true,
-            root_policy: RootPolicy::default(),
         }
     }
-}
-
-/// Policy for authenticating as the root user
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-pub enum RootPolicy {
-    /// Allow authentication as root
-    Allow,
-    /// Refuse authentication as root
-    #[default]
-    Deny,
 }

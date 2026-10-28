@@ -153,8 +153,32 @@ impl fmt::Debug for AuthorizedKey {
 /// <https://man.openbsd.org/sshd.8#AUTHORIZED_KEYS_FILE_FORMAT>.
 #[derive(Clone, Debug, Default)]
 pub struct KeyOptions {
-    /// The command to run instead of the one requested by the client (`command="..."`)
-    pub command: Option<String>,
+    /// The Git access the key grants (`git-access="read"` or `git-access="write"`)
+    pub git_access: Option<GitAccess>,
+}
+
+/// What a key may do with Git repositories; writing implies reading
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GitAccess {
+    /// Fetch and clone only
+    Read,
+    /// Fetch, clone, and push
+    Write,
+}
+
+impl GitAccess {
+    /// Whether this grant covers an operation needing `needed`
+    pub fn allows(self, needed: Self) -> bool {
+        self >= needed
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            _ => None,
+        }
+    }
 }
 
 impl KeyOptions {
@@ -206,8 +230,12 @@ impl KeyOptions {
             };
 
             match (name.to_ascii_lowercase().as_str(), value) {
-                ("command", Some(command)) if options.command.is_none() => {
-                    options.command = Some(command)
+                ("git-access", Some(value)) if options.git_access.is_none() => {
+                    let Some(access) = GitAccess::parse(&value) else {
+                        debug!(value, "invalid git-access value");
+                        return (options, None, rest);
+                    };
+                    options.git_access = Some(access)
                 }
                 _ => {
                     debug!(option = name, "invalid key option");
@@ -236,41 +264,30 @@ impl KeyOptions {
 
 impl Encode for KeyOptions {
     fn encode(&self, buf: &mut Vec<u8>) {
-        let Self { command } = self;
-        match command {
-            Some(command) => {
-                true.encode(buf);
-                command.as_bytes().encode(buf);
-            }
-            None => false.encode(buf),
-        }
+        let tag: u8 = match self.git_access {
+            None => 0,
+            Some(GitAccess::Read) => 1,
+            Some(GitAccess::Write) => 2,
+        };
+        buf.push(tag);
     }
 }
 
 impl Decode<'_> for KeyOptions {
     fn decode(bytes: &[u8]) -> Result<Decoded<'_, Self>, ProtoError> {
-        let Decoded {
-            value: has_command,
-            next,
-        } = bool::decode(bytes)?;
+        let Some((&tag, next)) = bytes.split_first() else {
+            return Err(ProtoError::InvalidPacket("truncated key options"));
+        };
 
-        let (command, next) = match has_command {
-            true => {
-                let Decoded {
-                    value: command,
-                    next,
-                } = <&[u8]>::decode(next)?;
-
-                let command = str::from_utf8(command)
-                    .map_err(|_| ProtoError::InvalidPacket("invalid UTF-8 in forced command"))?;
-
-                (Some(command.to_owned()), next)
-            }
-            false => (None, next),
+        let git_access = match tag {
+            0 => None,
+            1 => Some(GitAccess::Read),
+            2 => Some(GitAccess::Write),
+            _ => return Err(ProtoError::InvalidPacket("invalid git access in key options")),
         };
 
         Ok(Decoded {
-            value: Self { command },
+            value: Self { git_access },
             next,
         })
     }
@@ -676,31 +693,31 @@ mod tests {
 
     #[test]
     fn key_options() {
-        let cases: &[(&str, Option<Option<&str>>)] = &[
+        use GitAccess::{Read, Write};
+        let cases: &[(&str, Option<Option<GitAccess>>)] = &[
             ("", Some(None)),
-            (r#"command="echo hi""#, Some(Some("echo hi"))),
-            (r#"COMMAND="echo hi""#, Some(Some("echo hi"))),
-            (r#"command="echo #hash""#, Some(Some("echo #hash"))),
-            (r#"command="echo café""#, Some(Some("echo café"))),
-            (r#"command="say \"hi\"""#, Some(Some(r#"say "hi""#))),
-            (r#"command="a\b""#, Some(Some(r"a\b"))),
-            (r#"command="a\\"b""#, Some(Some(r#"a\"b"#))),
-            (r#"command="a,b c""#, Some(Some("a,b c"))),
-            (r#"command="""#, Some(Some(""))),
-            ("command=\"echo hi\"\t", Some(Some("echo hi"))),
-            (r#"command="trailing \\""#, None),
-            (r#"command="a",command="b""#, None),
-            (r#"command="a" ,command="b""#, None),
-            ("command", None),
-            ("command=unquoted", None),
-            (r#"command="unterminated"#, None),
-            (r#"command="echo hi"junk"#, None),
-            (r#",command="echo hi""#, None),
-            (r#"command="echo hi","#, None),
-            (r#"command="echo hi",,"#, None),
+            (r#"git-access="read""#, Some(Some(Read))),
+            (r#"GIT-ACCESS="write""#, Some(Some(Write))),
+            ("git-access=\"read\"\t", Some(Some(Read))),
+            (r#"git-access="admin""#, None),
+            (r#"git-access="""#, None),
+            (r#"git-access="Read""#, None),
+            (r#"git-access="read",git-access="write""#, None),
+            (r#"git-access="read" ,git-access="write""#, None),
+            ("git-access", None),
+            ("git-access=read", None),
+            (r#"git-access="read"#, None),
+            (r#"git-access="read"junk"#, None),
+            (r#",git-access="read""#, None),
+            (r#"git-access="read","#, None),
+            (r#"git-access="read",,"#, None),
+            (r#"command="echo hi""#, None),
+            (r#"git-access="read",command="echo hi""#, None),
             ("no-pty", None),
-            (r#"no-pty,command="echo hi""#, None),
-            (r#"command="echo hi",no-pty"#, None),
+            (r#"restrict,git-access="read""#, None),
+            (r#"from="10.0.0.1",git-access="read""#, None),
+            (r#"environment="A=b",git-access="read""#, None),
+            (r#"permitopen="x:1",git-access="read""#, None),
         ];
 
         for (options, expected) in cases {
@@ -711,16 +728,28 @@ mod tests {
 
             let (parsed, key_type, rest) = KeyOptions::parse(&line);
             let parsed = match (key_type, rest) {
-                (Some(PublicKeyAlgorithm::Ed25519), KEY) => Some(parsed.command),
+                (Some(PublicKeyAlgorithm::Ed25519), KEY) => Some(parsed.git_access),
                 _ => None,
             };
 
             assert_eq!(
-                parsed.as_ref().map(|command| command.as_deref()),
-                *expected,
+                parsed, *expected,
                 "unexpected result for options {options:?}",
             );
         }
+    }
+
+    #[test]
+    fn key_options_round_trip() {
+        for git_access in [None, Some(GitAccess::Read), Some(GitAccess::Write)] {
+            let mut buf = Vec::new();
+            KeyOptions { git_access }.encode(&mut buf);
+            let decoded = KeyOptions::decode(&buf).unwrap();
+            assert_eq!(decoded.value.git_access, git_access);
+            assert!(decoded.next.is_empty());
+        }
+        assert!(KeyOptions::decode(&[3]).is_err());
+        assert!(KeyOptions::decode(&[]).is_err());
     }
 
     const KEY: &str =
