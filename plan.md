@@ -5,30 +5,52 @@
 Goal: (1) OpenSSH 10.6p1 client without libcrypto for macOS arm64 + static
 musl Linux (x86_64, aarch64); (2) extension: a minimal Graviola-only OxiSH Git
 server, packaged separately, delegating to the `git-build` binaries.
-Branch `master`; the client workstream is unchanged by the extension.
+Branch `master`, local commits only, nothing pushed or published.
 
-Reconciled 2026-10-27 against commits and executed tests:
-- S0 pins: done. S1 macOS client: done (`make macos`, qualify green).
-- S2 Linux client: done for both arches (`make linux` arm64 + amd64 green,
-  readelf/arch/PATH-ssh gates run inside the Docker build).
-- S3 `sh test/runtime.sh`: green on macOS bytes and on the extracted macOS
-  ZIP. Defect fixed on the way: sftp/scp had `/usr/local/bin/ssh` compiled in
-  (`SSH_PROGRAM=ssh` now, gated by qualify). Loopback fixture uses
-  `internal-sftp`; exec is proven against the OxiSH server.
-- S4 chacha interop: green (handshake vs the S1 client; 6 chacha unit tests).
-  The ChaCha20/Poly1305 primitives are a hand-maintained copy: transitional,
-  tracked by S13.
-- S5 non-PTY exec: prototype only. `exec_*` tests pass, but the server runs a
-  caller-supplied program path and discards stderr (see S10, S11). Not
-  qualified.
-- S6 packaging: `scripts/package.sh`, `release-budgets.json`, README, and
-  `dl ssh` (in `~/usr`, not in the default set; `dl-test.sh` 54 cases green)
-  are done for the client. Nothing is published; live-GitHub proof remains
-  owner-run.
-- S7 close is reopened: it runs after S8-S19, not before.
-Red: none known. Linux package qualification relies on the Docker build
-(no readelf on the macOS host).
-Next: S8 (vendor provenance), then S9 and S10 per **Sequence**.
+Reconciled 2026-10-28 against commits and executed tests. "Accepted" means the
+slice's acceptance command ran green on the integrated tree on this machine
+(macOS arm64); anything not run is listed under **Open**.
+
+Client (unchanged scope):
+- S0-S5: accepted. `make macos`, `make linux` (arm64 + amd64), `sh
+  test/runtime.sh` green on macOS bytes and on the extracted ZIP. Defects
+  fixed on the way: sftp/scp had `/usr/local/bin/ssh` compiled in (now
+  `SSH_PROGRAM=ssh`, gated); the macOS client required macOS 27 (now built and
+  gated at a 14.0 floor); `qualify-binaries.sh` exited silently on a failed
+  check (now reports it).
+- S6: `scripts/package.sh`, `release-budgets.json`, README, `dl ssh` done.
+
+Server extension:
+- S8 vendor provenance: accepted (`sh scripts/vendor-oxish.sh verify`,
+  `sh scripts/vendor-graviola.sh verify`).
+- S9 Graviola-only: accepted (`sh scripts/check-crypto-graph.sh` incl.
+  `--selftest`; AWS-LC crate and features deleted).
+- S10 Git policy: accepted (`cargo test -p oxish git::`; absolute-path
+  executable escape closed; forced commands and shell removed).
+- S11 channel lifecycle: accepted with gaps (stderr as extended data,
+  window-bound stdin queue, EOF after both pipes, exit status/signal,
+  SIGTERM-then-SIGKILL on disconnect, tests `channel_*`). Open: explicit tests
+  for client half-close ordering and exit-by-signal.
+- S12 auth/runtime hardening: accepted with gaps (Git-only, root refused,
+  authorized_keys + host keys strict, caps and timeouts). Open: forged
+  signature test, listener-level connection rate limiting.
+- S13 crypto: accepted, option (a). `SshChaCha20Poly1305` in a patched,
+  checksum-pinned Graviola; 440 OpenSSH-sealed vectors, bit-flip, nonce-limit
+  tests; two libFuzzer targets ran 40 s each with no finding. No hand-written
+  ChaCha20/Poly1305 remains.
+- S14 protocol v2: accepted (packet trace in `test/e2e-git.sh`; only
+  `version=2` passes through).
+- S15 end-to-end: accepted on macOS arm64 against the pinned git-build
+  prerelease, including on the extracted server and client ZIPs. Open: the same
+  run on Linux bytes needs a native Linux runner.
+- S16 builds: macOS arm64 and static-PIE musl (arm64, amd64) build; readelf and
+  Mach-O gates ran. Open: Linux binaries were not executed.
+- S17 packaging: accepted locally (`sh scripts/package-oxish.sh`; one
+  consolidated, verified `SHA256SUMS`). Nothing published.
+- S18 security review: see `SECURITY.md`; status stays experimental.
+- S19: `dl oxish` done (opt-in); final cleanup and report open.
+
+Next: close S18 findings, S19 cleanup, final report.
 Launch prompt: `Run the next open slice of plan.md in /Users/josh/d/ssh-build;
 brief per orchestrate, land green only, steer after each accept.`
 
@@ -181,7 +203,7 @@ from `PATH` or from client input. No source is shared with `git-build`.
   (PAR: S10)
 - S10 — Git execution policy. Owns: new `vendor/oxish/oxish/src/git/`
   (command parse, repo confinement, binary dir, permissions), server config.
-  Prereq: S8. Accept: `cargo test -p oxish git_policy` covers executable
+  Prereq: S8. Accept: `cargo test -p oxish git::` covers executable
   paths, quoting, injection, traversal, symlink escape, option-like repos,
   read-only vs push keys, forced commands (rejected or policy-validated), and
   a policy test per fixed vulnerability; no client-supplied path is ever
