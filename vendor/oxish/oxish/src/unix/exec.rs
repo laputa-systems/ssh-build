@@ -1,6 +1,7 @@
 use core::{
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 use std::{
     collections::VecDeque,
@@ -11,6 +12,7 @@ use std::{
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
+    time::timeout,
     sync::OwnedSemaphorePermit,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 };
@@ -222,72 +224,85 @@ impl GitProcess {
         }
     }
 
-    /// Send `SIGTERM` to the process group of a child that has not exited
-    pub(crate) fn request_stop(&mut self) {
-        if self.status.is_some() {
-            return;
-        }
-
-        if let Some(group) = self.group {
-            if let Err(error) = kill_process_group(group, Signal::TERM) {
-                debug!(%error, "error terminating git process group");
-            }
-        }
-    }
-
-    /// Wait for the child to exit after [`Self::request_stop`], killing it at the deadline
-    pub(crate) async fn finish_stopping(&mut self, deadline: tokio::time::Instant) {
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-
-        if tokio::time::timeout_at(deadline, child.wait()).await.is_err() {
-            if let Some(group) = self.group {
-                let _ = kill_process_group(group, Signal::KILL);
-            }
-            let _ = child.kill().await;
-        }
-        self.status = Some(ExitStatus::default());
-    }
-
-    /// Ask the child and its process group to stop, then kill them if they linger
+    /// Stop the child in the background: end its stdin, then signal it if it lingers
     ///
-    /// `SIGTERM` first lets Git remove the quarantine directory of an interrupted push; the
-    /// reaper task owns the child, so the `SIGKILL` can never hit a recycled process ID.
+    /// Closing stdin first lets Git leave through its own fatal path, which removes the
+    /// quarantine directory of an interrupted push; Git does not remove it when a signal stops
+    /// `index-pack`. Output is discarded meanwhile so a write cannot kill it with `SIGPIPE`. The
+    /// reaper task owns the child and the permit, so a `SIGKILL` can never hit a recycled
+    /// process ID and the command counts against the budget until it was reaped.
     pub(crate) fn terminate(&mut self) {
+        self.stdin = None;
+        self.queue.clear();
         if self.status.is_some() {
             return;
-        }
-
-        if let Some(group) = self.group {
-            if let Err(error) = kill_process_group(group, Signal::TERM) {
-                debug!(%error, "error terminating git process group");
-            }
         }
 
         let Some(mut child) = self.child.take() else {
             return;
         };
         let group = self.group;
+        let (stdout, stderr) = (self.stdout.take(), self.stderr.take());
         let permit = self.permit.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            signal_group(group, Signal::KILL);
             let _ = child.start_kill();
             return;
         };
         runtime.spawn(async move {
-            if tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err() {
-                if let Some(group) = group {
-                    let _ = kill_process_group(group, Signal::KILL);
-                }
-                let _ = child.kill().await;
-            }
+            stop(&mut child, group, stdout, stderr).await;
             drop(permit);
         });
     }
 }
 
-/// How long a terminated command may take to exit before it is killed
-const TERMINATE_GRACE: core::time::Duration = core::time::Duration::from_secs(3);
+/// How long a command may take to exit after its stdin ended before it is sent `SIGTERM`
+const STDIN_EOF_GRACE: Duration = Duration::from_secs(1);
+/// How long a command may take to exit after `SIGTERM` before it is killed
+const TERMINATE_GRACE: Duration = Duration::from_secs(3);
+/// The longest a stopping command keeps its permit, short of a process that survives `SIGKILL`
+pub(crate) const STOP_LIMIT: Duration = STDIN_EOF_GRACE.saturating_add(TERMINATE_GRACE);
+
+async fn stop(
+    child: &mut Child,
+    group: Option<Pid>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+) {
+    let drain = async move {
+        tokio::join!(discard(stdout), discard(stderr));
+        core::future::pending::<()>().await
+    };
+    let escalate = async {
+        if timeout(STDIN_EOF_GRACE, child.wait()).await.is_ok() {
+            return;
+        }
+        signal_group(group, Signal::TERM);
+        if timeout(TERMINATE_GRACE, child.wait()).await.is_ok() {
+            return;
+        }
+        signal_group(group, Signal::KILL);
+        let _ = child.kill().await;
+    };
+    tokio::select! {
+        () = escalate => {}
+        () = drain => {}
+    }
+}
+
+async fn discard<R: AsyncRead + Unpin>(pipe: Option<R>) {
+    if let Some(mut pipe) = pipe {
+        let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
+    }
+}
+
+fn signal_group(group: Option<Pid>, signal: Signal) {
+    if let Some(group) = group {
+        if let Err(error) = kill_process_group(group, signal) {
+            debug!(%error, ?signal, "error signaling git process group");
+        }
+    }
+}
 
 impl Drop for GitProcess {
     fn drop(&mut self) {

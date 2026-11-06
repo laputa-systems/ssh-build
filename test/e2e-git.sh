@@ -255,6 +255,31 @@ leftovers=$(find "$work/repos" \( -name 'tmp_*' -o -name 'incoming-*' -o -name '
 [ "$leftovers" -eq 0 ] || fail "temporary state left behind in the repositories"
 ok "disconnect mid-transfer: no child processes, no temporary files"
 
+lg init -q --bare -b main "$work/repos/push.git"
+interrupted=$work/clients/interrupted
+mkdir "$interrupted"
+g rw -C "$interrupted" init -q -b main
+head -c 300000000 /dev/urandom > "$interrupted/random.bin"
+g rw -C "$interrupted" add .
+g rw -C "$interrupted" -c user.name=e2e -c user.email=e2e@example.invalid commit -q -m interrupted
+g rw -C "$interrupted" push -q "$(url push.git)" main > /dev/null 2>&1 &
+tries=0
+while [ -z "$(find "$work/repos/push.git/objects" -name 'tmp_objdir-incoming-*')" ] && [ "$tries" -lt 100 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+done
+[ -n "$(find "$work/repos/push.git/objects" -name 'tmp_objdir-incoming-*')" ] || fail "interrupted push never started receiving"
+pkill -9 -f "$work/keys/rw .*git-receive-pack '/push.git'" || fail "the pushing client was not found"
+tries=0
+while pgrep -f "$work/repos/push.git" > /dev/null && [ "$tries" -lt 100 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+done
+if pgrep -f "$work/repos/push.git" > /dev/null; then fail "git-receive-pack outlived its connection"; fi
+leftovers=$(find "$work/repos/push.git" \( -name 'tmp_*' -o -name 'incoming-*' -o -name '*.lock' \) | wc -l | tr -d ' ')
+[ "$leftovers" -eq 0 ] || fail "an interrupted push left its quarantine behind"
+ok "disconnect mid-push: no child processes, no quarantine directory"
+
 kill "$server_pid"
 wait "$server_pid" 2>/dev/null || true
 server_pid=

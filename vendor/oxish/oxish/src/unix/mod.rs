@@ -34,7 +34,7 @@ use crate::{
 };
 
 mod exec;
-pub(crate) use exec::{GitProcess, Output};
+pub(crate) use exec::{GitProcess, Output, STOP_LIMIT};
 
 /// Spawn the session process for an authenticated connection
 ///
