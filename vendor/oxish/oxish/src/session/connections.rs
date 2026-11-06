@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     DEFAULT_PROVIDER, Error, GitPolicy, PolicyError, validate_protocol,
-    platform::{GitProcess, Output},
+    platform::{GitProcess, Output, STOP_LIMIT},
 };
 
 /// Open session channels of one connection
@@ -309,27 +309,19 @@ impl Channels {
         }
     }
 
-    /// Stop every running command: ask politely, then kill whatever is left after the grace period
+    /// Stop every running command, then wait until each one, including those whose channels
+    /// closed earlier, has been reaped
     pub(crate) async fn shutdown(&mut self) {
-        let deadline = Instant::now() + SHUTDOWN_GRACE;
-        let mut processes = Vec::new();
         for channel in self.channels.values_mut() {
             if let Run::Active(active) = &mut channel.run {
                 if let Some(mut process) = active.process.take() {
-                    process.request_stop();
-                    processes.push(process);
+                    process.terminate();
                 }
             }
         }
 
-        for process in &mut processes {
-            process.finish_stopping(deadline).await;
-        }
-        drop(processes);
-
-        // Commands whose channels closed earlier are still being stopped by their reaper tasks.
         let all = u32::try_from(MAX_PROCESSES).unwrap_or(u32::MAX);
-        let _ = tokio::time::timeout_at(deadline + SHUTDOWN_GRACE, self.processes.acquire_many(all)).await;
+        let _ = tokio::time::timeout(STOP_LIMIT + SHUTDOWN_GRACE, self.processes.acquire_many(all)).await;
     }
 }
 
@@ -673,7 +665,7 @@ const MAX_PACKETS_PER_POLL: usize = 16;
 const MAX_CHANNELS: usize = 8;
 /// Git commands one connection may run at once
 const MAX_PROCESSES: usize = 4;
-/// How long commands get to exit after a stop request when the connection ends
+/// How long shutdown waits beyond the stop sequence for commands to be reaped
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// How long output pipes may stay open after Git itself exited
 const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);

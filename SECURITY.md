@@ -69,8 +69,10 @@ does not match the current inputs, and promote output only when every target pas
 Other fixes made while building this, each with a test: the exec path ran a client-supplied
 program path (closed by `git::tests::executable_is_never_client_supplied` and the e2e hostile
 command list); stderr was discarded (extended data now forwarded, `channel_stderr_*`); stdin writes
-could block the session (queue bounded by the SSH window); `SIGKILL` on disconnect left push
-quarantine directories (`channel_disconnect_asks_the_command_to_stop_before_killing_it`);
+could block the session (queue bounded by the SSH window); stopping a command with a signal on
+disconnect left push quarantine directories, so it now ends the command's stdin first and signals
+it only if it lingers (`channel_disconnect_ends_stdin_before_any_signal` and the e2e interrupted
+push);
 unreadable or malformed host key files were skipped with a warning (`host_keys::tests`).
 
 ## Cryptography

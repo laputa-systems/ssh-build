@@ -1927,7 +1927,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..f9f7dbf6b522b8eae488bd5ac3c8bd75
 +    }
  }
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..61c2fc71e897c0718e7bdc96bf30597656f82689 100644
+index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..73add2a165fad42f0b381ac8e761896ee245d938 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
 @@ -1,38 +1,69 @@
@@ -1970,7 +1970,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..61c2fc71e897c0718e7bdc96bf305976
 -use crate::{Error, platform::Terminal};
 +use crate::{
 +    DEFAULT_PROVIDER, Error, GitPolicy, PolicyError, validate_protocol,
-+    platform::{GitProcess, Output},
++    platform::{GitProcess, Output, STOP_LIMIT},
 +};
  
 -#[derive(Default)]
@@ -2320,7 +2320,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..61c2fc71e897c0718e7bdc96bf305976
          if !channel.close_sent {
              channel.close_sent = true;
              write.encode(&ChannelClose {
-@@ -250,272 +273,345 @@ impl Channels {
+@@ -250,272 +273,337 @@ impl Channels {
              })?;
          }
  
@@ -2390,27 +2390,19 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..61c2fc71e897c0718e7bdc96bf305976
 +        }
 +    }
 +
-+    /// Stop every running command: ask politely, then kill whatever is left after the grace period
++    /// Stop every running command, then wait until each one, including those whose channels
++    /// closed earlier, has been reaped
 +    pub(crate) async fn shutdown(&mut self) {
-+        let deadline = Instant::now() + SHUTDOWN_GRACE;
-+        let mut processes = Vec::new();
 +        for channel in self.channels.values_mut() {
 +            if let Run::Active(active) = &mut channel.run {
 +                if let Some(mut process) = active.process.take() {
-+                    process.request_stop();
-+                    processes.push(process);
++                    process.terminate();
 +                }
 +            }
 +        }
 +
-+        for process in &mut processes {
-+            process.finish_stopping(deadline).await;
-+        }
-+        drop(processes);
-+
-+        // Commands whose channels closed earlier are still being stopped by their reaper tasks.
 +        let all = u32::try_from(MAX_PROCESSES).unwrap_or(u32::MAX);
-+        let _ = tokio::time::timeout_at(deadline + SHUTDOWN_GRACE, self.processes.acquire_many(all)).await;
++        let _ = tokio::time::timeout(STOP_LIMIT + SHUTDOWN_GRACE, self.processes.acquire_many(all)).await;
      }
  }
  
@@ -2915,7 +2907,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..61c2fc71e897c0718e7bdc96bf305976
      }
  }
  
-@@ -567,7 +663,310 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
+@@ -567,7 +655,310 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
      }
  }
  
@@ -2932,7 +2924,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..61c2fc71e897c0718e7bdc96bf305976
 +const MAX_CHANNELS: usize = 8;
 +/// Git commands one connection may run at once
 +const MAX_PROCESSES: usize = 4;
-+/// How long commands get to exit after a stop request when the connection ends
++/// How long shutdown waits beyond the stop sequence for commands to be reaped
 +const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 +/// How long output pipes may stay open after Git itself exited
 +const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
@@ -3515,7 +3507,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..d198cb073ab73b412a3bdae078d1cc89
 +/// How long buffered output may wait for a peer that is not reading
 +const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..415d0007d6f8234ddb5771f18d2c4b4c34207df0 100644
+index 151147cfbfaf967cbbea73dbd209ff50a17105cd..88940d7395f09da581e9ae68d8c1f27173fe319a 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
 @@ -1,20 +1,17 @@
@@ -3890,7 +3882,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..415d0007d6f8234ddb5771f18d2c4b4c
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -134,323 +381,644 @@ async fn handshake_ed25519_graviola() {
+@@ -134,323 +381,701 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -4311,6 +4303,63 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..415d0007d6f8234ddb5771f18d2c4b4c
 +        tokio::time::sleep(Duration::from_millis(100)).await;
 +    }
 +    panic!("the command was killed without a chance to clean up");
++}
++
++/// Start `git-receive-pack` with the client's stdin held open, then make the client vanish
++async fn interrupt_push(world: &World) -> PathBuf {
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let mut cmd = client.cmd;
++    cmd.args(["-o", "LogLevel=ERROR"]);
++    cmd.arg(format!("{USER}@{}", client.addr.ip())).arg("git-receive-pack 'a.git'");
++    let mut child = cmd
++        .stdin(Stdio::piped())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .kill_on_drop(true)
++        .spawn()
++        .unwrap();
++
++    let base = world.base().to_path_buf();
++    for _ in 0..100 {
++        if base.join("ready").exists() {
++            break;
++        }
++        tokio::time::sleep(Duration::from_millis(100)).await;
++    }
++    assert!(base.join("ready").exists(), "the command never started");
++    child.kill().await.unwrap();
++    for _ in 0..50 {
++        if base.join("finished").exists() {
++            break;
++        }
++        tokio::time::sleep(Duration::from_millis(100)).await;
++    }
++    base
++}
++
++#[tokio::test]
++async fn channel_disconnect_ends_stdin_before_any_signal() {
++    let world = script_world(
++        "PATH=/usr/bin:/bin; d=\"$(dirname \"$0\")/..\"; trap 'echo term > \"$d/term\"; exit 1' TERM; echo ready > \"$d/ready\"; cat > /dev/null; echo eof > \"$d/finished\"",
++    )
++    .await;
++    let base = interrupt_push(&world).await;
++    assert!(base.join("finished").exists(), "the command never saw the end of its stdin");
++    assert!(!base.join("term").exists(), "the command was signaled before its stdin ended");
++}
++
++#[tokio::test]
++async fn channel_disconnect_keeps_draining_output_while_the_command_cleans_up() {
++    let world = script_world(
++        "PATH=/usr/bin:/bin; d=\"$(dirname \"$0\")/..\"; echo ready > \"$d/ready\"; cat > /dev/null; head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2; echo done > \"$d/finished\"",
++    )
++    .await;
++    let base = interrupt_push(&world).await;
++    assert!(base.join("finished").exists(), "output written while cleaning up must not kill the command");
 +}
 +
 +#[tokio::test]
@@ -4830,7 +4879,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..415d0007d6f8234ddb5771f18d2c4b4c
  #[tokio::test]
  async fn host_keys_from_files_graviola() {
      host_keys_from_files(graviola::DEFAULT_PROVIDER)
-@@ -493,9 +1061,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+@@ -493,9 +1118,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
  #[tokio::test]
  async fn verify_keys() {
      let providers = [
@@ -4840,7 +4889,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..415d0007d6f8234ddb5771f18d2c4b4c
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -522,130 +1087,6 @@ async fn verify_keys() {
+@@ -522,130 +1144,6 @@ async fn verify_keys() {
      }
  }
  
@@ -4971,7 +5020,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..415d0007d6f8234ddb5771f18d2c4b4c
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  
  /// Build and locate the `oxish-session` binary
-@@ -704,8 +1145,3 @@ fn subscribe() {
+@@ -704,8 +1202,3 @@ fn subscribe() {
      });
  }
  
@@ -4982,13 +5031,14 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..415d0007d6f8234ddb5771f18d2c4b4c
 -const KX_WARNING_MARKER: &str = "post-quantum secure";
 diff --git a/oxish/src/unix/exec.rs b/oxish/src/unix/exec.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b0c9b1d7b13170fed2fb23dc1ec1c1c720c12d4
+index 0000000000000000000000000000000000000000..7a7d924617fd2d16c7178c53e8911cf11dc0270c
 --- /dev/null
 +++ b/oxish/src/unix/exec.rs
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,311 @@
 +use core::{
 +    pin::Pin,
 +    task::{Context, Poll},
++    time::Duration,
 +};
 +use std::{
 +    collections::VecDeque,
@@ -4999,6 +5049,7 @@ index 0000000000000000000000000000000000000000..0b0c9b1d7b13170fed2fb23dc1ec1c1c
 +use rustix::process::{Pid, Signal, kill_process_group};
 +use tokio::{
 +    io::{AsyncRead, AsyncWrite, ReadBuf},
++    time::timeout,
 +    sync::OwnedSemaphorePermit,
 +    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 +};
@@ -5210,72 +5261,85 @@ index 0000000000000000000000000000000000000000..0b0c9b1d7b13170fed2fb23dc1ec1c1c
 +        }
 +    }
 +
-+    /// Send `SIGTERM` to the process group of a child that has not exited
-+    pub(crate) fn request_stop(&mut self) {
-+        if self.status.is_some() {
-+            return;
-+        }
-+
-+        if let Some(group) = self.group {
-+            if let Err(error) = kill_process_group(group, Signal::TERM) {
-+                debug!(%error, "error terminating git process group");
-+            }
-+        }
-+    }
-+
-+    /// Wait for the child to exit after [`Self::request_stop`], killing it at the deadline
-+    pub(crate) async fn finish_stopping(&mut self, deadline: tokio::time::Instant) {
-+        let Some(mut child) = self.child.take() else {
-+            return;
-+        };
-+
-+        if tokio::time::timeout_at(deadline, child.wait()).await.is_err() {
-+            if let Some(group) = self.group {
-+                let _ = kill_process_group(group, Signal::KILL);
-+            }
-+            let _ = child.kill().await;
-+        }
-+        self.status = Some(ExitStatus::default());
-+    }
-+
-+    /// Ask the child and its process group to stop, then kill them if they linger
++    /// Stop the child in the background: end its stdin, then signal it if it lingers
 +    ///
-+    /// `SIGTERM` first lets Git remove the quarantine directory of an interrupted push; the
-+    /// reaper task owns the child, so the `SIGKILL` can never hit a recycled process ID.
++    /// Closing stdin first lets Git leave through its own fatal path, which removes the
++    /// quarantine directory of an interrupted push; Git does not remove it when a signal stops
++    /// `index-pack`. Output is discarded meanwhile so a write cannot kill it with `SIGPIPE`. The
++    /// reaper task owns the child and the permit, so a `SIGKILL` can never hit a recycled
++    /// process ID and the command counts against the budget until it was reaped.
 +    pub(crate) fn terminate(&mut self) {
++        self.stdin = None;
++        self.queue.clear();
 +        if self.status.is_some() {
 +            return;
-+        }
-+
-+        if let Some(group) = self.group {
-+            if let Err(error) = kill_process_group(group, Signal::TERM) {
-+                debug!(%error, "error terminating git process group");
-+            }
 +        }
 +
 +        let Some(mut child) = self.child.take() else {
 +            return;
 +        };
 +        let group = self.group;
++        let (stdout, stderr) = (self.stdout.take(), self.stderr.take());
 +        let permit = self.permit.take();
 +        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
++            signal_group(group, Signal::KILL);
 +            let _ = child.start_kill();
 +            return;
 +        };
 +        runtime.spawn(async move {
-+            if tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err() {
-+                if let Some(group) = group {
-+                    let _ = kill_process_group(group, Signal::KILL);
-+                }
-+                let _ = child.kill().await;
-+            }
++            stop(&mut child, group, stdout, stderr).await;
 +            drop(permit);
 +        });
 +    }
 +}
 +
-+/// How long a terminated command may take to exit before it is killed
-+const TERMINATE_GRACE: core::time::Duration = core::time::Duration::from_secs(3);
++/// How long a command may take to exit after its stdin ended before it is sent `SIGTERM`
++const STDIN_EOF_GRACE: Duration = Duration::from_secs(1);
++/// How long a command may take to exit after `SIGTERM` before it is killed
++const TERMINATE_GRACE: Duration = Duration::from_secs(3);
++/// The longest a stopping command keeps its permit, short of a process that survives `SIGKILL`
++pub(crate) const STOP_LIMIT: Duration = STDIN_EOF_GRACE.saturating_add(TERMINATE_GRACE);
++
++async fn stop(
++    child: &mut Child,
++    group: Option<Pid>,
++    stdout: Option<ChildStdout>,
++    stderr: Option<ChildStderr>,
++) {
++    let drain = async move {
++        tokio::join!(discard(stdout), discard(stderr));
++        core::future::pending::<()>().await
++    };
++    let escalate = async {
++        if timeout(STDIN_EOF_GRACE, child.wait()).await.is_ok() {
++            return;
++        }
++        signal_group(group, Signal::TERM);
++        if timeout(TERMINATE_GRACE, child.wait()).await.is_ok() {
++            return;
++        }
++        signal_group(group, Signal::KILL);
++        let _ = child.kill().await;
++    };
++    tokio::select! {
++        () = escalate => {}
++        () = drain => {}
++    }
++}
++
++async fn discard<R: AsyncRead + Unpin>(pipe: Option<R>) {
++    if let Some(mut pipe) = pipe {
++        let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
++    }
++}
++
++fn signal_group(group: Option<Pid>, signal: Signal) {
++    if let Some(group) = group {
++        if let Err(error) = kill_process_group(group, signal) {
++            debug!(%error, ?signal, "error signaling git process group");
++        }
++    }
++}
 +
 +impl Drop for GitProcess {
 +    fn drop(&mut self) {
@@ -5283,7 +5347,7 @@ index 0000000000000000000000000000000000000000..0b0c9b1d7b13170fed2fb23dc1ec1c1c
 +    }
 +}
 diff --git a/oxish/src/unix/mod.rs b/oxish/src/unix/mod.rs
-index 07c62ffe1dbbd106e63923af4c471165efec7a8e..37c6a229ab5f25506df5efb9ca337c340ab6c514 100644
+index 07c62ffe1dbbd106e63923af4c471165efec7a8e..f4d7d4edae52d29add9af16d44a9a79f992017c3 100644
 --- a/oxish/src/unix/mod.rs
 +++ b/oxish/src/unix/mod.rs
 @@ -1,25 +1,18 @@
@@ -5336,7 +5400,7 @@ index 07c62ffe1dbbd106e63923af4c471165efec7a8e..37c6a229ab5f25506df5efb9ca337c34
 -mod terminal;
 -pub(crate) use terminal::Terminal;
 +mod exec;
-+pub(crate) use exec::{GitProcess, Output};
++pub(crate) use exec::{GitProcess, Output, STOP_LIMIT};
  
 -/// Spawn a child process for the authenticated session
 +/// Spawn the session process for an authenticated connection

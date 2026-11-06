@@ -602,6 +602,63 @@ async fn channel_disconnect_asks_the_command_to_stop_before_killing_it() {
     panic!("the command was killed without a chance to clean up");
 }
 
+/// Start `git-receive-pack` with the client's stdin held open, then make the client vanish
+async fn interrupt_push(world: &World) -> PathBuf {
+    world.bare_repo("a.git").await.unwrap();
+    let (client, _guard) = world
+        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
+        .await
+        .unwrap();
+    let mut cmd = client.cmd;
+    cmd.args(["-o", "LogLevel=ERROR"]);
+    cmd.arg(format!("{USER}@{}", client.addr.ip())).arg("git-receive-pack 'a.git'");
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let base = world.base().to_path_buf();
+    for _ in 0..100 {
+        if base.join("ready").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(base.join("ready").exists(), "the command never started");
+    child.kill().await.unwrap();
+    for _ in 0..50 {
+        if base.join("finished").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    base
+}
+
+#[tokio::test]
+async fn channel_disconnect_ends_stdin_before_any_signal() {
+    let world = script_world(
+        "PATH=/usr/bin:/bin; d=\"$(dirname \"$0\")/..\"; trap 'echo term > \"$d/term\"; exit 1' TERM; echo ready > \"$d/ready\"; cat > /dev/null; echo eof > \"$d/finished\"",
+    )
+    .await;
+    let base = interrupt_push(&world).await;
+    assert!(base.join("finished").exists(), "the command never saw the end of its stdin");
+    assert!(!base.join("term").exists(), "the command was signaled before its stdin ended");
+}
+
+#[tokio::test]
+async fn channel_disconnect_keeps_draining_output_while_the_command_cleans_up() {
+    let world = script_world(
+        "PATH=/usr/bin:/bin; d=\"$(dirname \"$0\")/..\"; echo ready > \"$d/ready\"; cat > /dev/null; head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2; echo done > \"$d/finished\"",
+    )
+    .await;
+    let base = interrupt_push(&world).await;
+    assert!(base.join("finished").exists(), "output written while cleaning up must not kill the command");
+}
+
 #[tokio::test]
 async fn sessions_beyond_the_limit_are_refused() {
     let world = script_world("PATH=/usr/bin:/bin; sleep 4; echo FIRST").await;
