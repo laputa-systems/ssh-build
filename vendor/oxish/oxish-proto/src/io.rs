@@ -38,7 +38,9 @@ impl ReadState {
         // Compact the internal buffer
         if self.last_length > 0 {
             self.buf.copy_within(self.last_length.., 0);
-            self.buf.truncate(self.buf.len() - self.last_length);
+            let kept = self.buf.len() - self.last_length;
+            self.buf[kept..].zeroize();
+            self.buf.truncate(kept);
             self.last_length = 0;
         }
 
@@ -315,6 +317,12 @@ impl WriteState {
         Ok(())
     }
 
+    /// Make room for `additional` more bytes, so a packet of that size is framed and sealed
+    /// without the buffer moving while it still holds plaintext
+    pub fn reserve(&mut self, additional: usize) {
+        self.buf.reserve(additional);
+    }
+
     /// Encode `payload` directly into the buffer, without packet framing
     pub fn encoded(&mut self, payload: &impl Encode) -> &[u8] {
         payload.encode(&mut self.buf);
@@ -343,6 +351,7 @@ impl WriteState {
     /// Clear the outgoing buffer after writing its contents to the stream directly
     pub fn clear(&mut self) {
         self.buf.clear();
+        self.written = 0;
     }
 
     /// Reset the send sequence number to zero
