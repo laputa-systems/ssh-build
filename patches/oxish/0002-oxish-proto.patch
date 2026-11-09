@@ -365,6 +365,42 @@ index ee5f8758753bb060f8fd2ce06a1b8b18da9cbe05..abc4efe734e499b0d1bfbf6155baf481
      /// Create an OpenSSH-format private key file holding the given keys
      ///
      /// Returns `None` if `keys` is empty, as the format requires at least one key.
+diff --git a/oxish-proto/src/io.rs b/oxish-proto/src/io.rs
+index ac4e03f472a457433e0269d0f4ead770da5e0718..5e6b7d16c1808265068c1d7006be621e4ea00dcb 100644
+--- a/oxish-proto/src/io.rs
++++ b/oxish-proto/src/io.rs
+@@ -38,7 +38,9 @@ impl ReadState {
+         // Compact the internal buffer
+         if self.last_length > 0 {
+             self.buf.copy_within(self.last_length.., 0);
+-            self.buf.truncate(self.buf.len() - self.last_length);
++            let kept = self.buf.len() - self.last_length;
++            self.buf[kept..].zeroize();
++            self.buf.truncate(kept);
+             self.last_length = 0;
+         }
+ 
+@@ -315,6 +317,12 @@ impl WriteState {
+         Ok(())
+     }
+ 
++    /// Make room for `additional` more bytes, so a packet of that size is framed and sealed
++    /// without the buffer moving while it still holds plaintext
++    pub fn reserve(&mut self, additional: usize) {
++        self.buf.reserve(additional);
++    }
++
+     /// Encode `payload` directly into the buffer, without packet framing
+     pub fn encoded(&mut self, payload: &impl Encode) -> &[u8] {
+         payload.encode(&mut self.buf);
+@@ -343,6 +351,7 @@ impl WriteState {
+     /// Clear the outgoing buffer after writing its contents to the stream directly
+     pub fn clear(&mut self) {
+         self.buf.clear();
++        self.written = 0;
+     }
+ 
+     /// Reset the send sequence number to zero
 diff --git a/oxish-proto/src/key_exchange.rs b/oxish-proto/src/key_exchange.rs
 index a8b133756294bb31f21a09eba8263f90b73db249..0ba082e2bd8ed766c94a47ba014308fbe2a9e9d0 100644
 --- a/oxish-proto/src/key_exchange.rs
