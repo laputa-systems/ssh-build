@@ -1,11 +1,11 @@
 #!/bin/sh
-# Usage: sh test/oxish-chacha-interop.sh   (uses dist/macos/bin/ssh when built, else the system ssh)
+# Usage: sh test/oxish-chacha-interop.sh   (uses dist/ssh/aarch64-apple-darwin/bin/ssh when built, else the system ssh)
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
-if [ -x "$ROOT/dist/macos/bin/ssh" ]; then
-    SSH_BIN="$ROOT/dist/macos/bin/ssh"
+if [ -x "$ROOT/dist/ssh/aarch64-apple-darwin/bin/ssh" ]; then
+    SSH_BIN="$ROOT/dist/ssh/aarch64-apple-darwin/bin/ssh"
     SSH_ORIGIN="built no-libcrypto client"
 else
     SSH_BIN=$(command -v ssh)

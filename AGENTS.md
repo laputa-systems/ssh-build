@@ -1,23 +1,24 @@
 # ssh-build
 
 OpenSSH 10.6p1 client built `--without-openssl` (macOS arm64, static-musl Linux x86_64/aarch64) plus
-an experimental Graviola-only OxiSH Git server, shipped as separate ZIPs. Users read `README.md`.
+an experimental Graviola-only OxiSH Git server, shipped as separate `.tar.xz` archives. Users read `README.md`.
 
 ## Commands
 
 ```sh
-make macos | make linux DOCKER_PLATFORM=linux/arm64|amd64          # client
-make oxish-macos | make oxish-linux DOCKER_PLATFORM=linux/arm64|amd64   # server
-SSH_BIN_DIR=dist/macos/bin sh test/runtime.sh                       # client qualification
+make build TARGET=<triple> [PRODUCT=ssh|oxish]   # build and package into dist/release
+make verify TARGET=<triple>                       # unpack the archives, run runtime and e2e tests
+make fetch | package | lint | clean
+SSH_BIN_DIR=dist/ssh/<triple>/bin sh test/runtime.sh                # client qualification
 SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/e2e-git.sh                # server end to end
-sh scripts/package.sh && sh scripts/package-oxish.sh                # dist/release
 ```
 
 ## Invariants
 
-- One editable OpenSSH version string: `OPENSSH_VERSION=` in `scripts/fetch-sources.sh`.
+- One editable OpenSSH version: the `openssh` input in `sources.lock.json`.
 - Every fetch fails closed on a SHA-256 or git revision; pins live in `sources.lock.json` and
-  `git-build.lock.json`.
+  `git-build.lock.json`. `git-build.lock.json` pins a git-build release in its current ZIP layout
+  until git-build publishes `tar.xz` assets.
 - Never commit `src/`, `dist/`, `.work/` or keys.
 - Graviola is the only crypto provider in the server: `sh scripts/check-crypto-graph.sh`.
 - `vendor/oxish` and `vendor/graviola` are reproducible: `sh scripts/vendor-oxish.sh verify` and

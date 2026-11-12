@@ -22,7 +22,7 @@ triple=${4:-}
 case $product in
     ssh)
         bins="ssh ssh-keygen ssh-agent ssh-add sftp scp"
-        inputs="scripts/fetch-sources.sh sources.lock.json Dockerfile Makefile scripts/build-macos.sh scripts/qualify-binaries.sh"
+        inputs="scripts/fetch-sources.sh scripts/lock.sh sources.lock.json Dockerfile Makefile scripts/build-macos.sh scripts/qualify-binaries.sh"
         ;;
     oxish)
         bins="oxish-server oxish-session"

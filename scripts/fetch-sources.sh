@@ -1,16 +1,18 @@
 #!/bin/sh
-# Fetch and verify pinned sources. Canonical version source for this repo:
-# OPENSSH_VERSION and OPENSSH_SHA256 below are the single editable pin;
-# Makefile, Dockerfile, and tests derive from them. Fails closed.
+# Fetch and verify pinned sources. sources.lock.json is the single editable pin for the OpenSSH
+# version and checksum and the OxiSH revision; Makefile, Dockerfile, and tests derive from it.
+# Fails closed.
 set -eu
-
-OPENSSH_VERSION=10.6p1
-OPENSSH_SHA256=a9dc9565dffe8640f64d863cd29a32bc4a3dbdec0566a7fc44c5d6ee767d5f39
-OPENSSH_TARBALL=openssh-${OPENSSH_VERSION}.tar.gz
-OXISH_REV=d81b20b7ea494b6aa4cadea179699adbae9bb374
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$script_dir/sha256.sh"
+. "$script_dir/lock.sh"
+
+command -v jaq >/dev/null 2>&1 || { echo "fetch-sources: jaq not found" >&2; exit 1; }
+OPENSSH_VERSION=$(lock_field openssh version)
+OPENSSH_SHA256=$(lock_field openssh sha256)
+OPENSSH_TARBALL=$(lock_field openssh tarball)
+OXISH_REV=$(lock_field oxish rev)
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 work_dir=${SOURCES_DIR:-$root_dir/.work/sources}
 mkdir -p "$work_dir"
@@ -22,9 +24,7 @@ command -v curl >/dev/null 2>&1 || fail "curl not found"
 archive=$work_dir/$OPENSSH_TARBALL
 if [ ! -f "$archive" ]; then
     downloaded=0
-    for mirror in \
-        "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/$OPENSSH_TARBALL" \
-        "https://ftp.openbsd.org/pub/OpenBSD/OpenSSH/portable/$OPENSSH_TARBALL"; do
+    for mirror in $(lock_urls openssh); do
         echo "fetching $mirror"
         if curl -fsSL -o "$archive.tmp" "$mirror"; then
             mv "$archive.tmp" "$archive"

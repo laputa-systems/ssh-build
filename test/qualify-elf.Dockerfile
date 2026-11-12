@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.18@sha256:dabfc0969b935b2080555ace70ee69a5261af8a8f1b4df97b9e7fbcf6722eddf
-FROM alpine:latest@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
-RUN apk add --no-cache binutils=2.45.1-r1 gcc=15.2.0-r5 musl-dev=1.2.6-r3 file
+RUN apk add --no-cache binutils=2.45.1-r1 gcc=15.2.0-r5 musl-dev=1.2.6-r3 file=5.47-r2
 
 COPY scripts/qualify-binaries.sh /qualify.sh
 RUN printf 'int main(void) { return 0; }\n' > /t.c

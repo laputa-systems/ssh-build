@@ -1,10 +1,13 @@
 #!/bin/sh
 # Functional qualification for the no-libcrypto client on final bytes.
-# Usage: SSH_BIN_DIR=dist/macos/bin sh test/runtime.sh
+# Usage: SSH_BIN_DIR=dist/ssh/aarch64-apple-darwin/bin sh test/runtime.sh
 # Hermetic: fresh work dir, isolated HOME, throwaway keys, ephemeral sshd.
 set -eu
 
-bin_dir=${SSH_BIN_DIR:-dist/macos/bin}
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$script_dir/../scripts/lock.sh"
+
+bin_dir=${SSH_BIN_DIR:-dist/ssh/aarch64-apple-darwin/bin}
 work=${TEST_WORK:-.work/test-runtime}
 export CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
@@ -27,7 +30,7 @@ for b in "$ssh" "$keygen" "$agent" "$add" "$sftp" "$scp"; do
     test -x "$b" || { echo "FAIL: $b missing" >&2; exit 1; }
 done
 
-expected_version=$(sed -n 's/^OPENSSH_VERSION=//p' scripts/fetch-sources.sh)
+expected_version=$(lock_field openssh version)
 test "$("$ssh" -V 2>&1)" = "OpenSSH_${expected_version}, without OpenSSL"
 echo "ok: version $expected_version"
 

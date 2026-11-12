@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the Graviola-only OxiSH server for macOS arm64 into dist/oxish-macos/bin.
+# Build the Graviola-only OxiSH server for macOS arm64 into dist/oxish/aarch64-apple-darwin/bin.
 # Pinned nightly from rust-toolchain.toml, locked dependencies, no -march=native.
 set -eu
 
@@ -18,7 +18,7 @@ export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}
 export CARGO_TARGET_DIR=$root_dir/.work/target-oxish-release
 cargo build --locked --release --manifest-path vendor/oxish/Cargo.toml -p oxish --bins
 
-dest=$root_dir/dist/oxish-macos/bin
+dest=$root_dir/dist/oxish/aarch64-apple-darwin/bin
 rm -rf "$dest"
 mkdir -p "$dest"
 for bin in oxish-server oxish-session; do

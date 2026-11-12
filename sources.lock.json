@@ -1,22 +1,35 @@
 {
-  "openssh": {
-    "version": "10.6p1",
-    "tarball": "openssh-10.6p1.tar.gz",
-    "urls": [
-      "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p1.tar.gz",
-      "https://ftp.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p1.tar.gz"
-    ],
-    "sha256": "a9dc9565dffe8640f64d863cd29a32bc4a3dbdec0566a7fc44c5d6ee767d5f39",
-    "note": "hex SHA-256 verified identical from both mirrors at preflight; release notes at https://www.openssh.com/releasenotes.html"
-  },
-  "oxish": {
-    "repo": "https://github.com/djc/oxish",
-    "rev": "d81b20b7ea494b6aa4cadea179699adbae9bb374",
-    "note": "pinned main rev at preflight; provides oxish-proto, oxish-graviola, oxish server"
-  },
-  "graviola": {
-    "version": "0.4.1",
-    "checksum": "e8596c4fa98466aae2fcf4c72a665bc0e021c0aaab1e47d82044d3dc3e309a76",
-    "note": "crates.io checksum as locked in OxiSH Cargo.lock; OxiSH workspace requires graviola 0.4"
-  }
+  "schema_version": 1,
+  "inputs": [
+    {
+      "name": "openssh",
+      "version": "10.6p1",
+      "tarball": "openssh-10.6p1.tar.gz",
+      "urls": [
+        "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p1.tar.gz",
+        "https://ftp.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p1.tar.gz"
+      ],
+      "sha256": "a9dc9565dffe8640f64d863cd29a32bc4a3dbdec0566a7fc44c5d6ee767d5f39",
+      "role": "source",
+      "note": "hex SHA-256 verified identical from both mirrors at preflight; release notes at https://www.openssh.com/releasenotes.html"
+    },
+    {
+      "name": "oxish",
+      "version": "0.2.0",
+      "repo": "https://github.com/djc/oxish",
+      "rev": "d81b20b7ea494b6aa4cadea179699adbae9bb374",
+      "url": "https://github.com/djc/oxish/archive/d81b20b7ea494b6aa4cadea179699adbae9bb374.tar.gz",
+      "sha256": "4efc61a54bb83094ac08102ec7f477e03a5616c835280da0f1339db9dcec9812",
+      "role": "source",
+      "note": "pinned main rev at preflight; provides oxish-proto, oxish-graviola, oxish server; scripts/vendor-oxish.sh verifies the git rev, sha256 is of the GitHub archive of that rev"
+    },
+    {
+      "name": "graviola",
+      "version": "0.4.1",
+      "url": "https://static.crates.io/crates/graviola/graviola-0.4.1.crate",
+      "sha256": "e8596c4fa98466aae2fcf4c72a665bc0e021c0aaab1e47d82044d3dc3e309a76",
+      "role": "source",
+      "note": "crates.io checksum as locked in OxiSH Cargo.lock; OxiSH workspace requires graviola 0.4"
+    }
+  ]
 }

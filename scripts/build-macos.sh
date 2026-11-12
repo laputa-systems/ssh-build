@@ -1,19 +1,20 @@
 #!/bin/sh
 # Configure + build the no-libcrypto OpenSSH client for macOS arm64.
-# Out-of-tree build in .work/build-macos; installs to dist/macos/bin.
+# Out-of-tree build in .work/build-macos; installs to dist/ssh/aarch64-apple-darwin/bin.
 set -eu
 
-OPENSSH_VERSION=$(sed -n 's/^OPENSSH_VERSION=//p' scripts/fetch-sources.sh)
-test -n "$OPENSSH_VERSION"
-
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$script_dir/lock.sh"
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+
+OPENSSH_VERSION=$(lock_field openssh version)
+test -n "$OPENSSH_VERSION"
 
 export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}
 sh "$script_dir/fetch-sources.sh" >/dev/null
 src_dir=$root_dir/.work/sources/openssh-${OPENSSH_VERSION}
 build_dir=$root_dir/.work/build-macos
-dest_dir=$root_dir/dist/macos/bin
+dest_dir=$root_dir/dist/ssh/aarch64-apple-darwin/bin
 mkdir -p "$build_dir" "$dest_dir"
 
 if [ ! -f "$build_dir/config.status" ]; then

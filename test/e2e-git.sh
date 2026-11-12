@@ -1,7 +1,7 @@
 #!/bin/sh
 # End-to-end qualification of the OxiSH Git server on released-style bytes.
 #
-#   SSH_BIN_DIR=dist/macos/bin OXISH_BIN_DIR=dist/oxish-macos/bin sh test/e2e-git.sh
+#   SSH_BIN_DIR=dist/ssh/aarch64-apple-darwin/bin OXISH_BIN_DIR=dist/oxish/aarch64-apple-darwin/bin sh test/e2e-git.sh
 set -eu
 
 : "${SSH_BIN_DIR:?set SSH_BIN_DIR to the directory with the built ssh and ssh-keygen}"

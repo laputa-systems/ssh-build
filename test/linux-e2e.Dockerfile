@@ -4,9 +4,9 @@
 # runs the step natively for the chosen --platform). Inputs are the built client and server
 # directories and the git-build directory fetched by scripts/fetch-git-build.sh:
 #   docker buildx build --platform linux/arm64 -f test/linux-e2e.Dockerfile \
-#     --build-arg SSH_DIR=dist/linux-aarch64/bin --build-arg OXISH_DIR=dist/oxish-linux-aarch64/bin \
+#     --build-arg SSH_DIR=dist/ssh/aarch64-unknown-linux-musl/bin --build-arg OXISH_DIR=dist/oxish/aarch64-unknown-linux-musl/bin \
 #     --build-arg GIT_DIR=<fetched git-build dir relative to the repository> .
-FROM alpine:latest@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 ARG SSH_DIR
 ARG OXISH_DIR
