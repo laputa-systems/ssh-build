@@ -26,11 +26,12 @@ fi
 
 repo=$(jaq -r '.repo' "$lock")
 tag=$(jaq -r '.tag' "$lock")
+git_version=$(jaq -r '.git_version' "$lock")
 want=$(jaq -r --arg t "$triple" '.assets[$t] // empty' "$lock")
 [ -n "$want" ] || fail "no pinned asset for $triple"
 
 dest=$root_dir/.work/git-build/$tag/$triple
-asset=git-$triple.zip
+asset=git-$git_version-$triple.tar.xz
 if [ ! -x "$dest/git" ]; then
     stage=$root_dir/.work/git-build/$tag/stage-$triple
     rm -rf "$stage" "$dest"
@@ -41,7 +42,7 @@ if [ ! -x "$dest/git" ]; then
     listed=$(awk -v a="$asset" '$2 == a { print $1 }' "$stage/SHA256SUMS")
     [ "$listed" = "$want" ] || fail "release SHA256SUMS lists $listed for $asset, pin is $want"
     mkdir -p "$dest"
-    unzip -q "$stage/$asset" -d "$dest"
+    tar -xJf "$stage/$asset" -C "$dest"
     rm -rf "$stage"
 fi
 for program in git git-upload-pack git-receive-pack; do
