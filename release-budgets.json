@@ -2,16 +2,16 @@
   "schema_version": 1,
   "targets": {
     "aarch64-apple-darwin": {
-      "ssh": {"max_archive_bytes": 1500000},
-      "oxish": {"max_archive_bytes": 2200000}
+      "ssh": {"max_archive_bytes": 610000},
+      "oxish": {"max_archive_bytes": 1120000}
     },
     "aarch64-unknown-linux-musl": {
-      "ssh": {"max_archive_bytes": 2100000},
-      "oxish": {"max_archive_bytes": 2500000}
+      "ssh": {"max_archive_bytes": 800000},
+      "oxish": {"max_archive_bytes": 1250000}
     },
     "x86_64-unknown-linux-musl": {
-      "ssh": {"max_archive_bytes": 2100000},
-      "oxish": {"max_archive_bytes": 2650000}
+      "ssh": {"max_archive_bytes": 880000},
+      "oxish": {"max_archive_bytes": 1400000}
     }
   }
 }
