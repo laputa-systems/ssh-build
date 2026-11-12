@@ -2,11 +2,12 @@
 # Reproduce vendor/graviola from the pinned crates.io release plus patches/graviola.
 #   sh scripts/vendor-graviola.sh verify   rebuild in .work/graviola-check, diff against vendor/graviola
 #   sh scripts/vendor-graviola.sh export   regenerate patches/graviola from vendor/graviola (maintainers)
-# The pin is graviola.version and graviola.checksum (SHA-256 of the .crate file) in sources.lock.json.
+# The pin is the graviola input (version and sha256 of the .crate file) in sources.lock.json.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$script_dir/sha256.sh"
+. "$script_dir/lock.sh"
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 work_dir=$root_dir/.work
 patch_dir=$root_dir/patches/graviola
@@ -14,15 +15,15 @@ vendor_dir=$root_dir/vendor/graviola
 
 fail() { echo "vendor-graviola: $*" >&2; exit 1; }
 
-version=$(jaq -r '.graviola.version' "$root_dir/sources.lock.json")
-checksum=$(jaq -r '.graviola.checksum' "$root_dir/sources.lock.json")
+version=$(lock_field graviola version)
+checksum=$(lock_field graviola sha256)
 [ "${#checksum}" -eq 64 ] || fail "no checksum pinned for graviola $version"
 
 crate=$work_dir/sources/graviola-$version.crate
 fetch() {
     mkdir -p "$work_dir/sources"
     if [ ! -f "$crate" ]; then
-        curl -fsSL -o "$crate.tmp" "https://static.crates.io/crates/graviola/graviola-$version.crate"
+        curl -fsSL -o "$crate.tmp" "$(lock_field graviola url)"
         mv "$crate.tmp" "$crate"
     fi
     got=$(sha256 "$crate" | awk '{ print $1 }')

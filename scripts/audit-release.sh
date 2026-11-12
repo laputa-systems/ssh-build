@@ -29,7 +29,7 @@ grep -q "default_branch" "$file" || { echo "audit 2: no default-branch guard" >&
 grep -q "refs/heads/" "$file" || { echo "audit 2: no refs/heads/ ref check" >&2; exit 1; }
 check "2 preflight refuses non-default-branch refs"
 
-triples=$(grep -c "^            triple: " "$file")
+triples=$(grep -c "^            target: " "$file")
 test "$triples" -eq 3 || { echo "audit 3: want 3 matrix triples, found $triples" >&2; exit 1; }
 for triple in aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
     grep -q "$triple" "$file" || { echo "audit 3: triple $triple is missing" >&2; exit 1; }
@@ -65,8 +65,9 @@ check "6 upload/download between jobs"
 
 grep -q "Inventory release assets" "$file" || { echo "audit 7: no inventory step" >&2; exit 1; }
 grep -q "missing, duplicate, or extra" "$file" || { echo "audit 7: inventory rejects nothing" >&2; exit 1; }
-for asset in ssh-aarch64-apple-darwin.zip oxish-aarch64-apple-darwin.zip ssh-x86_64-unknown-linux-musl.manifest oxish-aarch64-unknown-linux-musl.manifest; do
-    grep -q "$asset" "$file" || { echo "audit 7: inventory does not name $asset" >&2; exit 1; }
+# shellcheck disable=SC2016
+for asset in '"ssh-$ssh_version"' '"oxish-$oxish_version"' '%s-%s.tar.xz' '%s-%s.manifest.json'; do
+    grep -qF -- "$asset" "$file" || { echo "audit 7: inventory does not name $asset" >&2; exit 1; }
 done
 check "7 inventory rejects missing/duplicate/extra assets (both products, all targets)"
 
@@ -84,7 +85,9 @@ check "10 tag created at the triggering commit via the API"
 grep -q "gh release create" "$file" || { echo "audit 11: no gh release create step" >&2; exit 1; }
 grep -q -- "--prerelease" "$file" || { echo "audit 11: release is not a prerelease" >&2; exit 1; }
 grep -q -- "--verify-tag" "$file" || { echo "audit 11: release does not pass --verify-tag" >&2; exit 1; }
-check "11 gh release create --prerelease --verify-tag"
+grep -q -- "--notes-file" "$file" || { echo "audit 11: release does not pass --notes-file" >&2; exit 1; }
+grep -q "name: Write release notes" "$file" || { echo "audit 11: no shared release notes step" >&2; exit 1; }
+check "11 gh release create --prerelease --verify-tag --notes-file"
 
 grep -q "needs: \[preflight, build\]" "$file" || { echo "audit 12: release does not gate on preflight and build" >&2; exit 1; }
 grep -q "fail-fast: false" "$file" || { echo "audit 12: matrix bails early" >&2; exit 1; }
@@ -93,13 +96,15 @@ create_line=$(grep -n "gh release create" "$file" | cut -d: -f1)
 test "$inventory_line" -lt "$create_line" || { echo "audit 12: inventory runs after publication" >&2; exit 1; }
 check "12 no partial releases"
 
-grep -q 'build_commit=$GITHUB_SHA' "$file" || { echo "audit 13: manifests are not tied to the triggering commit" >&2; exit 1; }
-grep -q 'build_dirty=false' "$file" || { echo "audit 13: dirty builds are not refused" >&2; exit 1; }
+grep -q '.source_revision == $commit' "$file" || { echo "audit 13: manifests are not tied to the triggering commit" >&2; exit 1; }
+grep -q '.build_dirty == false' "$file" || { echo "audit 13: dirty builds are not refused" >&2; exit 1; }
 check "13 manifests name the triggering commit and a clean tree"
 
 grep -q "scripts/qualify-binaries.sh" "$file" || { echo "audit 14: Linux hardening is not qualified before publication" >&2; exit 1; }
-grep -q "test/e2e-git.sh" "$file" || { echo "audit 14: no end-to-end run on the packaged ZIPs" >&2; exit 1; }
-grep -q "test/runtime.sh" "$file" || { echo "audit 14: no client runtime run on the packaged ZIPs" >&2; exit 1; }
-check "14 packaged ZIPs are exercised and Linux ELFs qualified before publication"
+grep -q 'make verify TARGET=' "$file" || { echo "audit 14: the packaged archives are not verified in the build job" >&2; exit 1; }
+verify_script="$repo_root/scripts/verify-release.sh"
+grep -q "test/e2e-git.sh" "$verify_script" || { echo "audit 14: no end-to-end run on the packaged archives" >&2; exit 1; }
+grep -q "test/runtime.sh" "$verify_script" || { echo "audit 14: no client runtime run on the packaged archives" >&2; exit 1; }
+check "14 packaged archives are exercised and Linux ELFs qualified before publication"
 
 echo "audited $workflow: 14/14 properties hold"

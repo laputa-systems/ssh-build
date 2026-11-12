@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.18@sha256:dabfc0969b935b2080555ace70ee69a5261af8a8f1b4df97b9e7fbcf6722eddf
 
-FROM alpine:latest@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS build
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS build
 
 RUN apk add --no-cache \
         binutils=2.45.1-r1 \
@@ -8,9 +8,9 @@ RUN apk add --no-cache \
         make=4.4.1-r4 \
         musl-dev=1.2.6-r3 \
         linux-headers=7.0.0-r1 \
-        zlib-dev=1.3.2-r1 \
-        zlib-static=1.3.2-r1 \
-        file
+        zlib-dev=1.4-r0 \
+        zlib-static=1.4-r0 \
+        file=5.47-r2
 
 RUN case "$(apk --print-arch)" in \
         aarch64|x86_64) ;; \

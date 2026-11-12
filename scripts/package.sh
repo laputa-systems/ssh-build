@@ -1,95 +1,94 @@
 #!/bin/sh
-# Package every target as ssh-<triple>.zip plus a build manifest, enforce the
-# size budgets, then write and verify <out_dir>/SHA256SUMS over all assets.
-# Usage: sh scripts/package.sh [out_dir]      (default: dist/release)
-# ONLY_TARGET=<triple> packages a single target (a CI job builds only its own).
-# Inputs: dist/macos/bin, dist/linux-x86_64/bin, dist/linux-aarch64/bin.
-# Each input directory needs the build-record.json its build wrote (scripts/build-record.sh);
-# stale, modified or foreign binaries are refused, and nothing in <out_dir> changes unless every
-# target passes.
+# Package the OpenSSH client for one target as ssh-<version>-<triple>.tar.xz plus
+# ssh-<version>-<triple>.manifest.json, enforce the size budget, then write and verify
+# <out_dir>/SHA256SUMS over all assets.
+# Usage: TARGET=<triple> sh scripts/package.sh [out_dir]      (default: dist/release)
+# Input: dist/ssh/<triple>/bin, which needs the build-record.json its build wrote
+# (scripts/build-record.sh); stale, modified or foreign binaries are refused, and nothing in
+# <out_dir> changes unless the target passes.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$script_dir/sha256.sh"
+. "$script_dir/lock.sh"
+. "$script_dir/archive.sh"
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
-canonical=$repo_root/scripts/fetch-sources.sh
 budgets=$repo_root/release-budgets.json
-dockerfile=$repo_root/Dockerfile
 out_dir=${1:-$repo_root/dist/release}
+triple=${TARGET:?package: set TARGET to a Rust target triple}
 
-for tool in zip jaq file; do
-    command -v "$tool" >/dev/null || { echo "package: $tool is required" >&2; exit 1; }
+fail() { echo "package: $*" >&2; exit 1; }
+
+for tool in tar xz jaq file; do
+    command -v "$tool" >/dev/null || fail "$tool is required"
 done
 
-upstream_version=$(sed -n 's/^OPENSSH_VERSION=//p' "$canonical")
-upstream_sha256=$(sed -n 's/^OPENSSH_SHA256=//p' "$canonical")
-test -n "$upstream_version" || { echo "package: cannot read version" >&2; exit 1; }
-test -n "$upstream_sha256" || { echo "package: cannot read archive sha" >&2; exit 1; }
+case $triple in
+    aarch64-apple-darwin) expected=arm64 ;;
+    x86_64-unknown-linux-musl) expected=x86-64 ;;
+    aarch64-unknown-linux-musl) expected="ARM aarch64" ;;
+    *) fail "unsupported target $triple" ;;
+esac
+
+version=$(lock_field openssh version)
+upstream_sha256=$(lock_field openssh sha256)
+test -n "$version" || fail "cannot read the openssh version from sources.lock.json"
+test -n "$upstream_sha256" || fail "cannot read the openssh sha256 from sources.lock.json"
 
 mkdir -p "$out_dir"
 out_dir=$(CDPATH= cd -- "$out_dir" && pwd -P)
 stage=$(mktemp -d "$out_dir/.stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
-package_target() {
-    triple=$1
-    [ -z "${ONLY_TARGET:-}" ] || [ "$ONLY_TARGET" = "$triple" ] || return 0
-    bin_dir=$repo_root/$2
-    expected=$3
+bin_dir=$repo_root/dist/ssh/$triple/bin
+sh "$script_dir/build-record.sh" verify ssh "$bin_dir" "$triple"
+record=$bin_dir/build-record.json
+build_commit=$(jaq -r .commit "$record")
+build_dirty=$(jaq -r .dirty "$record")
+toolchain=$(jaq -r .toolchain "$record")
 
-    sh "$script_dir/build-record.sh" verify ssh "$bin_dir" "$triple"
-    record=$bin_dir/build-record.json
-    build_commit=$(jaq -r .commit "$record")
-    build_dirty=$(jaq -r .dirty "$record")
-    toolchain=$(jaq -r .toolchain "$record")
-
-    for b in ssh ssh-keygen ssh-agent ssh-add sftp scp; do
-        test -x "$bin_dir/$b" || { echo "package: $bin_dir/$b missing; build $triple first" >&2; exit 1; }
-        description=$(file -b "$bin_dir/$b")
-        case $description in
-            *"$expected"*) ;;
-            *) echo "package: $bin_dir/$b is not $expected: $description" >&2; exit 1 ;;
-        esac
-    done
-    case $triple in
-        *-linux-musl)
-            for b in ssh ssh-keygen ssh-agent ssh-add sftp scp; do
-                case $(file -b "$bin_dir/$b") in
-                    *static-pie*|*"statically linked"*) ;;
-                    *) echo "package: $bin_dir/$b is not static" >&2; exit 1 ;;
-                esac
-            done
-            ;;
-        *) sh "$script_dir/qualify-binaries.sh" "$bin_dir" macos ;;
+for b in ssh ssh-keygen ssh-agent ssh-add sftp scp; do
+    test -x "$bin_dir/$b" || fail "$bin_dir/$b missing; build $triple first"
+    description=$(file -b "$bin_dir/$b")
+    case $description in
+        *"$expected"*) ;;
+        *) fail "$bin_dir/$b is not $expected: $description" ;;
     esac
+done
+case $triple in
+    *-linux-musl)
+        for b in ssh ssh-keygen ssh-agent ssh-add sftp scp; do
+            case $(file -b "$bin_dir/$b") in
+                *static-pie*|*"statically linked"*) ;;
+                *) fail "$bin_dir/$b is not static" ;;
+            esac
+        done
+        ;;
+    *) sh "$script_dir/qualify-binaries.sh" "$bin_dir" macos ;;
+esac
 
-    zip_name=ssh-$triple.zip
-    (cd "$bin_dir" && zip -y -X -q "$stage/$zip_name" ssh ssh-keygen ssh-agent ssh-add sftp scp)
+name=ssh-$version-$triple
+make_archive "$stage/$name.tar.xz" "$bin_dir" ssh ssh-keygen ssh-agent ssh-add sftp scp
 
-    zip_bytes=$(wc -c < "$stage/$zip_name" | tr -d ' ')
-    budget=$(jaq -r --arg t "$triple" '.ssh[$t].max_zip_bytes' "$budgets")
-    test -n "$budget" && [ "$budget" != null ] || { echo "package: no budget for $triple" >&2; exit 1; }
-    if [ "$zip_bytes" -gt "$budget" ]; then
-        echo "package: $zip_name is $zip_bytes bytes, over the $budget byte budget" >&2
-        exit 1
-    fi
-    echo "budget: $zip_name $zip_bytes/$budget bytes"
+archive_bytes=$(wc -c < "$stage/$name.tar.xz" | tr -d ' ')
+budget=$(jaq -r --arg t "$triple" '.targets[$t].ssh.max_archive_bytes // empty' "$budgets")
+test -n "$budget" || fail "no budget for $triple"
+if [ "$archive_bytes" -gt "$budget" ]; then
+    fail "$name.tar.xz is $archive_bytes bytes, over the $budget byte budget"
+fi
+echo "budget: $name.tar.xz $archive_bytes/$budget bytes"
 
-    cat > "$stage/ssh-$triple.manifest" <<EOF
-upstream_version=$upstream_version
-upstream_sha256=$upstream_sha256
-target=$triple
-build_commit=$build_commit
-build_dirty=$build_dirty
-toolchain=$toolchain
-EOF
-}
+lock_sha256=$(sha256 "$repo_root/sources.lock.json" | awk '{ print $1 }')
+jaq -n \
+    --arg version "$version" --arg target "$triple" --arg commit "$build_commit" \
+    --arg lock_sha256 "$lock_sha256" --argjson dirty "$build_dirty" \
+    --arg upstream_sha256 "$upstream_sha256" --arg toolchain "$toolchain" \
+    '{schema_version: 1, product: "ssh", version: $version, target: $target,
+      source_revision: $commit, sources_lock_sha256: $lock_sha256, build_dirty: $dirty,
+      upstream_sha256: $upstream_sha256, toolchain: $toolchain}' > "$stage/$name.manifest.json"
 
-package_target aarch64-apple-darwin dist/macos/bin "arm64"
-package_target x86_64-unknown-linux-musl dist/linux-x86_64/bin "x86-64"
-package_target aarch64-unknown-linux-musl dist/linux-aarch64/bin "ARM aarch64"
-
-rm -f "$out_dir"/ssh-${ONLY_TARGET:-*}.zip "$out_dir"/ssh-${ONLY_TARGET:-*}.manifest
-mv "$stage"/ssh-* "$out_dir"/
+rm -f "$out_dir/ssh-"*"-$triple.tar.xz" "$out_dir/ssh-"*"-$triple.manifest.json"
+mv "$stage/$name.tar.xz" "$stage/$name.manifest.json" "$out_dir"/
 sh "$script_dir/write-sums.sh" "$out_dir"
 
-echo "Packaged ${ONLY_TARGET:-3 targets} (ssh) in $out_dir"
+echo "Packaged $triple (ssh) in $out_dir"

@@ -2,10 +2,11 @@
 # Reproduce vendor/oxish from the pinned upstream revision plus patches/oxish.
 #   sh scripts/vendor-oxish.sh verify   rebuild in .work/vendor-check, diff against vendor/oxish
 #   sh scripts/vendor-oxish.sh export   regenerate patches/oxish from vendor/oxish (maintainers)
-# The revision comes from OXISH_REV in scripts/fetch-sources.sh. Every step fails closed.
+# The revision comes from the oxish input in sources.lock.json. Every step fails closed.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$script_dir/lock.sh"
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 work_dir=$root_dir/.work
 upstream_url=https://github.com/djc/oxish
@@ -15,10 +16,8 @@ groups="root oxish-proto oxish-graviola oxish-aws-lc oxish fuzz"
 
 fail() { echo "vendor-oxish: $*" >&2; exit 1; }
 
-rev=$(sed -n 's/^OXISH_REV=//p' "$script_dir/fetch-sources.sh")
-[ "${#rev}" -eq 40 ] || fail "cannot read OXISH_REV"
-lock_rev=$(jaq -r '.oxish.rev' "$root_dir/sources.lock.json")
-[ "$lock_rev" = "$rev" ] || fail "sources.lock.json oxish rev $lock_rev != $rev"
+rev=$(lock_field oxish rev)
+[ "${#rev}" -eq 40 ] || fail "cannot read the oxish rev from sources.lock.json"
 
 checkout() {
     upstream=$work_dir/sources/oxish

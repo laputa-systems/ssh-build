@@ -3,14 +3,17 @@
 Two optional downloads, built without OpenSSL:
 
 - **OpenSSH 10.6p1 client** (`ssh`, `ssh-keygen`, `ssh-agent`, `ssh-add`, `sftp`, `scp`) built
-  `--without-openssl`, as `ssh-<triple>.zip`.
+  `--without-openssl`, as `ssh-<version>-<triple>.tar.xz`.
 - **OxiSH Git server** (experimental), a small SSH server that only serves `git-upload-pack` and
-  `git-receive-pack`, as `oxish-<triple>.zip`.
+  `git-receive-pack`, as `oxish-<version>-<triple>.tar.xz`.
 
-Targets: macOS arm64, and static musl Linux on x86_64 and aarch64. Neither contains libcrypto or
-libssl. Release assets come with one `SHA256SUMS`; check it before unpacking
-(`sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS`). The `dl` installer's `dl ssh` and
-`dl oxish` install them under `~/.local/share/{ssh,oxish}/releases/<tag>-<triple>`
+Targets (`<triple>`): `aarch64-apple-darwin`, `x86_64-unknown-linux-musl` and
+`aarch64-unknown-linux-musl`. Neither product contains libcrypto or libssl. Each archive has a
+`<product>-<version>-<triple>.manifest.json` beside it (`product`, `version`, `target`,
+`source_revision`, `sources_lock_sha256`, and the pinned inputs). Release assets come with one
+`SHA256SUMS`; check it before unpacking (`sha256sum -c SHA256SUMS` or
+`shasum -a 256 -c SHA256SUMS`). The `dl` installer's `dl ssh` and `dl oxish` consume the
+`.tar.xz` assets and install them under `~/.local/share/{ssh,oxish}/releases/<tag>-<triple>`
 with a `current` link. `dl oxish` is opt-in and not in the default set.
 
 ## Client
