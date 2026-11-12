@@ -12,8 +12,8 @@ committed.
   GitHub archive of `rev`; `scripts/vendor-oxish.sh` verifies the git revision itself.
 - `release-budgets.json` has `targets.<triple>.<product>.max_archive_bytes`.
 - Every fetch fails closed on a SHA-256 or git revision. `git-build.lock.json` pins the git-build
-  prerelease the end-to-end test uses; it points at a release in git-build's earlier ZIP layout
-  (`git-<triple>.zip`) and `scripts/fetch-git-build.sh` still expects those names.
+  prerelease the end-to-end test uses; `scripts/fetch-git-build.sh` downloads its
+  `git-<git_version>-<triple>.tar.xz` asset and checks it against the pin and `SHA256SUMS`.
 - `rust-toolchain.toml` pins `nightly-2026-09-15`. Run cargo from the repository root so rustup
   finds it, and do not change the pin without the owner.
 
