@@ -1894,7 +1894,7 @@ index 0000000000000000000000000000000000000000..0dda74162fe1a89d34e0c5c039091f62
 +    }
 +}
 diff --git a/oxish/src/lib.rs b/oxish/src/lib.rs
-index 3f9d273c9bdde1628e75dce04442927ad082eede..a90c3806f4246cc9ed8b058a494f4c6c247fc75d 100644
+index 3f9d273c9bdde1628e75dce04442927ad082eede..78a4ee051c18c53b4e34fdba4b2613cf26b25a8d 100644
 --- a/oxish/src/lib.rs
 +++ b/oxish/src/lib.rs
 @@ -1,20 +1,13 @@
@@ -1959,7 +1959,7 @@ index 3f9d273c9bdde1628e75dce04442927ad082eede..a90c3806f4246cc9ed8b058a494f4c6c
  
 +#[cfg(all(test, target_os = "linux"))]
 +mod login_tests;
-+#[cfg(test)]
++#[cfg(all(test, target_os = "linux"))]
 +mod sftp_tests;
  #[cfg(test)]
  mod tests;
