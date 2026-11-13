@@ -59,10 +59,27 @@ only after the target passes.
 `docker buildx build -f test/qualify-elf.Dockerfile --platform linux/arm64 .` checks that the
 Linux qualifier rejects an executable stack and a missing RELRO segment.
 
-## Server
+## Server and OxiSH client tools
+
+The `oxish` archive holds `bin/oxish-server`, `bin/oxish-session` (when the server build makes it),
+`bin/oxish-keygen` and, when `client/` builds it, `bin/oxish`. `scripts/oxish-bins.sh` is the one
+owner of that list: it names what a bin directory must hold, and every script, the Dockerfile and
+`release.yml` read it. While the client binary does not exist the archive simply omits it. To make
+a missing client fail the build record, packaging and the release job, set
+`OXISH_CLIENT_REQUIRED=1` in `scripts/oxish-bins.sh` (the only edit needed). Also re-measure the
+archive and update `release-budgets.json`; the client adds to every target.
+
+`Dockerfile.oxish` and `scripts/build-oxish-macos.sh` build `vendor/oxish` and `client/` with the
+same flags (static PIE on Linux, deployment floor 14.0 and ad-hoc signing on macOS) and qualify
+every executable. `client/Cargo.toml` carries the release profile (fat LTO, one codegen unit,
+stripped); the client keeps `panic = "unwind"` so terminal restoration can run in destructors.
+`build-record.json` names the exact executable set, so a binary dropped into the directory later is
+refused. The manifest lists the `executables`, and `make verify` checks they match the archive.
 
 ```sh
-sh scripts/check-crypto-graph.sh [--selftest]      # Graviola is the only provider (graph and Cargo.lock)
+cargo test --locked --manifest-path client/Cargo.toml --test keygen   # oxish-keygen vs OpenSSH's ssh-keygen
+SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/oxish-keygen.sh             # the same on the unpacked archives
+sh scripts/check-crypto-graph.sh [--selftest]      # Graviola is the only provider (server and client: graph and Cargo.lock)
 sh scripts/vendor-oxish.sh verify                  # vendor/oxish == pinned upstream + patches/oxish
 sh scripts/vendor-graviola.sh verify               # vendor/graviola == pinned crate + patches/graviola
 cargo test --locked --manifest-path vendor/oxish/Cargo.toml
@@ -75,6 +92,9 @@ SSH_BIN_DIR=dist/ssh/aarch64-apple-darwin/bin OXISH_BIN_DIR=dist/oxish/aarch64-a
 binaries (`scripts/fetch-git-build.sh`, read-only, checksum-verified). It never falls back to the
 system `ssh` or `git`. `test/linux-e2e.Dockerfile` runs it on Linux bytes inside a BuildKit step,
 because `docker run` hangs on the macOS development machine; its header shows the build arguments.
+
+The keygen test runs the `ssh-keygen` in `SSH_BIN_DIR` when set (the repository's OpenSSH build)
+and otherwise the one on `PATH`; it fails rather than skips when none runs.
 
 `Dockerfile.oxish` links Rust with Alpine's gcc and musl rather than Rust's bundled start files:
 the bundled ones crash static-PIE binaries at startup. Two clean builds of the Linux arm64 server

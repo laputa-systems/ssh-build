@@ -72,6 +72,7 @@ binaries-oxish:
 		case "$(TARGET)" in \
 		*-apple-darwin) sh scripts/build-oxish-macos.sh ;; \
 		*) \
+			rm -rf "$$dist"; \
 			mkdir -p "$$dist"; \
 			docker buildx build \
 				--platform=$(DOCKER_PLATFORM) \
@@ -81,6 +82,7 @@ binaries-oxish:
 				--output=type=local,dest=$$dist \
 				.; \
 			test -x "$$dist/oxish-server"; \
+			test -x "$$dist/oxish-keygen"; \
 			sh scripts/build-record.sh write oxish "$$dist" $(TARGET) ;; \
 		esac; \
 		echo "wrote $$dist"

@@ -1,7 +1,7 @@
 # ssh-build
 
 OpenSSH 10.6p1 client built `--without-openssl` (macOS arm64, static-musl Linux x86_64/aarch64) plus
-an experimental Graviola-only OxiSH Git server, shipped as separate `.tar.xz` archives. Users read `README.md`.
+experimental Graviola-only OxiSH tools (Git server, `oxish-keygen`, the interactive client once built), shipped as separate `.tar.xz` archives. Users read `README.md`.
 
 ## Commands
 
@@ -20,7 +20,8 @@ SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/e2e-git.sh                # server end
   `git-build.lock.json`. `git-build.lock.json` pins a git-build release in its current ZIP layout
   until git-build publishes `tar.xz` assets.
 - Never commit `src/`, `dist/`, `.work/` or keys.
-- Graviola is the only crypto provider in the server: `sh scripts/check-crypto-graph.sh`.
+- Graviola is the only crypto provider in the server and client: `sh scripts/check-crypto-graph.sh`.
+- `scripts/oxish-bins.sh` owns the `oxish` archive's executable list and `OXISH_CLIENT_REQUIRED`.
 - `vendor/oxish` and `vendor/graviola` are reproducible: `sh scripts/vendor-oxish.sh verify` and
   `sh scripts/vendor-graviola.sh verify`. Edit `vendor/`, then run both `export` scripts.
 - The server never executes a client-supplied program, path or environment variable, and every

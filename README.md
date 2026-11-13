@@ -4,8 +4,10 @@ Two optional downloads, built without OpenSSL:
 
 - **OpenSSH 10.6p1 client** (`ssh`, `ssh-keygen`, `ssh-agent`, `ssh-add`, `sftp`, `scp`) built
   `--without-openssl`, as `ssh-<version>-<triple>.tar.xz`.
-- **OxiSH Git server** (experimental), a small SSH server that only serves `git-upload-pack` and
-  `git-receive-pack`, as `oxish-<version>-<triple>.tar.xz`.
+- **OxiSH** (experimental), Graviola-only SSH tools, as `oxish-<version>-<triple>.tar.xz`:
+  `oxish-server`, a small SSH server that only serves `git-upload-pack` and `git-receive-pack`, its
+  `oxish-session` helper, `oxish-keygen`, and the `oxish` client once it is built (see
+  [Key generation](#key-generation) and `docs/interactive.md`).
 
 Targets (`<triple>`): `aarch64-apple-darwin`, `x86_64-unknown-linux-musl` and
 `aarch64-unknown-linux-musl`. Neither product contains libcrypto or libssl. Each archive has a
@@ -22,6 +24,21 @@ Without libcrypto OpenSSH offers only `aes128-ctr`, `aes192-ctr`, `aes256-ctr` a
 `chacha20-poly1305@openssh.com` for packet encryption, and only Ed25519 keys. There is no GCM, RSA
 or ECDSA, so hosts that insist on those will not negotiate with this client. `sftp` and `scp` run
 the `ssh` found on `PATH`.
+
+## Key generation
+
+`oxish-keygen` makes the Ed25519 keys the OxiSH tools read, in the OpenSSH private key format that
+OpenSSH accepts. It needs no OpenSSH, never overwrites a file and never writes through a symbolic
+link.
+
+```sh
+oxish-keygen -f host_key -C "git@example.org"   # host_key (mode 0600, unencrypted) and host_key.pub
+oxish-keygen -y -f host_key                      # print the public key
+oxish-keygen -l -f host_key.pub                  # print the SHA256 fingerprint (a private key works too)
+```
+
+`oxish-server --generate-host-key` makes the same format. Private keys that are group- or
+world-accessible are refused by `-y` and `-l`.
 
 ## Server
 

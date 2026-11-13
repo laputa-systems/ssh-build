@@ -24,4 +24,11 @@ tempfile = "3"
 [patch.crates-io]
 graviola = { path = "../vendor/graviola" }
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
+
 [workspace]

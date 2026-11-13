@@ -52,8 +52,17 @@ for product in ssh oxish; do
     fi
     mkdir -p "$unpack/$product"
     tar -xJf "$archive" -C "$unpack/$product"
+    if [ "$product" = oxish ]; then
+        listed=$(jaq -r '.executables[]' "$manifest" | sort)
+        present=$(cd "$unpack/oxish/bin" && ls | sort)
+        [ -n "$listed" ] && [ "$listed" = "$present" ] || fail "$manifest lists [$listed] but the archive holds [$present]"
+        for b in $listed; do
+            [ -x "$unpack/oxish/bin/$b" ] || fail "$name: bin/$b is not executable"
+        done
+    fi
 done
 
 cd "$repo_root"
 SSH_BIN_DIR=$unpack/ssh sh test/runtime.sh
+SSH_BIN_DIR=$unpack/ssh OXISH_BIN_DIR=$unpack/oxish/bin sh test/oxish-keygen.sh
 SSH_BIN_DIR=$unpack/ssh OXISH_BIN_DIR=$unpack/oxish/bin sh test/e2e-git.sh
