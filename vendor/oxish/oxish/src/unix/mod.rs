@@ -1,4 +1,4 @@
-use core::{cmp::Ordering, mem::MaybeUninit};
+use core::{cmp::Ordering, mem::MaybeUninit, time::Duration};
 use std::{
     ffi::OsString,
     io::{self, IoSlice, IoSliceMut},
@@ -22,8 +22,10 @@ use rustix::{
     },
 };
 use tokio::{
+    io::Interest,
     net::TcpStream,
     process::{Child, Command},
+    time::timeout,
 };
 use tracing::debug;
 use zeroize::Zeroizing;
@@ -37,6 +39,15 @@ mod exec;
 pub(crate) use exec::{Output, Process, STOP_LIMIT};
 mod privileges;
 mod terminal;
+
+/// Leave the listener's session and process group, and with them its controlling terminal
+///
+/// The session process of login mode does this before it becomes the account, so that no child
+/// of the account inherits the listener's session or terminal. It fails if the process already
+/// leads a process group (then it would keep the session it has).
+pub fn detach_session() -> io::Result<()> {
+    rustix::process::setsid().map(|_| ()).map_err(io::Error::from)
+}
 
 /// Become the account a login session serves, before anything else runs in the process
 pub fn drop_privileges(login: &LoginSession) -> io::Result<()> {
@@ -60,20 +71,33 @@ pub fn launch(program: &OsString, argv0: &OsString, args: &[OsString]) -> io::Er
     std::process::Command::new(program).arg0(argv0).args(args).exec()
 }
 
+/// How long the session process has to acknowledge the handoff
+///
+/// In login mode the session process already runs as the account when it acknowledges, so the
+/// account can stop or signal it; a listener must never wait on it without a bound.
+pub(crate) const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Spawn the session process for an authenticated connection
 ///
 /// The session process runs with an empty environment and receives the connection and the
 /// negotiated state over a Unix socket. `args` select what it serves: the validated Git policy
 /// directories, or a login account (the session process then drops to that account itself).
+///
+/// The handoff is asynchronous and bounded by `handoff_timeout`. A session process that has not
+/// acknowledged by then (stopped, stuck or dead) is killed and reaped and the connection is
+/// dropped; no thread of the listener ever blocks on it.
 pub(crate) async fn spawn(
     state: SessionState<ServerHostKey<'_>>,
     stream: TcpStream,
     session: &Path,
     args: &[OsString],
+    handoff_timeout: Duration,
 ) -> Result<Child, Error> {
     let tcp = stream.into_std()?;
 
     let (parent, child_sock) = UnixStream::pair()?;
+    parent.set_nonblocking(true)?;
+    let parent = tokio::net::UnixStream::from_std(parent)?;
     let mut command = Command::new(session);
     command
         .args(args)
@@ -88,7 +112,7 @@ pub(crate) async fn spawn(
         command.env("LLVM_PROFILE_FILE", file);
     }
 
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
     drop(command);
 
     // The `[u8]` encoding yields the `u32` length prefix followed by the state itself.
@@ -97,6 +121,26 @@ pub(crate) async fn spawn(
     let payload_len = (message.len() - 4) as u32;
     message[..4].copy_from_slice(&payload_len.to_be_bytes());
 
+    let outcome = match timeout(handoff_timeout, handoff(&parent, &message, &tcp)).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::InvalidState("session process did not acknowledge the handoff in time")),
+    };
+    match outcome {
+        Ok(()) => Ok(child),
+        Err(error) => {
+            // SIGKILL ends a stopped process too; reaping it is prompt and does not block a thread.
+            let _ = child.kill().await;
+            Err(error)
+        }
+    }
+}
+
+/// Send the state and the connection to the session process and wait for its acknowledgement
+async fn handoff(
+    parent: &tokio::net::UnixStream,
+    message: &[u8],
+    tcp: &std::net::TcpStream,
+) -> Result<(), Error> {
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = SendAncillaryBuffer::new(&mut space);
     let fds = [tcp.as_fd()];
@@ -104,32 +148,36 @@ pub(crate) async fn spawn(
 
     // The file descriptor rides along with the first message; if the socket buffer cannot
     // hold the full message, send the rest without ancillary data.
-    let mut sent = rustix::net::sendmsg(
-        &parent,
-        &[IoSlice::new(&message)],
-        &mut control,
-        SendFlags::empty(),
-    )
-    .map_err(io::Error::from)?;
-
+    let mut sent = 0;
     while sent < message.len() {
-        sent += rustix::net::send(&parent, &message[sent..], SendFlags::empty())
-            .map_err(io::Error::from)?;
+        let from = sent;
+        sent += parent
+            .async_io(Interest::WRITABLE, || {
+                match from {
+                    0 => rustix::net::sendmsg(parent, &[IoSlice::new(message)], &mut control, SendFlags::empty()),
+                    _ => rustix::net::send(parent, &message[from..], SendFlags::empty()),
+                }
+                .map_err(io::Error::from)
+            })
+            .await?;
     }
 
     // Keep the connection's file descriptor open until the child acknowledges the
     // handoff; observed on macOS: closing the parent's copy while the descriptor is
     // still in flight tears down the connection.
-    let mut ack = [0];
-    let mut iov = [IoSliceMut::new(&mut ack)];
-    let mut control = RecvAncillaryBuffer::default();
-    let received = rustix::net::recvmsg(&parent, &mut iov, &mut control, RecvFlags::empty())
-        .map_err(io::Error::from)?;
-    match received.bytes {
-        0 => Err(Error::InvalidState(
-            "session process exited before acknowledging handoff",
-        )),
-        _ => Ok(child),
+    let received = parent
+        .async_io(Interest::READABLE, || {
+            let mut ack = [0];
+            let mut iov = [IoSliceMut::new(&mut ack)];
+            let mut control = RecvAncillaryBuffer::default();
+            rustix::net::recvmsg(parent, &mut iov, &mut control, RecvFlags::empty())
+                .map(|received| received.bytes)
+                .map_err(io::Error::from)
+        })
+        .await?;
+    match received {
+        0 => Err(Error::InvalidState("session process exited before acknowledging handoff")),
+        _ => Ok(()),
     }
 }
 
@@ -158,7 +206,8 @@ fn resume_with(
     let mut received = Zeroizing::new(Vec::new());
     let mut tcp = None;
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
-    let mut chunk = vec![0; 16_384];
+    // Chunks of the handoff carry the host key: wipe the buffer when it goes out of scope.
+    let mut chunk = Zeroizing::new(vec![0; 16_384]);
 
     loop {
         let mut control = RecvAncillaryBuffer::new(&mut space);

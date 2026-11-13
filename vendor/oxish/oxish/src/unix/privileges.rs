@@ -10,10 +10,30 @@ use crate::login::UserEntry;
 /// change identity: it is accepted only when it already is the account.
 pub(crate) fn drop_to(user: &UserEntry, allow_root: bool) -> io::Result<()> {
     user.check(allow_root).map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))?;
+    // Non-dumpable before the credentials change, and again after: the kernel resets the flag to
+    // `fs.suid_dumpable` when the effective IDs change, which is 1 (dumpable) on some systems. The
+    // host key only arrives after both, so no copy of it is ever in a dumpable process.
+    seal()?;
     switch(user)?;
+    seal()?;
     let _ = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
-    #[cfg(target_os = "linux")]
-    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
+    Ok(())
+}
+
+/// Mark the process non-dumpable (no `ptrace`, no `/proc/PID/mem`) and prove it
+#[cfg(target_os = "linux")]
+fn seal() -> io::Result<()> {
+    use rustix::process::{DumpableBehavior, dumpable_behavior, set_dumpable_behavior};
+
+    set_dumpable_behavior(DumpableBehavior::NotDumpable)?;
+    match dumpable_behavior()? {
+        DumpableBehavior::NotDumpable => Ok(()),
+        _ => Err(denied("the process could not be made non-dumpable".to_owned())),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn seal() -> io::Result<()> {
     Ok(())
 }
 
@@ -63,8 +83,14 @@ fn switch(user: &UserEntry) -> io::Result<()> {
     if held != wanted {
         return Err(denied(format!("supplementary groups of {} are {held:?}, not {wanted:?}", user.name)));
     }
-    if user.uid != 0 && (set_thread_uid(Uid::ROOT).is_ok() || set_thread_gid(Gid::ROOT).is_ok()) {
-        return Err(denied(format!("root can be regained after dropping to {}", user.name)));
+    // Root can be regained only if an ID the account does not hold can be taken. Probe with an ID
+    // other than the account's own: an account in group 0 (allowed with `--allow-root-login`)
+    // may of course become group 0, and that proves nothing. A uid 0 account is root already.
+    if user.uid != 0 {
+        let other_gid = Gid::from_raw(if user.gid == 0 { 1 } else { 0 });
+        if set_thread_uid(Uid::ROOT).is_ok() || set_thread_gid(other_gid).is_ok() {
+            return Err(denied(format!("root can be regained after dropping to {}", user.name)));
+        }
     }
     Ok(())
 }

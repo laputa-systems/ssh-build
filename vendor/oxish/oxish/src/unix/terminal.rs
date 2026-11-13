@@ -42,6 +42,9 @@ impl PtyMaster {
             rustix::fs::Mode::empty(),
         )?;
 
+        // The slave belongs to the account that opened it (this process, after the privilege drop);
+        // `grantpt` and devpts may give it group `tty` or other write access, so close that.
+        rustix::fs::fchmod(&user_fd, rustix::fs::Mode::from_raw_mode(0o600))?;
         termios::tcsetwinsize(&user_fd, winsize(req.cols, req.rows, req.width_px, req.height_px))?;
         apply_terminal_modes(&user_fd, &req.terminal_modes)?;
 

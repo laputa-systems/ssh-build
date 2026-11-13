@@ -3,7 +3,10 @@
 use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
 
 use anyhow::Context as _;
-use oxish::{DEFAULT_PROVIDER, GitPolicy, LoginSession, drop_privileges, launch, require_supported_cpu, resume, resume_login};
+use oxish::{
+    DEFAULT_PROVIDER, GitPolicy, LoginSession, detach_session, drop_privileges, launch, require_supported_cpu, resume,
+    resume_login,
+};
 
 enum Serve {
     Git(GitPolicy),
@@ -42,6 +45,8 @@ fn run(args: Vec<OsString>) -> anyhow::Result<()> {
         ),
         [login, rest @ ..] if login == "login" => {
             let login = LoginSession::from_args(rest.iter().cloned()).context("invalid login arguments")?;
+            // Never leave the account's children in the listener's session or on its terminal.
+            detach_session().context("cannot start a session of its own")?;
             // Credentials are per thread on Linux: become the account before the runtime has any other thread.
             drop_privileges(&login).context("cannot become the account")?;
             Serve::Login(login)

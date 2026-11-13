@@ -14,7 +14,7 @@ use proto::{
     named::PublicKeyAlgorithm,
 };
 
-use crate::authentication::read_trusted_file;
+use crate::authentication::{read_trusted_bytes, read_trusted_file};
 
 const MAX_ACCOUNT_KEYS: usize = 1024;
 const MAX_NAME_LEN: usize = 64;
@@ -154,52 +154,69 @@ impl UserDatabase {
 
     /// Resolve one account by name
     pub fn lookup(&self, name: &str) -> anyhow::Result<UserEntry> {
-        let passwd = read_trusted_file(&self.passwd, "passwd", true)?;
-        let group = read_trusted_file(&self.group, "group", true)?;
+        let passwd = read_trusted_bytes(&self.passwd, "passwd", true)?;
+        let group = read_trusted_bytes(&self.group, "group", true)?;
         let mut entry = parse_passwd(&passwd, name)
+            .with_context(|| format!("invalid entry for account {name} in {}", self.passwd.display()))?
             .with_context(|| format!("account {name} is not in {}", self.passwd.display()))?;
         entry.groups = parse_groups(&group, name, entry.gid);
         Ok(entry)
     }
 }
 
-fn parse_passwd(contents: &str, name: &str) -> Option<UserEntry> {
-    contents.lines().find_map(|line| {
-        let mut fields = line.split(':');
-        if fields.next()? != name {
-            return None;
-        }
-        let _password = fields.next()?;
-        let uid = fields.next()?.parse().ok()?;
-        let gid = fields.next()?.parse().ok()?;
-        let _gecos = fields.next()?;
-        let home = fields.next()?;
-        let shell = fields.next()?;
-        if fields.next().is_some() {
-            return None;
-        }
-        Some(UserEntry {
-            name: name.to_owned(),
-            uid,
-            gid,
-            groups: vec![gid],
-            home: if home.is_empty() { "/".into() } else { home.into() },
-            shell: if shell.is_empty() { DEFAULT_SHELL.into() } else { shell.into() },
-        })
-    })
+/// The `passwd` entry for `name`: the first line that names it, as libc takes it
+///
+/// Files are bytes, not text: a Latin-1 GECOS or another account's odd name must not break every
+/// login. Only the line that names this account is parsed, and a defect in it is an error rather
+/// than a reason to look further down the file for another entry.
+fn parse_passwd(contents: &[u8], name: &str) -> anyhow::Result<Option<UserEntry>> {
+    let Some(line) = contents.split(|byte| *byte == b'\n').find(|line| {
+        line.split(|byte| *byte == b':').next() == Some(name.as_bytes())
+    }) else {
+        return Ok(None);
+    };
+    let fields: Vec<&[u8]> = line.split(|byte| *byte == b':').collect();
+    let [_, _password, uid, gid, _gecos, home, shell] = fields.as_slice() else {
+        anyhow::bail!("expected 7 fields");
+    };
+    let number = |field: &[u8], what: &str| -> anyhow::Result<u32> {
+        std::str::from_utf8(field)
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .with_context(|| format!("invalid {what}"))
+    };
+    let (uid, gid) = (number(uid, "user ID")?, number(gid, "group ID")?);
+    let path = |field: &[u8], default: &str| match field.is_empty() {
+        true => PathBuf::from(default),
+        false => PathBuf::from(OsStr::from_bytes(field)),
+    };
+    Ok(Some(UserEntry {
+        name: name.to_owned(),
+        uid,
+        gid,
+        groups: vec![gid],
+        home: path(home, "/"),
+        shell: path(shell, DEFAULT_SHELL),
+    }))
 }
 
-fn parse_groups(contents: &str, name: &str, primary: u32) -> Vec<u32> {
+/// The supplementary groups `name` is a listed member of, after its primary group
+///
+/// Lines that are not well-formed `group` entries (including non-UTF-8 ones) are skipped.
+fn parse_groups(contents: &[u8], name: &str, primary: u32) -> Vec<u32> {
     let mut groups = vec![primary];
-    for line in contents.lines() {
-        let mut fields = line.split(':');
+    for line in contents.split(|byte| *byte == b'\n') {
+        let mut fields = line.split(|byte| *byte == b':');
         let (Some(_), Some(_), Some(gid), Some(members), None) =
             (fields.next(), fields.next(), fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
-        let Ok(gid) = gid.parse::<u32>() else { continue };
-        if members.split(',').any(|member| member == name) && !groups.contains(&gid) && groups.len() < MAX_GROUPS {
+        let Some(gid) = std::str::from_utf8(gid).ok().and_then(|gid| gid.parse::<u32>().ok()) else { continue };
+        if members.split(|byte| *byte == b',').any(|member| member == name.as_bytes())
+            && !groups.contains(&gid)
+            && groups.len() < MAX_GROUPS
+        {
             groups.push(gid);
         }
     }
@@ -488,18 +505,45 @@ mod tests {
 
     #[test]
     fn user_entries_come_from_the_flat_files() {
-        let passwd = "root:x:0:0:root:/root:/bin/sh\nalice:x:1001:100:Alice:/home/alice:/bin/zsh\nbob:x:1002:1002::/home/bob:\n";
-        let group = "users:x:100:\nwheel:x:10:alice,carol\naudio:x:18:bob,alice\nbad line\n";
-        let alice = parse_passwd(passwd, "alice").unwrap();
+        let passwd = b"root:x:0:0:root:/root:/bin/sh\nalice:x:1001:100:Alice:/home/alice:/bin/zsh\nbob:x:1002:1002::/home/bob:\n";
+        let group = b"users:x:100:\nwheel:x:10:alice,carol\naudio:x:18:bob,alice\nbad line\n";
+        let alice = parse_passwd(passwd, "alice").unwrap().unwrap();
         assert_eq!((alice.uid, alice.gid), (1001, 100));
         assert_eq!(alice.home, Path::new("/home/alice"));
         assert_eq!(alice.shell, Path::new("/bin/zsh"));
         assert_eq!(parse_groups(group, "alice", alice.gid), [100, 10, 18]);
-        let bob = parse_passwd(passwd, "bob").unwrap();
+        let bob = parse_passwd(passwd, "bob").unwrap().unwrap();
         assert_eq!(bob.shell, Path::new("/bin/sh"));
-        assert!(parse_passwd(passwd, "carol").is_none());
-        assert!(parse_passwd(passwd, "ali").is_none());
-        assert!(parse_passwd("alice:x:abc:100:::/bin/sh\n", "alice").is_none());
+        assert!(parse_passwd(passwd, "carol").unwrap().is_none());
+        assert!(parse_passwd(passwd, "ali").unwrap().is_none());
+        assert!(parse_passwd(b"alice:x:abc:100:::/bin/sh\n", "alice").is_err());
+    }
+
+    #[test]
+    fn non_utf8_in_other_fields_and_lines_does_not_break_a_login() {
+        // A Latin-1 GECOS on another account, and on the account itself, and a Latin-1 group line
+        let passwd = b"jos\xe9:x:5:5:Jos\xe9 \xc1lvarez:/home/jose:/bin/sh\nalice:x:1001:100:Ren\xe9e:/home/alice:/bin/zsh\n";
+        let group = b"caf\xe9:x:50:alice,jos\xe9\nwheel:x:10:alice\n";
+        let alice = parse_passwd(passwd, "alice").unwrap().unwrap();
+        assert_eq!((alice.uid, alice.gid), (1001, 100));
+        assert_eq!(parse_groups(group, "alice", alice.gid), [100, 50, 10]);
+        assert!(parse_passwd(passwd, "jos").unwrap().is_none());
+    }
+
+    #[test]
+    fn the_first_matching_passwd_entry_decides_and_a_defect_in_it_fails_closed() {
+        // glibc stops at the first line that names the account; a later one must not take over
+        for first in [
+            "alice:x:oops:100::/home/alice:/bin/sh",
+            "alice:x:1001:100::/home/alice",
+            "alice:x:1001:100::/home/alice:/bin/sh:extra",
+            "alice:x",
+        ] {
+            let passwd = format!("{first}\nalice:x:0:0::/root:/bin/sh\n");
+            assert!(parse_passwd(passwd.as_bytes(), "alice").is_err(), "{first}");
+        }
+        let passwd = b"alice:x:1001:100::/home/alice:/bin/sh\nalice:x:0:0::/root:/bin/sh\n";
+        assert_eq!(parse_passwd(passwd, "alice").unwrap().unwrap().uid, 1001);
     }
 
     #[test]

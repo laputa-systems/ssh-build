@@ -93,7 +93,8 @@ protocol v2 works (`GIT_PROTOCOL=version=2` is the only value passed through) an
 8 channels and 4 commands per connection, 15 s to key exchange, 30 s to authenticate, 5 min idle
 with no running command (1 h with one), 60 s for a peer that stops reading, TCP keepalive
 60/15/4 s, 1 MiB of buffered input per channel. A TOML file passed with `--config` sets
-`max-sessions`, `max-unauthenticated-per-ip` and `max-sessions-per-ip`.
+`max-sessions`, `max-unauthenticated-per-ip`, `max-sessions-per-ip` and, in login mode,
+`max-sessions-per-account` (default 8).
 
 **Hardware.** Graviola needs x86-64 Broadwell-class cores (AES-NI, PCLMULQDQ, BMI1, ADX, AVX2) or
 aarch64 with NEON, AES, PMULL and SHA2. Both executables check this at startup and exit with a
@@ -133,6 +134,8 @@ Run as root, the listener only accepts and authenticates. Each authenticated con
 `oxish-session`, which sets supplementary groups, group and user to the account, proves that root
 cannot be regained, and only then opens the terminal and runs the shell. Accounts with user ID 0 or
 in group 0 are refused unless `--allow-root-login` is given. Run unprivileged, the server can serve
-only the account it runs as. Login mode is Linux-only for switching users.
+only the account it runs as. Login mode is Linux-only for switching users. The `oxish-session` binary
+and its directory must be owned by the server user (root, when it runs as root) and not writable by
+others; the server refuses to start or to log in otherwise.
 
 The server is **experimental**; read `SECURITY.md` before exposing it.

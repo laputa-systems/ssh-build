@@ -1,7 +1,8 @@
 # Security status
 
 **The OxiSH server is experimental.** Its Git mode has had one independent code review and one
-author review; login mode (below) has had neither. Do not expose it to the internet on the strength
+author review; login mode (below) has had one independent review (the login-mode review record
+lists its findings and their resolutions) and no second pass over the fixes. Do not expose it to the internet on the strength
 of this document. The OpenSSH client is upstream OpenSSH 10.6p1 built without libcrypto; its security
 posture is OpenSSH's.
 
@@ -45,16 +46,39 @@ and any other request are refused. Git mode keeps every restriction above.
   supplementary group IDs (resolved from the flat `passwd` and `group` files) as arguments. The
   session process becomes the account before the runtime has a second thread: `setgroups`, then
   group, then user (all of real, effective and saved), then it checks the IDs and the group list and
-  that `setuid(0)` and `setgid(0)` now fail, sets `umask` 022 and marks itself non-dumpable. Only
-  then does it open the terminal and execute the shell. A failure at any step ends the session
-  before anything runs. A server that is not root can serve only the account it runs as. Accounts
+  that root cannot be regained (`setuid(0)` fails, and so does `setgid` to a group the account does
+  not hold), sets `umask` 022 and marks itself non-dumpable (before the change as well as after it,
+  and verified, because the kernel resets the flag to `fs.suid_dumpable` when the effective IDs
+  change). The session process first calls `setsid`, so the account's non-terminal commands never
+  inherit the listener's session or controlling terminal. Only then does it open the terminal and
+  execute the shell. A failure at any step ends the session before anything runs. The host key
+  arrives only after the drop and its receive buffer is wiped. A server that is not root can serve only the account it runs as. Accounts
   with user ID 0 or in group 0 are refused at startup and again in the session unless
   `--allow-root-login` is given; `nologin` and `false` shells are refused.
 - **What the account can reach.** The session process holds the host private key (it signs
   re-exchanges) and runs as the account, next to the account's shell. The only barrier between them
-  is that the process is non-dumpable (a test fails if `/proc/$PPID/mem` or `environ` is readable by
-  the shell); any other local flaw that exposes a same-user process's memory exposes the host key. A
-  user can also kill their own session process, which ends only their own connection.
+  is that the process is non-dumpable (a test fails if `/proc/$PPID/{mem,environ,maps,fd}` can be
+  opened from the shell, or if `ptrace` attach or `process_vm_readv` is allowed); any other local
+  flaw that exposes a same-user process's memory exposes the host key. A user can signal their own
+  session process. Killing it ends that connection only. Stopping it (`SIGSTOP`) leaves the
+  connection hung and its slot held until the client disconnects or the account kills it; the
+  per-account cap (below) and the per-address cap bound how many slots one account can pin, and a
+  stopped process can no longer stall the listener (see the handoff bullet).
+- **Handoff.** The listener passes the connection and state to the session process over a Unix
+  socket with asynchronous I/O and waits at most 5 seconds for its acknowledgement. In login mode the
+  session process already runs as the account when it acknowledges, so the account could otherwise
+  stop it and pin a listener thread. On timeout the listener kills (`SIGKILL`) and reaps the process
+  and drops the connection; no listener thread blocks on a process the account can signal.
+- **Per-account cap.** At most 8 concurrent sessions per account (`max-sessions-per-account` in the
+  `--config` file), enforced after authentication, in addition to the global (32) and per-address (8)
+  caps, so one account cannot take every slot.
+- **The session binary** and its directory must be owned by the server user or root and not be
+  writable by group or others, and the binary must be a regular file, not a symlink; the listener
+  checks at startup and again before every login, because a root listener executes it. Only the
+  immediate directory is checked. Terminal slaves are mode 0600 and owned by the account.
+- **User database.** `passwd` and `group` are read as bytes: a non-UTF-8 field (a Latin-1 GECOS) on
+  any line does not break logins. The first line that names the account decides, as in libc; a
+  defect in it fails the login closed and a later duplicate is never used.
 - **Pre-authentication code runs as root** in the listener when it is started as root: key
   exchange, packet parsing and authentication are not isolated from root. That is the main reason
   to treat login mode as experimental; an unprivileged pre-authentication process is future work.
@@ -73,6 +97,28 @@ and any other request are refused. Git mode keeps every restriction above.
 - **Not done:** no `utmp`/`wtmp`/`lastlog`, no PAM, no NSS (only flat files), no resource limits, no
   per-key options (`command=`, `from=`), no revocation without a restart, no `signal` requests.
   Switching users is implemented for Linux only; it has not been run on the Asterinas kernel.
+
+## Login-mode review record
+
+An independent review of login mode (at the commit before the OxiSH refresh) found the following;
+all but the last three are fixed, each with a test that fails without the fix.
+
+| Severity | Finding | Resolution | Test |
+|----------|---------|------------|------|
+| High | The listener waited, with a blocking `recvmsg` on a runtime thread and no timeout, for the session process's acknowledgement; in login mode that process already runs as the account, which could stop it and pin enough threads to stall accept and authentication | asynchronous handoff, 5 s bound, `SIGKILL` and reap on timeout | `login_a_session_process_that_stops_cannot_stall_the_listener` |
+| Medium | One account could hold every global session slot | per-account cap (default 8) | `login_one_account_cannot_hold_every_session` |
+| Medium | Non-terminal commands inherited the listener's session and controlling terminal | `setsid` in the session process before the drop | `login_commands_without_a_terminal_leave_the_listeners_session` |
+| Medium | Dumpable flag only cleared after the credential change; handoff buffer kept host-key bytes | cleared before and after and verified; buffer wiped; sealed-session test now also checks `maps`, `fd`, `ptrace` and `process_vm_readv` | `login_session_process_is_sealed_from_the_account` (the `ptrace` part needs `python3`) |
+| Low | The session binary was executed by a root listener without owner or mode checks | startup and per-login trust check | `login_session_binary_and_its_directory_must_be_trusted` |
+| Low | Terminal slave mode left as the system made it | `fchmod` 0600 | `login_terminals_belong_to_the_account_and_are_private` |
+| Low | With `--allow-root-login`, an account in group 0 failed the regain-root probe | the probe uses a group the account does not hold | `login_allows_an_account_in_group_zero_only_when_root_login_is_allowed` (root only) |
+| Low | A non-UTF-8 byte in any `passwd` or `group` line failed every login; a malformed first entry fell through to a later one | byte parsing, first match decides | `login::tests::non_utf8_in_other_fields_and_lines_does_not_break_a_login`, `the_first_matching_passwd_entry_decides_and_a_defect_in_it_fails_closed` |
+| Accepted | Pre-authentication code runs as root in the listener | see above; unprivileged pre-authentication process is future work | |
+| Accepted | The host key lives in the session process, next to the account's shell | alternative: keep signing in the listener (session asks it to sign re-exchanges); not done | |
+| Accepted | Resource limits and `oom_score_adj` are inherited by sessions | run the server from a systemd or xinit unit that sets `LimitNPROC`, `LimitNOFILE`, `TasksMax`, `OOMScoreAdjust` and, to make the dumpable flag robust, leave `fs.suid_dumpable` at 0 | |
+
+The accept loop already backs off for one second on `EMFILE`, `ENFILE`, `ENOBUFS` and `ENOMEM`
+(`only_resource_exhaustion_is_backed_off_from`).
 
 ## Review record
 

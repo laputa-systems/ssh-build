@@ -20,7 +20,7 @@ use tokio::{io::AsyncWriteExt as _, net::TcpListener, process::Command, task::Jo
 use zeroize::Zeroizing;
 
 use crate::{
-    DEFAULT_PROVIDER, LoginAccounts, LoginPolicy, Server,
+    Config, DEFAULT_PROVIDER, LoginAccounts, LoginPolicy, Server,
     tests::{build_session_binary, subscribe},
 };
 
@@ -95,6 +95,8 @@ struct World {
     passwd: String,
     group: String,
     policy: LoginPolicy,
+    /// The session binary to run instead of the real one
+    session: Option<PathBuf>,
 }
 
 impl World {
@@ -120,7 +122,7 @@ impl World {
         policy.passwd = dir.path().join("passwd");
         policy.group = dir.path().join("group");
         policy.path = "/usr/bin:/bin".to_owned();
-        Self { dir, keys, passwd, group, policy }
+        Self { dir, keys, passwd, group, policy, session: None }
     }
 
     fn home(&self) -> PathBuf {
@@ -155,14 +157,21 @@ impl World {
         Server::login(
             accounts,
             HostKeys::new([Zeroizing::new(pkcs8)].into_iter(), DEFAULT_PROVIDER)?,
-            build_session_binary().await?,
+            match &self.session {
+                Some(session) => session.clone(),
+                None => build_session_binary().await?,
+            },
             self.policy.clone(),
             DEFAULT_PROVIDER,
         )
     }
 
     async fn serve(&self) -> (SocketAddr, Guard) {
-        let server = Arc::new(self.server().await.unwrap());
+        self.serve_with(|server| server).await
+    }
+
+    async fn serve_with(&self, adjust: impl FnOnce(Server) -> Server) -> (SocketAddr, Guard) {
+        let server = Arc::new(adjust(self.server().await.unwrap()));
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         (addr, Guard(tokio::spawn(async move { server.run(listener).await })))
@@ -584,4 +593,255 @@ async fn login_server_refuses_root_accounts_unless_allowed() {
 
     world.passwd = String::from("alice:x:1000:1000::/home/alice:/usr/sbin/nologin\n");
     assert!(world.server().await.is_err(), "a nologin account was accepted");
+}
+
+/// `sid tty_nr` of the shell running a command, from `/proc/$$/stat` (comm is `sh`, no spaces)
+const SESSION_AND_TERMINAL: &str = "read -r a b c d e sid tty rest < /proc/$$/stat; echo \"$sid $tty\"";
+
+#[tokio::test]
+async fn login_commands_without_a_terminal_leave_the_listeners_session() {
+    let world = World::new(&["alice"]);
+    let (addr, _guard) = world.serve().await;
+    let listener_session = rustix::process::getsid(None).unwrap().as_raw_nonzero().get();
+
+    let run = ssh(addr, &world.key("alice").path, "alice", &[], SESSION_AND_TERMINAL, b"").await;
+    let (session, terminal) = run.stdout().trim().split_once(' ').map(|(a, b)| (a.to_owned(), b.to_owned())).unwrap();
+    assert_ne!(session, listener_session.to_string(), "the command shares the listener's session: {}", run.stderr);
+    assert_eq!(terminal, "0", "the command has a controlling terminal it did not ask for");
+}
+
+#[tokio::test]
+async fn login_session_process_is_sealed_from_the_account() {
+    let world = World::new(&["alice"]);
+    let (addr, _guard) = world.serve().await;
+    let key = &world.key("alice").path;
+
+    let run = ssh(
+        addr,
+        key,
+        "alice",
+        &[],
+        "for f in mem environ maps; do if head -c 1 /proc/$PPID/$f >/dev/null 2>&1; then echo \"$f readable\"; fi; done; \
+         if ls /proc/$PPID/fd >/dev/null 2>&1; then echo fd listable; fi; \
+         if ls /proc/$PPID/task >/dev/null 2>&1 && ls /proc/$PPID/task/$PPID/fd >/dev/null 2>&1; then echo task fd listable; fi; \
+         echo checked",
+        b"",
+    )
+    .await;
+    assert_eq!(run.stdout(), "checked\n", "the account can inspect the session process: {}", run.stderr);
+
+    // ptrace attach and process_vm_readv need a program that can issue them; Python's ctypes is the
+    // only one the test hosts reliably have
+    let Some(python) = env::split_paths(&env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("python3"))
+        .find(|candidate| candidate.is_file())
+    else {
+        eprintln!("skipping the ptrace and process_vm_readv checks: no python3 on PATH");
+        return;
+    };
+    let probe = world.dir.path().join("probe.py");
+    fs::write(
+        &probe,
+        r#"
+import ctypes, errno, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.ptrace.restype = ctypes.c_long
+libc.process_vm_readv.restype = ctypes.c_ssize_t
+pid = int(sys.argv[1])
+def code():
+    return errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+attached = libc.ptrace(16, pid, None, None)  # PTRACE_ATTACH
+ptrace = "ATTACHED" if attached == 0 else code()
+class Iov(ctypes.Structure):
+    _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]
+buf = ctypes.create_string_buffer(16)
+local = Iov(ctypes.addressof(buf), 16)
+remote = Iov(0x400000, 16)
+ctypes.set_errno(0)
+n = libc.process_vm_readv(pid, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0)
+readv = code() if n < 0 else "READ"
+print("ptrace=%s readv=%s" % (ptrace, readv))
+"#,
+    )
+    .unwrap();
+    let run = ssh(addr, key, "alice", &[], &format!("{} {} $PPID", python.display(), probe.display()), b"").await;
+    assert_eq!(
+        run.stdout(),
+        "ptrace=EPERM readv=EPERM\n",
+        "the account can attach to or read the session process: {}",
+        run.stderr
+    );
+}
+
+#[tokio::test]
+async fn login_terminals_belong_to_the_account_and_are_private() {
+    let world = World::new(&["alice"]);
+    let (addr, _guard) = world.serve().await;
+    let uid = identity(0).uid;
+
+    let run = ssh(addr, &world.key("alice").path, "alice", &["-tt"], "stat -c 'tty=%a:%u' \"$(tty)\"", b"").await;
+    assert!(run.stdout().contains(&format!("tty=600:{uid}")), "{:?} {}", run.stdout(), run.stderr);
+}
+
+/// A stand-in session binary: its first run stops itself, later runs are the real session
+fn write_stalling_session(world: &World, real: &Path) -> PathBuf {
+    let stub = world.dir.path().join("session-stub");
+    let state = world.dir.path().join("stalled");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nif mkdir '{dir}' 2>/dev/null; then echo $$ > '{dir}/pid'; kill -STOP $$; exit 0; fi\nexec '{real}' \"$@\"\n",
+            dir = state.display(),
+            real = real.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    stub
+}
+
+fn process_state(pid: u32) -> Option<char> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?.1.chars().next()
+}
+
+async fn eventually(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + limit;
+    while !condition() {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    true
+}
+
+#[tokio::test]
+async fn login_a_session_process_that_stops_cannot_stall_the_listener() {
+    let mut world = World::new(&["alice"]);
+    world.session = Some(write_stalling_session(&world, &build_session_binary().await.unwrap()));
+    let server = Arc::new(world.server().await.unwrap().with_handoff_timeout(Duration::from_secs(6)));
+    let std_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+
+    // The whole listener gets one worker thread: a blocking handoff would stop it from accepting
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        runtime.block_on(async move {
+            let listener = TcpListener::from_std(std_listener).unwrap();
+            tokio::select! {
+                _ = server.run(listener) => {}
+                _ = stopped => {}
+            }
+        });
+    });
+
+    let key = world.key("alice").path.clone();
+    let first = tokio::spawn({
+        let key = key.clone();
+        async move { ssh(addr, &key, "alice", &[], "echo FIRST", b"").await }
+    });
+    let pid_file = world.dir.path().join("stalled/pid");
+    assert!(eventually(Duration::from_secs(30), || pid_file.exists()).await, "the stand-in session never started");
+    let pid: u32 = fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+    assert!(
+        eventually(Duration::from_secs(10), || process_state(pid) == Some('T')).await,
+        "the stand-in session did not stop itself"
+    );
+
+    // While the first connection's session process is stopped, another connection is served
+    let second = timeout(Duration::from_secs(20), ssh(addr, &key, "alice", &[], "echo SECOND", b""))
+        .await
+        .expect("a stopped session process stalled the listener");
+    assert_eq!(second.stdout(), "SECOND\n", "{}", second.stderr);
+
+    // The listener gives up on the stopped process, kills it and reaps it
+    let first = timeout(Duration::from_secs(30), first).await.unwrap().unwrap();
+    assert!(!first.status.success() && !first.stdout().contains("FIRST"), "{}", first.stdout());
+    assert!(
+        eventually(Duration::from_secs(10), || process_state(pid).is_none()).await,
+        "the stopped session process was not killed and reaped (state {:?})",
+        process_state(pid)
+    );
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn login_one_account_cannot_hold_every_session() {
+    let world = World::new(&["alice", "bob"]);
+    let config = Config { max_sessions_per_account: 1, ..Config::default() };
+    let (addr, _guard) = world.serve_with(|server| server.with_config(config)).await;
+    let alice = world.key("alice").path.clone();
+
+    let marker = world.home().join("first-is-up");
+    let held = tokio::spawn({
+        let (alice, script) = (alice.clone(), format!("touch '{}'; sleep 10; echo FIRST", marker.display()));
+        async move { ssh(addr, &alice, "alice", &[], &script, b"").await }
+    });
+    assert!(eventually(Duration::from_secs(30), || marker.exists()).await, "the first session never started");
+
+    let second = ssh(addr, &alice, "alice", &[], "echo SECOND", b"").await;
+    assert!(!second.status.success() && !second.stdout().contains("SECOND"), "{}", second.stdout());
+    let other = ssh(addr, &world.key("bob").path, "bob", &[], "echo BOB", b"").await;
+    assert_eq!(other.stdout(), "BOB\n", "another account was refused: {}", other.stderr);
+
+    let held = held.await.unwrap();
+    assert_eq!(held.stdout(), "FIRST\n", "{}", held.stderr);
+    let third = ssh(addr, &alice, "alice", &[], "echo THIRD", b"").await;
+    assert_eq!(third.stdout(), "THIRD\n", "the slot was not released: {}", third.stderr);
+}
+
+#[tokio::test]
+async fn login_session_binary_and_its_directory_must_be_trusted() {
+    let mut world = World::new(&["alice"]);
+    let dir = world.dir.path().join("bin");
+    fs::create_dir(&dir).unwrap();
+    let program = dir.join("oxish-session");
+    fs::write(&program, "#!/bin/sh\n").unwrap();
+    let mode = |path: &Path, mode: u32| fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    world.session = Some(program.clone());
+
+    mode(&dir, 0o755);
+    mode(&program, 0o755);
+    assert!(world.server().await.is_ok(), "a trusted session binary was refused");
+    mode(&program, 0o775);
+    assert!(world.server().await.is_err(), "a group-writable session binary was accepted");
+    mode(&program, 0o757);
+    assert!(world.server().await.is_err(), "a world-writable session binary was accepted");
+    mode(&program, 0o644);
+    assert!(world.server().await.is_err(), "a session binary that cannot run was accepted");
+    mode(&program, 0o755);
+    mode(&dir, 0o777);
+    assert!(world.server().await.is_err(), "a session binary in a world-writable directory was accepted");
+    mode(&dir, 0o755);
+
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&program, &link).unwrap();
+    world.session = Some(link);
+    assert!(world.server().await.is_err(), "a symlinked session binary was accepted");
+
+    if is_root() {
+        world.session = Some(program.clone());
+        rustix::fs::chown(&program, Some(rustix::process::Uid::from_raw(12_345)), None).unwrap();
+        assert!(world.server().await.is_err(), "a session binary owned by another user was accepted");
+    }
+}
+
+#[tokio::test]
+async fn login_allows_an_account_in_group_zero_only_when_root_login_is_allowed() {
+    if !is_root() {
+        eprintln!("skipping: needs root; run in a container (see docs/development.md)");
+        return;
+    }
+    let mut world = World::new(&["alice"]);
+    let me = identity(0);
+    world.passwd = world.passwd.replace(&format!("alice:x:{}:{}::", me.uid, me.gid), &format!("alice:x:{}:0::", me.uid));
+    assert!(world.server().await.is_err(), "an account in group 0 was accepted without the flag");
+
+    world.policy.allow_root = true;
+    let (addr, _guard) = world.serve().await;
+    let run = ssh(addr, &world.key("alice").path, "alice", &[], "id -u; id -g", b"").await;
+    assert_eq!(run.stdout(), format!("{}\n0\n", me.uid), "{}", run.stderr);
 }

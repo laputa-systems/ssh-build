@@ -24,7 +24,7 @@ index aa1cd85cf95f5198c12b7c12302b7fcff449e7f8..1b25c9e013146253bc437695bc51b354
  serde = { workspace = true }
  thiserror = { workspace = true }
 diff --git a/oxish/src/authentication.rs b/oxish/src/authentication.rs
-index 405574e23aa021bed75a5aacbeea82a32e6d8e58..7cc3ffdd4a696fcfae1d4b88932df9a112e9984e 100644
+index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e49db2f712 100644
 --- a/oxish/src/authentication.rs
 +++ b/oxish/src/authentication.rs
 @@ -1,5 +1,7 @@
@@ -250,7 +250,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..7cc3ffdd4a696fcfae1d4b88932df9a1
                      }
                  }
              }
-@@ -315,79 +305,108 @@ fn send_auth_failed(write: &mut WriteState) -> Result<(), ProtoError> {
+@@ -315,79 +305,146 @@ fn send_auth_failed(write: &mut WriteState) -> Result<(), ProtoError> {
      })
  }
  
@@ -318,60 +318,66 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..7cc3ffdd4a696fcfae1d4b88932df9a1
 +            );
 +            keys.push(key);
          }
--    }
--
++        anyhow::ensure!(!keys.is_empty(), "{} contains no keys", path.display());
++        anyhow::ensure!(keys.len() <= MAX_KEYS, "{} has too many keys", path.display());
++        Ok(Self { name, keys })
+     }
++}
+ 
 -    fn keys(&self, _: &User, _: &dyn CryptoProvider) -> Vec<AuthorizedKey> {
 -        self.0.keys.clone()
 -    }
 -
 -    fn drop_privileges(&self) -> bool {
 -        false
-+        anyhow::ensure!(!keys.is_empty(), "{} contains no keys", path.display());
-+        anyhow::ensure!(keys.len() <= MAX_KEYS, "{} has too many keys", path.display());
-+        Ok(Self { name, keys })
-     }
+-    }
++/// Refuse a file or directory that someone else could have changed
++///
++/// It must belong to the server user (or, with `root_may_own`, to root) and not be writable by
++/// group or others.
++fn check_owner_and_mode(meta: &std::fs::Metadata, name: &Path, root_may_own: bool) -> anyhow::Result<()> {
++    use std::os::unix::fs::MetadataExt as _;
++
++    let euid = rustix::process::geteuid().as_raw();
++    let owned = meta.uid() == euid || (root_may_own && meta.uid() == 0);
++    anyhow::ensure!(
++        owned && meta.mode() & 0o022 == 0,
++        "{} must be owned by the server user and not writable by others",
++        name.display()
++    );
++    Ok(())
  }
  
 -/// A user store resolves a username to a `User` type containing data used for authentication
 -pub trait UserStore: Send + Sync + 'static {
 -    /// Lookup a user by name, returning `None` if the user does not exist or cannot be retrieved
 -    fn lookup(&self, name: Username, root_policy: RootPolicy) -> Option<User>;
--
--    /// Lookup the authorized keys for a user
--    fn keys(&self, user: &User, provider: &dyn CryptoProvider) -> Vec<AuthorizedKey>;
 +/// Read a small configuration file that must not be controllable by anyone else
 +///
 +/// The file and its directory must belong to the server user (or, with `root_may_own`, to root)
 +/// and not be writable by group or others; the file must be a regular file and not a symlink.
 +pub(crate) fn read_trusted_file(path: &Path, what: &str, root_may_own: bool) -> anyhow::Result<String> {
-+    use std::{
-+        fs::OpenOptions,
-+        io::Read as _,
-+        os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
-+    };
++    let contents = read_trusted_bytes(path, what, root_may_own)?;
++    String::from_utf8(contents).with_context(|| format!("{} is not valid UTF-8", path.display()))
++}
+ 
+-    /// Lookup the authorized keys for a user
+-    fn keys(&self, user: &User, provider: &dyn CryptoProvider) -> Vec<AuthorizedKey>;
++/// [`read_trusted_file`] without requiring the contents to be text
++pub(crate) fn read_trusted_bytes(path: &Path, what: &str, root_may_own: bool) -> anyhow::Result<Vec<u8>> {
++    use std::{fs::OpenOptions, io::Read as _, os::unix::fs::OpenOptionsExt as _};
  
 -    /// Whether the user store should set the UID of the process to the authenticated user
 -    fn drop_privileges(&self) -> bool;
--}
-+    let euid = rustix::process::geteuid().as_raw();
-+    let check = |meta: &std::fs::Metadata, name: &Path| -> anyhow::Result<()> {
-+        let owned = meta.uid() == euid || (root_may_own && meta.uid() == 0);
-+        anyhow::ensure!(
-+            owned && meta.mode() & 0o022 == 0,
-+            "{} must be owned by the server user and not writable by others",
-+            name.display()
-+        );
-+        Ok(())
-+    };
- 
--pub(crate) struct CachedUser {
--    pub(crate) data: User,
--    pub(crate) keys: Vec<AuthorizedKey>,
 +    let parent = match path.parent() {
 +        Some(parent) if !parent.as_os_str().is_empty() => parent,
 +        _ => Path::new("."),
 +    };
-+    check(&std::fs::metadata(parent).with_context(|| format!("{what} directory"))?, parent)?;
++    check_owner_and_mode(
++        &std::fs::metadata(parent).with_context(|| format!("{what} directory"))?,
++        parent,
++        root_may_own,
++    )?;
 +
 +    let mut file = OpenOptions::new()
 +        .read(true)
@@ -380,13 +386,42 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..7cc3ffdd4a696fcfae1d4b88932df9a1
 +        .with_context(|| format!("failed to open {what} file `{}`", path.display()))?;
 +    let meta = file.metadata()?;
 +    anyhow::ensure!(meta.is_file(), "{} is not a regular file", path.display());
-+    check(&meta, path)?;
++    check_owner_and_mode(&meta, path, root_may_own)?;
 +    anyhow::ensure!(meta.len() <= MAX_KEY_FILE_BYTES, "{} is too large", path.display());
 +
-+    let mut contents = String::new();
-+    file.read_to_string(&mut contents)
++    let mut contents = Vec::new();
++    file.read_to_end(&mut contents)
 +        .with_context(|| format!("failed to read `{}`", path.display()))?;
 +    Ok(contents)
+ }
+ 
+-pub(crate) struct CachedUser {
+-    pub(crate) data: User,
+-    pub(crate) keys: Vec<AuthorizedKey>,
++/// Refuse to execute a program, as a privileged listener, that someone else could have replaced
++///
++/// The program must be a regular file (not a symlink) owned by the server user or root and not
++/// writable by group or others, and so must its directory. Only the immediate directory is
++/// checked, as for the other trusted files.
++pub(crate) fn check_trusted_executable(path: &Path) -> anyhow::Result<()> {
++    use std::os::unix::fs::MetadataExt as _;
++
++    let parent = match path.parent() {
++        Some(parent) if !parent.as_os_str().is_empty() => parent,
++        _ => Path::new("."),
++    };
++    check_owner_and_mode(
++        &std::fs::metadata(parent).context("session binary directory")?,
++        parent,
++        true,
++    )?;
++    let meta = std::fs::symlink_metadata(path).with_context(|| format!("session binary `{}`", path.display()))?;
++    anyhow::ensure!(
++        meta.is_file() && meta.mode() & 0o111 != 0,
++        "{} is not an executable regular file",
++        path.display()
++    );
++    check_owner_and_mode(&meta, path, true)
  }
  
 -/// A successfully authenticated user, together with the options on the key they authenticated with
@@ -417,7 +452,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..7cc3ffdd4a696fcfae1d4b88932df9a1
  }
  
  /// A validated username
-@@ -396,29 +415,11 @@ pub struct User {
+@@ -396,29 +453,11 @@ pub struct User {
  #[derive(Clone, Debug, PartialEq, Eq)]
  pub struct Username(String);
  
@@ -448,7 +483,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..7cc3ffdd4a696fcfae1d4b88932df9a1
              true => Err(Error::InvalidUsername),
              false => Ok(Self(value)),
          }
-@@ -450,12 +451,162 @@ pub enum AuthError {
+@@ -450,12 +489,162 @@ pub enum AuthError {
      TooManyAttempts,
  }
  
@@ -990,10 +1025,10 @@ index a60aada8b8aabbe7f5ee372b8d4982f126e3ee80..e4e2dbd8192539c4da182baf04917c75
 +    }
 +}
 diff --git a/oxish/src/bin/oxish-session.rs b/oxish/src/bin/oxish-session.rs
-index e603b4c80214d514cb869901db47b30862ef241e..c59bbdbc680676e2e24ae2351c6c4569ddab1933 100644
+index e603b4c80214d514cb869901db47b30862ef241e..3fad4f076c0c05123669c1497488fabe4f959339 100644
 --- a/oxish/src/bin/oxish-session.rs
 +++ b/oxish/src/bin/oxish-session.rs
-@@ -1,12 +1,63 @@
+@@ -1,12 +1,68 @@
 -use oxish::{DEFAULT_PROVIDER, resume};
 +#![forbid(unsafe_code)]
  
@@ -1002,7 +1037,10 @@ index e603b4c80214d514cb869901db47b30862ef241e..c59bbdbc680676e2e24ae2351c6c4569
 +use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
 +
 +use anyhow::Context as _;
-+use oxish::{DEFAULT_PROVIDER, GitPolicy, LoginSession, drop_privileges, launch, require_supported_cpu, resume, resume_login};
++use oxish::{
++    DEFAULT_PROVIDER, GitPolicy, LoginSession, detach_session, drop_privileges, launch, require_supported_cpu, resume,
++    resume_login,
++};
 +
 +enum Serve {
 +    Git(GitPolicy),
@@ -1042,6 +1080,8 @@ index e603b4c80214d514cb869901db47b30862ef241e..c59bbdbc680676e2e24ae2351c6c4569
 +        ),
 +        [login, rest @ ..] if login == "login" => {
 +            let login = LoginSession::from_args(rest.iter().cloned()).context("invalid login arguments")?;
++            // Never leave the account's children in the listener's session or on its terminal.
++            detach_session().context("cannot start a session of its own")?;
 +            // Credentials are per thread on Linux: become the account before the runtime has any other thread.
 +            drop_privileges(&login).context("cannot become the account")?;
 +            Serve::Login(login)
@@ -1854,7 +1894,7 @@ index 0000000000000000000000000000000000000000..0dda74162fe1a89d34e0c5c039091f62
 +    }
 +}
 diff --git a/oxish/src/lib.rs b/oxish/src/lib.rs
-index 3f9d273c9bdde1628e75dce04442927ad082eede..397431d83b87c4d98f35b5c6ab560066abccb204 100644
+index 3f9d273c9bdde1628e75dce04442927ad082eede..7eb0d85caf5e3c784437b8cb2c629d0332f09a07 100644
 --- a/oxish/src/lib.rs
 +++ b/oxish/src/lib.rs
 @@ -1,20 +1,13 @@
@@ -1912,7 +1952,7 @@ index 3f9d273c9bdde1628e75dce04442927ad082eede..397431d83b87c4d98f35b5c6ab560066
  #[cfg(unix)]
  mod unix;
 -pub use platform::{DefaultStore, resume};
-+pub use platform::{drop_privileges, launch, resume, resume_login};
++pub use platform::{detach_session, drop_privileges, launch, resume, resume_login};
  #[cfg(unix)]
  use unix as platform;
  
@@ -1923,10 +1963,10 @@ index 3f9d273c9bdde1628e75dce04442927ad082eede..397431d83b87c4d98f35b5c6ab560066
  
 diff --git a/oxish/src/login.rs b/oxish/src/login.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a0cc01f26045a9ef6501f95ecf933d839fd79f5d
+index 0000000000000000000000000000000000000000..0d6127c2b82baf2e5e9c48ad2f4c565b3b950b51
 --- /dev/null
 +++ b/oxish/src/login.rs
-@@ -0,0 +1,603 @@
+@@ -0,0 +1,647 @@
 +//! Login mode: accounts, the user database and the policy for one login session
 +
 +use std::{
@@ -1943,7 +1983,7 @@ index 0000000000000000000000000000000000000000..a0cc01f26045a9ef6501f95ecf933d83
 +    named::PublicKeyAlgorithm,
 +};
 +
-+use crate::authentication::read_trusted_file;
++use crate::authentication::{read_trusted_bytes, read_trusted_file};
 +
 +const MAX_ACCOUNT_KEYS: usize = 1024;
 +const MAX_NAME_LEN: usize = 64;
@@ -2083,52 +2123,69 @@ index 0000000000000000000000000000000000000000..a0cc01f26045a9ef6501f95ecf933d83
 +
 +    /// Resolve one account by name
 +    pub fn lookup(&self, name: &str) -> anyhow::Result<UserEntry> {
-+        let passwd = read_trusted_file(&self.passwd, "passwd", true)?;
-+        let group = read_trusted_file(&self.group, "group", true)?;
++        let passwd = read_trusted_bytes(&self.passwd, "passwd", true)?;
++        let group = read_trusted_bytes(&self.group, "group", true)?;
 +        let mut entry = parse_passwd(&passwd, name)
++            .with_context(|| format!("invalid entry for account {name} in {}", self.passwd.display()))?
 +            .with_context(|| format!("account {name} is not in {}", self.passwd.display()))?;
 +        entry.groups = parse_groups(&group, name, entry.gid);
 +        Ok(entry)
 +    }
 +}
 +
-+fn parse_passwd(contents: &str, name: &str) -> Option<UserEntry> {
-+    contents.lines().find_map(|line| {
-+        let mut fields = line.split(':');
-+        if fields.next()? != name {
-+            return None;
-+        }
-+        let _password = fields.next()?;
-+        let uid = fields.next()?.parse().ok()?;
-+        let gid = fields.next()?.parse().ok()?;
-+        let _gecos = fields.next()?;
-+        let home = fields.next()?;
-+        let shell = fields.next()?;
-+        if fields.next().is_some() {
-+            return None;
-+        }
-+        Some(UserEntry {
-+            name: name.to_owned(),
-+            uid,
-+            gid,
-+            groups: vec![gid],
-+            home: if home.is_empty() { "/".into() } else { home.into() },
-+            shell: if shell.is_empty() { DEFAULT_SHELL.into() } else { shell.into() },
-+        })
-+    })
++/// The `passwd` entry for `name`: the first line that names it, as libc takes it
++///
++/// Files are bytes, not text: a Latin-1 GECOS or another account's odd name must not break every
++/// login. Only the line that names this account is parsed, and a defect in it is an error rather
++/// than a reason to look further down the file for another entry.
++fn parse_passwd(contents: &[u8], name: &str) -> anyhow::Result<Option<UserEntry>> {
++    let Some(line) = contents.split(|byte| *byte == b'\n').find(|line| {
++        line.split(|byte| *byte == b':').next() == Some(name.as_bytes())
++    }) else {
++        return Ok(None);
++    };
++    let fields: Vec<&[u8]> = line.split(|byte| *byte == b':').collect();
++    let [_, _password, uid, gid, _gecos, home, shell] = fields.as_slice() else {
++        anyhow::bail!("expected 7 fields");
++    };
++    let number = |field: &[u8], what: &str| -> anyhow::Result<u32> {
++        std::str::from_utf8(field)
++            .ok()
++            .and_then(|text| text.parse().ok())
++            .with_context(|| format!("invalid {what}"))
++    };
++    let (uid, gid) = (number(uid, "user ID")?, number(gid, "group ID")?);
++    let path = |field: &[u8], default: &str| match field.is_empty() {
++        true => PathBuf::from(default),
++        false => PathBuf::from(OsStr::from_bytes(field)),
++    };
++    Ok(Some(UserEntry {
++        name: name.to_owned(),
++        uid,
++        gid,
++        groups: vec![gid],
++        home: path(home, "/"),
++        shell: path(shell, DEFAULT_SHELL),
++    }))
 +}
 +
-+fn parse_groups(contents: &str, name: &str, primary: u32) -> Vec<u32> {
++/// The supplementary groups `name` is a listed member of, after its primary group
++///
++/// Lines that are not well-formed `group` entries (including non-UTF-8 ones) are skipped.
++fn parse_groups(contents: &[u8], name: &str, primary: u32) -> Vec<u32> {
 +    let mut groups = vec![primary];
-+    for line in contents.lines() {
-+        let mut fields = line.split(':');
++    for line in contents.split(|byte| *byte == b'\n') {
++        let mut fields = line.split(|byte| *byte == b':');
 +        let (Some(_), Some(_), Some(gid), Some(members), None) =
 +            (fields.next(), fields.next(), fields.next(), fields.next(), fields.next())
 +        else {
 +            continue;
 +        };
-+        let Ok(gid) = gid.parse::<u32>() else { continue };
-+        if members.split(',').any(|member| member == name) && !groups.contains(&gid) && groups.len() < MAX_GROUPS {
++        let Some(gid) = std::str::from_utf8(gid).ok().and_then(|gid| gid.parse::<u32>().ok()) else { continue };
++        if members.split(|byte| *byte == b',').any(|member| member == name.as_bytes())
++            && !groups.contains(&gid)
++            && groups.len() < MAX_GROUPS
++        {
 +            groups.push(gid);
 +        }
 +    }
@@ -2417,18 +2474,45 @@ index 0000000000000000000000000000000000000000..a0cc01f26045a9ef6501f95ecf933d83
 +
 +    #[test]
 +    fn user_entries_come_from_the_flat_files() {
-+        let passwd = "root:x:0:0:root:/root:/bin/sh\nalice:x:1001:100:Alice:/home/alice:/bin/zsh\nbob:x:1002:1002::/home/bob:\n";
-+        let group = "users:x:100:\nwheel:x:10:alice,carol\naudio:x:18:bob,alice\nbad line\n";
-+        let alice = parse_passwd(passwd, "alice").unwrap();
++        let passwd = b"root:x:0:0:root:/root:/bin/sh\nalice:x:1001:100:Alice:/home/alice:/bin/zsh\nbob:x:1002:1002::/home/bob:\n";
++        let group = b"users:x:100:\nwheel:x:10:alice,carol\naudio:x:18:bob,alice\nbad line\n";
++        let alice = parse_passwd(passwd, "alice").unwrap().unwrap();
 +        assert_eq!((alice.uid, alice.gid), (1001, 100));
 +        assert_eq!(alice.home, Path::new("/home/alice"));
 +        assert_eq!(alice.shell, Path::new("/bin/zsh"));
 +        assert_eq!(parse_groups(group, "alice", alice.gid), [100, 10, 18]);
-+        let bob = parse_passwd(passwd, "bob").unwrap();
++        let bob = parse_passwd(passwd, "bob").unwrap().unwrap();
 +        assert_eq!(bob.shell, Path::new("/bin/sh"));
-+        assert!(parse_passwd(passwd, "carol").is_none());
-+        assert!(parse_passwd(passwd, "ali").is_none());
-+        assert!(parse_passwd("alice:x:abc:100:::/bin/sh\n", "alice").is_none());
++        assert!(parse_passwd(passwd, "carol").unwrap().is_none());
++        assert!(parse_passwd(passwd, "ali").unwrap().is_none());
++        assert!(parse_passwd(b"alice:x:abc:100:::/bin/sh\n", "alice").is_err());
++    }
++
++    #[test]
++    fn non_utf8_in_other_fields_and_lines_does_not_break_a_login() {
++        // A Latin-1 GECOS on another account, and on the account itself, and a Latin-1 group line
++        let passwd = b"jos\xe9:x:5:5:Jos\xe9 \xc1lvarez:/home/jose:/bin/sh\nalice:x:1001:100:Ren\xe9e:/home/alice:/bin/zsh\n";
++        let group = b"caf\xe9:x:50:alice,jos\xe9\nwheel:x:10:alice\n";
++        let alice = parse_passwd(passwd, "alice").unwrap().unwrap();
++        assert_eq!((alice.uid, alice.gid), (1001, 100));
++        assert_eq!(parse_groups(group, "alice", alice.gid), [100, 50, 10]);
++        assert!(parse_passwd(passwd, "jos").unwrap().is_none());
++    }
++
++    #[test]
++    fn the_first_matching_passwd_entry_decides_and_a_defect_in_it_fails_closed() {
++        // glibc stops at the first line that names the account; a later one must not take over
++        for first in [
++            "alice:x:oops:100::/home/alice:/bin/sh",
++            "alice:x:1001:100::/home/alice",
++            "alice:x:1001:100::/home/alice:/bin/sh:extra",
++            "alice:x",
++        ] {
++            let passwd = format!("{first}\nalice:x:0:0::/root:/bin/sh\n");
++            assert!(parse_passwd(passwd.as_bytes(), "alice").is_err(), "{first}");
++        }
++        let passwd = b"alice:x:1001:100::/home/alice:/bin/sh\nalice:x:0:0::/root:/bin/sh\n";
++        assert_eq!(parse_passwd(passwd, "alice").unwrap().unwrap().uid, 1001);
 +    }
 +
 +    #[test]
@@ -2532,10 +2616,10 @@ index 0000000000000000000000000000000000000000..a0cc01f26045a9ef6501f95ecf933d83
 +}
 diff --git a/oxish/src/login_tests.rs b/oxish/src/login_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..45758b111e4c17be812521d6740ea18f75c9cd2c
+index 0000000000000000000000000000000000000000..c4b128f70e8d2659671e4ab360c9035f0a5f0fcd
 --- /dev/null
 +++ b/oxish/src/login_tests.rs
-@@ -0,0 +1,587 @@
+@@ -0,0 +1,847 @@
 +use core::{net::Ipv4Addr, net::SocketAddr, time::Duration};
 +use std::{
 +    env, fs,
@@ -2558,7 +2642,7 @@ index 0000000000000000000000000000000000000000..45758b111e4c17be812521d6740ea18f
 +use zeroize::Zeroizing;
 +
 +use crate::{
-+    DEFAULT_PROVIDER, LoginAccounts, LoginPolicy, Server,
++    Config, DEFAULT_PROVIDER, LoginAccounts, LoginPolicy, Server,
 +    tests::{build_session_binary, subscribe},
 +};
 +
@@ -2633,6 +2717,8 @@ index 0000000000000000000000000000000000000000..45758b111e4c17be812521d6740ea18f
 +    passwd: String,
 +    group: String,
 +    policy: LoginPolicy,
++    /// The session binary to run instead of the real one
++    session: Option<PathBuf>,
 +}
 +
 +impl World {
@@ -2658,7 +2744,7 @@ index 0000000000000000000000000000000000000000..45758b111e4c17be812521d6740ea18f
 +        policy.passwd = dir.path().join("passwd");
 +        policy.group = dir.path().join("group");
 +        policy.path = "/usr/bin:/bin".to_owned();
-+        Self { dir, keys, passwd, group, policy }
++        Self { dir, keys, passwd, group, policy, session: None }
 +    }
 +
 +    fn home(&self) -> PathBuf {
@@ -2693,14 +2779,21 @@ index 0000000000000000000000000000000000000000..45758b111e4c17be812521d6740ea18f
 +        Server::login(
 +            accounts,
 +            HostKeys::new([Zeroizing::new(pkcs8)].into_iter(), DEFAULT_PROVIDER)?,
-+            build_session_binary().await?,
++            match &self.session {
++                Some(session) => session.clone(),
++                None => build_session_binary().await?,
++            },
 +            self.policy.clone(),
 +            DEFAULT_PROVIDER,
 +        )
 +    }
 +
 +    async fn serve(&self) -> (SocketAddr, Guard) {
-+        let server = Arc::new(self.server().await.unwrap());
++        self.serve_with(|server| server).await
++    }
++
++    async fn serve_with(&self, adjust: impl FnOnce(Server) -> Server) -> (SocketAddr, Guard) {
++        let server = Arc::new(adjust(self.server().await.unwrap()));
 +        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
 +        let addr = listener.local_addr().unwrap();
 +        (addr, Guard(tokio::spawn(async move { server.run(listener).await })))
@@ -3123,13 +3216,264 @@ index 0000000000000000000000000000000000000000..45758b111e4c17be812521d6740ea18f
 +    world.passwd = String::from("alice:x:1000:1000::/home/alice:/usr/sbin/nologin\n");
 +    assert!(world.server().await.is_err(), "a nologin account was accepted");
 +}
++
++/// `sid tty_nr` of the shell running a command, from `/proc/$$/stat` (comm is `sh`, no spaces)
++const SESSION_AND_TERMINAL: &str = "read -r a b c d e sid tty rest < /proc/$$/stat; echo \"$sid $tty\"";
++
++#[tokio::test]
++async fn login_commands_without_a_terminal_leave_the_listeners_session() {
++    let world = World::new(&["alice"]);
++    let (addr, _guard) = world.serve().await;
++    let listener_session = rustix::process::getsid(None).unwrap().as_raw_nonzero().get();
++
++    let run = ssh(addr, &world.key("alice").path, "alice", &[], SESSION_AND_TERMINAL, b"").await;
++    let (session, terminal) = run.stdout().trim().split_once(' ').map(|(a, b)| (a.to_owned(), b.to_owned())).unwrap();
++    assert_ne!(session, listener_session.to_string(), "the command shares the listener's session: {}", run.stderr);
++    assert_eq!(terminal, "0", "the command has a controlling terminal it did not ask for");
++}
++
++#[tokio::test]
++async fn login_session_process_is_sealed_from_the_account() {
++    let world = World::new(&["alice"]);
++    let (addr, _guard) = world.serve().await;
++    let key = &world.key("alice").path;
++
++    let run = ssh(
++        addr,
++        key,
++        "alice",
++        &[],
++        "for f in mem environ maps; do if head -c 1 /proc/$PPID/$f >/dev/null 2>&1; then echo \"$f readable\"; fi; done; \
++         if ls /proc/$PPID/fd >/dev/null 2>&1; then echo fd listable; fi; \
++         if ls /proc/$PPID/task >/dev/null 2>&1 && ls /proc/$PPID/task/$PPID/fd >/dev/null 2>&1; then echo task fd listable; fi; \
++         echo checked",
++        b"",
++    )
++    .await;
++    assert_eq!(run.stdout(), "checked\n", "the account can inspect the session process: {}", run.stderr);
++
++    // ptrace attach and process_vm_readv need a program that can issue them; Python's ctypes is the
++    // only one the test hosts reliably have
++    let Some(python) = env::split_paths(&env::var_os("PATH").unwrap_or_default())
++        .map(|dir| dir.join("python3"))
++        .find(|candidate| candidate.is_file())
++    else {
++        eprintln!("skipping the ptrace and process_vm_readv checks: no python3 on PATH");
++        return;
++    };
++    let probe = world.dir.path().join("probe.py");
++    fs::write(
++        &probe,
++        r#"
++import ctypes, errno, os, sys
++libc = ctypes.CDLL(None, use_errno=True)
++libc.ptrace.restype = ctypes.c_long
++libc.process_vm_readv.restype = ctypes.c_ssize_t
++pid = int(sys.argv[1])
++def code():
++    return errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
++attached = libc.ptrace(16, pid, None, None)  # PTRACE_ATTACH
++ptrace = "ATTACHED" if attached == 0 else code()
++class Iov(ctypes.Structure):
++    _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]
++buf = ctypes.create_string_buffer(16)
++local = Iov(ctypes.addressof(buf), 16)
++remote = Iov(0x400000, 16)
++ctypes.set_errno(0)
++n = libc.process_vm_readv(pid, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0)
++readv = code() if n < 0 else "READ"
++print("ptrace=%s readv=%s" % (ptrace, readv))
++"#,
++    )
++    .unwrap();
++    let run = ssh(addr, key, "alice", &[], &format!("{} {} $PPID", python.display(), probe.display()), b"").await;
++    assert_eq!(
++        run.stdout(),
++        "ptrace=EPERM readv=EPERM\n",
++        "the account can attach to or read the session process: {}",
++        run.stderr
++    );
++}
++
++#[tokio::test]
++async fn login_terminals_belong_to_the_account_and_are_private() {
++    let world = World::new(&["alice"]);
++    let (addr, _guard) = world.serve().await;
++    let uid = identity(0).uid;
++
++    let run = ssh(addr, &world.key("alice").path, "alice", &["-tt"], "stat -c 'tty=%a:%u' \"$(tty)\"", b"").await;
++    assert!(run.stdout().contains(&format!("tty=600:{uid}")), "{:?} {}", run.stdout(), run.stderr);
++}
++
++/// A stand-in session binary: its first run stops itself, later runs are the real session
++fn write_stalling_session(world: &World, real: &Path) -> PathBuf {
++    let stub = world.dir.path().join("session-stub");
++    let state = world.dir.path().join("stalled");
++    fs::write(
++        &stub,
++        format!(
++            "#!/bin/sh\nif mkdir '{dir}' 2>/dev/null; then echo $$ > '{dir}/pid'; kill -STOP $$; exit 0; fi\nexec '{real}' \"$@\"\n",
++            dir = state.display(),
++            real = real.display()
++        ),
++    )
++    .unwrap();
++    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
++    stub
++}
++
++fn process_state(pid: u32) -> Option<char> {
++    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
++    stat.rsplit_once(") ")?.1.chars().next()
++}
++
++async fn eventually(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
++    let deadline = tokio::time::Instant::now() + limit;
++    while !condition() {
++        if tokio::time::Instant::now() >= deadline {
++            return false;
++        }
++        tokio::time::sleep(Duration::from_millis(50)).await;
++    }
++    true
++}
++
++#[tokio::test]
++async fn login_a_session_process_that_stops_cannot_stall_the_listener() {
++    let mut world = World::new(&["alice"]);
++    world.session = Some(write_stalling_session(&world, &build_session_binary().await.unwrap()));
++    let server = Arc::new(world.server().await.unwrap().with_handoff_timeout(Duration::from_secs(6)));
++    let std_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
++    std_listener.set_nonblocking(true).unwrap();
++    let addr = std_listener.local_addr().unwrap();
++
++    // The whole listener gets one worker thread: a blocking handoff would stop it from accepting
++    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
++    std::thread::spawn(move || {
++        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
++        runtime.block_on(async move {
++            let listener = TcpListener::from_std(std_listener).unwrap();
++            tokio::select! {
++                _ = server.run(listener) => {}
++                _ = stopped => {}
++            }
++        });
++    });
++
++    let key = world.key("alice").path.clone();
++    let first = tokio::spawn({
++        let key = key.clone();
++        async move { ssh(addr, &key, "alice", &[], "echo FIRST", b"").await }
++    });
++    let pid_file = world.dir.path().join("stalled/pid");
++    assert!(eventually(Duration::from_secs(30), || pid_file.exists()).await, "the stand-in session never started");
++    let pid: u32 = fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
++    assert!(
++        eventually(Duration::from_secs(10), || process_state(pid) == Some('T')).await,
++        "the stand-in session did not stop itself"
++    );
++
++    // While the first connection's session process is stopped, another connection is served
++    let second = timeout(Duration::from_secs(20), ssh(addr, &key, "alice", &[], "echo SECOND", b""))
++        .await
++        .expect("a stopped session process stalled the listener");
++    assert_eq!(second.stdout(), "SECOND\n", "{}", second.stderr);
++
++    // The listener gives up on the stopped process, kills it and reaps it
++    let first = timeout(Duration::from_secs(30), first).await.unwrap().unwrap();
++    assert!(!first.status.success() && !first.stdout().contains("FIRST"), "{}", first.stdout());
++    assert!(
++        eventually(Duration::from_secs(10), || process_state(pid).is_none()).await,
++        "the stopped session process was not killed and reaped (state {:?})",
++        process_state(pid)
++    );
++    let _ = stop.send(());
++}
++
++#[tokio::test]
++async fn login_one_account_cannot_hold_every_session() {
++    let world = World::new(&["alice", "bob"]);
++    let config = Config { max_sessions_per_account: 1, ..Config::default() };
++    let (addr, _guard) = world.serve_with(|server| server.with_config(config)).await;
++    let alice = world.key("alice").path.clone();
++
++    let marker = world.home().join("first-is-up");
++    let held = tokio::spawn({
++        let (alice, script) = (alice.clone(), format!("touch '{}'; sleep 10; echo FIRST", marker.display()));
++        async move { ssh(addr, &alice, "alice", &[], &script, b"").await }
++    });
++    assert!(eventually(Duration::from_secs(30), || marker.exists()).await, "the first session never started");
++
++    let second = ssh(addr, &alice, "alice", &[], "echo SECOND", b"").await;
++    assert!(!second.status.success() && !second.stdout().contains("SECOND"), "{}", second.stdout());
++    let other = ssh(addr, &world.key("bob").path, "bob", &[], "echo BOB", b"").await;
++    assert_eq!(other.stdout(), "BOB\n", "another account was refused: {}", other.stderr);
++
++    let held = held.await.unwrap();
++    assert_eq!(held.stdout(), "FIRST\n", "{}", held.stderr);
++    let third = ssh(addr, &alice, "alice", &[], "echo THIRD", b"").await;
++    assert_eq!(third.stdout(), "THIRD\n", "the slot was not released: {}", third.stderr);
++}
++
++#[tokio::test]
++async fn login_session_binary_and_its_directory_must_be_trusted() {
++    let mut world = World::new(&["alice"]);
++    let dir = world.dir.path().join("bin");
++    fs::create_dir(&dir).unwrap();
++    let program = dir.join("oxish-session");
++    fs::write(&program, "#!/bin/sh\n").unwrap();
++    let mode = |path: &Path, mode: u32| fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
++    world.session = Some(program.clone());
++
++    mode(&dir, 0o755);
++    mode(&program, 0o755);
++    assert!(world.server().await.is_ok(), "a trusted session binary was refused");
++    mode(&program, 0o775);
++    assert!(world.server().await.is_err(), "a group-writable session binary was accepted");
++    mode(&program, 0o757);
++    assert!(world.server().await.is_err(), "a world-writable session binary was accepted");
++    mode(&program, 0o644);
++    assert!(world.server().await.is_err(), "a session binary that cannot run was accepted");
++    mode(&program, 0o755);
++    mode(&dir, 0o777);
++    assert!(world.server().await.is_err(), "a session binary in a world-writable directory was accepted");
++    mode(&dir, 0o755);
++
++    let link = dir.join("link");
++    std::os::unix::fs::symlink(&program, &link).unwrap();
++    world.session = Some(link);
++    assert!(world.server().await.is_err(), "a symlinked session binary was accepted");
++
++    if is_root() {
++        world.session = Some(program.clone());
++        rustix::fs::chown(&program, Some(rustix::process::Uid::from_raw(12_345)), None).unwrap();
++        assert!(world.server().await.is_err(), "a session binary owned by another user was accepted");
++    }
++}
++
++#[tokio::test]
++async fn login_allows_an_account_in_group_zero_only_when_root_login_is_allowed() {
++    if !is_root() {
++        eprintln!("skipping: needs root; run in a container (see docs/development.md)");
++        return;
++    }
++    let mut world = World::new(&["alice"]);
++    let me = identity(0);
++    world.passwd = world.passwd.replace(&format!("alice:x:{}:{}::", me.uid, me.gid), &format!("alice:x:{}:0::", me.uid));
++    assert!(world.server().await.is_err(), "an account in group 0 was accepted without the flag");
++
++    world.policy.allow_root = true;
++    let (addr, _guard) = world.serve().await;
++    let run = ssh(addr, &world.key("alice").path, "alice", &[], "id -u; id -g", b"").await;
++    assert_eq!(run.stdout(), format!("{}\n0\n", me.uid), "{}", run.stderr);
++}
 diff --git a/oxish/src/server.rs b/oxish/src/server.rs
-index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d5d7bd69e 100644
+index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c3d15f8fe 100644
 --- a/oxish/src/server.rs
 +++ b/oxish/src/server.rs
 @@ -1,7 +1,7 @@
 -use core::{mem, net::SocketAddr, time::Duration};
-+use core::{mem, net::{IpAddr, SocketAddr}, time::Duration};
++use core::{hash::Hash, mem, net::{IpAddr, SocketAddr}, time::Duration};
  #[cfg(coverage)]
  use std::env;
 -use std::{path::PathBuf, sync::Arc};
@@ -3137,7 +3481,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
  
  use anyhow::Context as _;
  use proto::{HostKeys, ReadState, WriteState, crypto::CryptoProvider};
-@@ -13,44 +13,98 @@ use tokio::{
+@@ -13,54 +13,121 @@ use tokio::{
  };
  use tracing::{debug, instrument, warn};
  
@@ -3146,9 +3490,10 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
  use crate::{
 -    Connection, Error, SessionState, SideState,
 -    authentication::{Authenticated, UserStore, authenticate},
+-    platform::{is_resource_exhaustion, spawn},
 +    Connection, Error, GitPolicy, LoginAccounts, LoginPolicy, LoginSession, SessionState, SideState,
-+    authentication::{Account, Authenticated, Principals, authenticate},
-     platform::{is_resource_exhaustion, spawn},
++    authentication::{Account, Authenticated, Principals, authenticate, check_trusted_executable},
++    platform::{HANDOFF_TIMEOUT, is_resource_exhaustion, spawn},
  };
  
 +/// What the server serves after authentication
@@ -3170,6 +3515,8 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +    sessions: Semaphore,
 +    pre_auth_by_ip: Arc<PerIp>,
 +    sessions_by_ip: Arc<PerIp>,
++    sessions_by_account: Arc<PerKey<String>>,
++    handoff_timeout: Duration,
      config: Config,
  }
  
@@ -3181,12 +3528,11 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
      pub fn new(
 -        store: Box<dyn UserStore>,
 +        account: Account,
-         host_keys: HostKeys,
-         session: PathBuf,
++        host_keys: HostKeys,
++        session: PathBuf,
 +        policy: GitPolicy,
-         provider: &'static dyn CryptoProvider,
-     ) -> anyhow::Result<Self> {
--        Ok(Self {
++        provider: &'static dyn CryptoProvider,
++    ) -> anyhow::Result<Self> {
 +        anyhow::ensure!(
 +            rustix::process::geteuid().as_raw() != 0,
 +            "refusing to run as root; use a dedicated unprivileged Git account"
@@ -3198,16 +3544,20 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +    ///
 +    /// The listener may run as root; each session is served by the `session` binary, which drops
 +    /// to the account (groups, group, user) before it opens a terminal or runs anything. Every
-+    /// account must resolve in the user database and be allowed to log in, or this fails.
++    /// account must resolve in the user database and be allowed to log in, or this fails. The
++    /// session binary and its directory must be owned by the server user or root and not writable
++    /// by others, because a privileged listener executes it.
 +    pub fn login(
 +        accounts: LoginAccounts,
-+        host_keys: HostKeys,
-+        session: PathBuf,
+         host_keys: HostKeys,
+         session: PathBuf,
 +        policy: LoginPolicy,
-+        provider: &'static dyn CryptoProvider,
-+    ) -> anyhow::Result<Self> {
+         provider: &'static dyn CryptoProvider,
+     ) -> anyhow::Result<Self> {
+-        Ok(Self {
 +        policy.validate()?;
 +        anyhow::ensure!(session.is_absolute(), "the session binary path must be absolute");
++        check_trusted_executable(&session)?;
 +        let database = policy.database();
 +        for name in accounts.names() {
 +            let user = database.lookup(name)?;
@@ -3233,6 +3583,8 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +            sessions: Semaphore::new(Config::default().max_sessions),
 +            pre_auth_by_ip: Arc::new(PerIp::new(Config::default().max_unauthenticated_per_ip)),
 +            sessions_by_ip: Arc::new(PerIp::new(Config::default().max_sessions_per_ip)),
++            sessions_by_account: Arc::new(PerKey::new(Config::default().max_sessions_per_account)),
++            handoff_timeout: HANDOFF_TIMEOUT,
              config: Config::default(),
 -        })
 +        }
@@ -3243,10 +3595,18 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +        self.sessions = Semaphore::new(config.max_sessions);
 +        self.pre_auth_by_ip = Arc::new(PerIp::new(config.max_unauthenticated_per_ip));
 +        self.sessions_by_ip = Arc::new(PerIp::new(config.max_sessions_per_ip));
++        self.sessions_by_account = Arc::new(PerKey::new(config.max_sessions_per_account));
          self.config = config;
          self
      }
-@@ -58,9 +112,7 @@ impl Server {
+ 
++    /// Shorten the wait for a session process to acknowledge the handoff (tests)
++    #[cfg(test)]
++    pub(crate) fn with_handoff_timeout(mut self, timeout: Duration) -> Self {
++        self.handoff_timeout = timeout;
++        self
++    }
++
      /// Run the server, accepting connections on the given listener
      ///
      /// Accepts connections from the `listener` and spawns a task for each accepted connection.
@@ -3257,7 +3617,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
      ///
      /// This function never returns: failures to accept a connection are logged and skipped.
      pub async fn run(self: &Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
-@@ -78,9 +130,7 @@ impl Server {
+@@ -78,9 +145,7 @@ impl Server {
                  }
              };
  
@@ -3268,7 +3628,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
  
              let server = self.clone();
              tokio::spawn(async move {
-@@ -88,6 +138,9 @@ impl Server {
+@@ -88,6 +153,9 @@ impl Server {
                  if let Err(err) = stream.set_nodelay(true) {
                      warn!(%addr, %err, "failed to set TCP_NODELAY on connection");
                  }
@@ -3278,11 +3638,11 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
  
                  let _ = server.accept(stream, addr).await;
              });
-@@ -96,6 +149,11 @@ impl Server {
+@@ -96,6 +164,11 @@ impl Server {
  
      #[instrument(name = "handshake", skip(self, stream, addr), fields(addr = %addr))]
      pub(crate) async fn accept(&self, stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
-+        let Some(pre_auth_ip) = PerIp::acquire(&self.pre_auth_by_ip, addr.ip()) else {
++        let Some(pre_auth_ip) = PerKey::acquire(&self.pre_auth_by_ip, addr.ip()) else {
 +            warn!(%addr, "too many unauthenticated connections from this address");
 +            return Err(anyhow::anyhow!("too many unauthenticated connections from this address"));
 +        };
@@ -3290,7 +3650,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
          let authenticating = match self.authenticating.try_acquire() {
              Ok(permit) => permit,
              Err(TryAcquireError::NoPermits) => {
-@@ -116,27 +174,35 @@ impl Server {
+@@ -116,27 +189,47 @@ impl Server {
          };
  
          let future = conn.exchange_keys(&self.host_keys, self.provider);
@@ -3323,9 +3683,21 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 -            let session = Session::new(kx, conn, self.provider, options)?;
 -            return session.run().await.context("session failed");
 -        }
-+        let Some(_session_ip) = PerIp::acquire(&self.sessions_by_ip, addr.ip()) else {
++        let Some(_session_ip) = PerKey::acquire(&self.sessions_by_ip, addr.ip()) else {
 +            warn!(%addr, "too many sessions from this address; closing connection");
 +            return Err(anyhow::anyhow!("too many sessions from this address"));
++        };
++
++        // Login mode only: the Git account is one configured name, so its cap is the global one.
++        let _session_account = match &self.mode {
++            Mode::Login { .. } => match PerKey::acquire(&self.sessions_by_account, user.clone()) {
++                Some(guard) => Some(guard),
++                None => {
++                    warn!(%addr, %user, "too many sessions for this account; closing connection");
++                    return Err(anyhow::anyhow!("too many sessions for this account"));
++                }
++            },
++            Mode::Git { .. } => None,
 +        };
 +
 +        let Ok(_session) = self.sessions.try_acquire() else {
@@ -3335,17 +3707,17 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
  
          let Connection {
              stream,
-@@ -178,7 +244,8 @@ impl Server {
+@@ -178,7 +271,8 @@ impl Server {
              options,
          };
  
 -        let mut child = spawn(state, stream, user, self)
 +        let args = self.session_args(&user).await?;
-+        let mut child = spawn(state, stream, &self.session, &args)
++        let mut child = spawn(state, stream, &self.session, &args, self.handoff_timeout)
              .await
              .context("failed to spawn session process")?;
  
-@@ -193,6 +260,27 @@ impl Server {
+@@ -193,6 +287,31 @@ impl Server {
      }
  }
  
@@ -3358,11 +3730,15 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +                policy.git_dir().as_os_str().to_owned(),
 +            ]),
 +            Mode::Login { policy, .. } => {
-+                let (database, name) = (policy.database(), user.to_owned());
-+                let entry = tokio::task::spawn_blocking(move || database.lookup(&name))
-+                    .await
-+                    .context("user lookup was interrupted")?
-+                    .context("cannot resolve the account")?;
++                let (database, name, session) = (policy.database(), user.to_owned(), self.session.clone());
++                // A root listener executes this binary: check it again at every login, not only at startup.
++                let entry = tokio::task::spawn_blocking(move || {
++                    check_trusted_executable(&session)?;
++                    database.lookup(&name)
++                })
++                .await
++                .context("user lookup was interrupted")?
++                .context("cannot resolve the account")?;
 +                entry.check(policy.allow_root).context("account may not log in")?;
 +                Ok(LoginSession::new(entry, policy, self.session.clone()).to_args())
 +            }
@@ -3373,7 +3749,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
  /// Additional configuration for the SSH server
  ///
  /// Can be used with [`Server::with_config()`] to override the default configuration.
-@@ -200,30 +288,131 @@ impl Server {
+@@ -200,30 +319,137 @@ impl Server {
  #[derive(Debug, Deserialize)]
  #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
  pub struct Config {
@@ -3388,6 +3764,8 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +    pub max_unauthenticated_per_ip: usize,
 +    /// Authenticated connections one source address may hold at once
 +    pub max_sessions_per_ip: usize,
++    /// Login mode: authenticated connections one account may hold at once
++    pub max_sessions_per_account: usize,
  }
  
  impl Default for Config {
@@ -3399,6 +3777,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +            max_sessions: 32,
 +            max_unauthenticated_per_ip: 4,
 +            max_sessions_per_ip: 8,
++            max_sessions_per_account: 8,
          }
      }
  }
@@ -3418,19 +3797,22 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +/// Time to read the identification string and finish key exchange
 +const KEY_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 +
-+/// Counts live connections per source address and refuses more than a fixed number
-+struct PerIp {
++/// Counts live connections per key (a source address, an account) and refuses more than a fixed number
++struct PerKey<K> {
 +    limit: usize,
-+    counts: Mutex<HashMap<IpAddr, usize>>,
++    counts: Mutex<HashMap<K, usize>>,
 +}
 +
-+/// Releases one slot of [`PerIp`] when dropped
-+struct PerIpGuard {
-+    owner: Arc<PerIp>,
-+    ip: IpAddr,
++/// Counts live connections per source address
++type PerIp = PerKey<IpAddr>;
++
++/// Releases one slot of [`PerKey`] when dropped
++struct PerKeyGuard<K: Hash + Eq> {
++    owner: Arc<PerKey<K>>,
++    key: K,
 +}
 +
-+impl PerIp {
++impl<K: Hash + Eq + Clone> PerKey<K> {
 +    fn new(limit: usize) -> Self {
 +        Self {
 +            limit,
@@ -3438,27 +3820,27 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d
 +        }
 +    }
 +
-+    fn acquire(owner: &Arc<Self>, ip: IpAddr) -> Option<PerIpGuard> {
++    fn acquire(owner: &Arc<Self>, key: K) -> Option<PerKeyGuard<K>> {
 +        let mut counts = owner.counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-+        let count = counts.entry(ip).or_insert(0);
++        let count = counts.entry(key.clone()).or_insert(0);
 +        if *count >= owner.limit {
 +            return None;
 +        }
 +        *count += 1;
-+        Some(PerIpGuard {
++        Some(PerKeyGuard {
 +            owner: owner.clone(),
-+            ip,
++            key,
 +        })
 +    }
 +}
 +
-+impl Drop for PerIpGuard {
++impl<K: Hash + Eq> Drop for PerKeyGuard<K> {
 +    fn drop(&mut self) {
 +        let mut counts = self.owner.counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-+        if let Some(count) = counts.get_mut(&self.ip) {
++        if let Some(count) = counts.get_mut(&self.key) {
 +            *count -= 1;
 +            if *count == 0 {
-+                counts.remove(&self.ip);
++                counts.remove(&self.key);
 +            }
 +        }
 +    }
@@ -7176,14 +7558,14 @@ index 0000000000000000000000000000000000000000..7969c6ff1eacec24467f685f3dd3bbc5
 +    }
 +}
 diff --git a/oxish/src/unix/mod.rs b/oxish/src/unix/mod.rs
-index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74cf6a3fcb 100644
+index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..d1b3d5e4abfdb0efc02b04ed6366f13201de42a5 100644
 --- a/oxish/src/unix/mod.rs
 +++ b/oxish/src/unix/mod.rs
 @@ -1,25 +1,20 @@
 -use core::{cmp::Ordering, ffi::c_char, mem::MaybeUninit, ops::ControlFlow};
 -#[cfg(coverage)]
 -use std::env;
-+use core::{cmp::Ordering, mem::MaybeUninit};
++use core::{cmp::Ordering, mem::MaybeUninit, time::Duration};
  use std::{
 -    ffi::{CStr, CString, OsStr},
 -    fs::File,
@@ -7211,9 +7593,14 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74
      io::{Errno, FdFlags},
      net::{
          RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
-@@ -30,129 +25,71 @@ use tokio::{
+@@ -27,132 +22,98 @@ use rustix::{
+     },
+ };
+ use tokio::{
++    io::Interest,
      net::TcpStream,
      process::{Child, Command},
++    time::timeout,
  };
 -use tracing::{debug, error, warn};
 +use tracing::debug;
@@ -7235,6 +7622,20 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74
 -pub(crate) use terminal::Terminal;
  
 -/// Spawn a child process for the authenticated session
++/// Leave the listener's session and process group, and with them its controlling terminal
+ ///
+-/// If [`UserStore::drop_privileges()`] yields true, the child process drops its privileges
+-/// to `user` and changes into that user's home directory before `exec`, so the session (and
+-/// any shell it spawns) runs as the authenticated user. The caller sets this only when the
+-/// server is privileged enough to change the process owner; when it is not, authentication
+-/// is already restricted to the user the server runs as, so there's no need to drop privileges.
++/// The session process of login mode does this before it becomes the account, so that no child
++/// of the account inherits the listener's session or terminal. It fails if the process already
++/// leads a process group (then it would keep the session it has).
++pub fn detach_session() -> io::Result<()> {
++    rustix::process::setsid().map(|_| ()).map_err(io::Error::from)
++}
++
 +/// Become the account a login session serves, before anything else runs in the process
 +pub fn drop_privileges(login: &LoginSession) -> io::Result<()> {
 +    privileges::drop_to(login.user(), login.allow_root())
@@ -7257,16 +7658,21 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74
 +    std::process::Command::new(program).arg0(argv0).args(args).exec()
 +}
 +
++/// How long the session process has to acknowledge the handoff
++///
++/// In login mode the session process already runs as the account when it acknowledges, so the
++/// account can stop or signal it; a listener must never wait on it without a bound.
++pub(crate) const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
++
 +/// Spawn the session process for an authenticated connection
- ///
--/// If [`UserStore::drop_privileges()`] yields true, the child process drops its privileges
--/// to `user` and changes into that user's home directory before `exec`, so the session (and
--/// any shell it spawns) runs as the authenticated user. The caller sets this only when the
--/// server is privileged enough to change the process owner; when it is not, authentication
--/// is already restricted to the user the server runs as, so there's no need to drop privileges.
++///
 +/// The session process runs with an empty environment and receives the connection and the
 +/// negotiated state over a Unix socket. `args` select what it serves: the validated Git policy
 +/// directories, or a login account (the session process then drops to that account itself).
++///
++/// The handoff is asynchronous and bounded by `handoff_timeout`. A session process that has not
++/// acknowledged by then (stopped, stuck or dead) is killed and reaped and the connection is
++/// dropped; no thread of the listener ever blocks on it.
  pub(crate) async fn spawn(
      state: SessionState<ServerHostKey<'_>>,
      stream: TcpStream,
@@ -7274,11 +7680,14 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74
 -    server: &Server,
 +    session: &Path,
 +    args: &[OsString],
++    handoff_timeout: Duration,
  ) -> Result<Child, Error> {
      let tcp = stream.into_std()?;
  
      let (parent, child_sock) = UnixStream::pair()?;
 -    let mut command = Command::new(&server.session);
++    parent.set_nonblocking(true)?;
++    let parent = tokio::net::UnixStream::from_std(parent)?;
 +    let mut command = Command::new(session);
      command
 +        .args(args)
@@ -7376,12 +7785,94 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74
 -        }
 -    }
 -
-     let child = command.spawn()?;
+-    let child = command.spawn()?;
++    let mut child = command.spawn()?;
 +    drop(command);
  
      // The `[u8]` encoding yields the `u32` length prefix followed by the state itself.
      let mut message = Zeroizing::new(vec![0; 4]);
-@@ -197,7 +134,25 @@ pub(crate) async fn spawn(
+@@ -160,6 +121,26 @@ pub(crate) async fn spawn(
+     let payload_len = (message.len() - 4) as u32;
+     message[..4].copy_from_slice(&payload_len.to_be_bytes());
+ 
++    let outcome = match timeout(handoff_timeout, handoff(&parent, &message, &tcp)).await {
++        Ok(result) => result,
++        Err(_) => Err(Error::InvalidState("session process did not acknowledge the handoff in time")),
++    };
++    match outcome {
++        Ok(()) => Ok(child),
++        Err(error) => {
++            // SIGKILL ends a stopped process too; reaping it is prompt and does not block a thread.
++            let _ = child.kill().await;
++            Err(error)
++        }
++    }
++}
++
++/// Send the state and the connection to the session process and wait for its acknowledgement
++async fn handoff(
++    parent: &tokio::net::UnixStream,
++    message: &[u8],
++    tcp: &std::net::TcpStream,
++) -> Result<(), Error> {
+     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
+     let mut control = SendAncillaryBuffer::new(&mut space);
+     let fds = [tcp.as_fd()];
+@@ -167,43 +148,66 @@ pub(crate) async fn spawn(
+ 
+     // The file descriptor rides along with the first message; if the socket buffer cannot
+     // hold the full message, send the rest without ancillary data.
+-    let mut sent = rustix::net::sendmsg(
+-        &parent,
+-        &[IoSlice::new(&message)],
+-        &mut control,
+-        SendFlags::empty(),
+-    )
+-    .map_err(io::Error::from)?;
+-
++    let mut sent = 0;
+     while sent < message.len() {
+-        sent += rustix::net::send(&parent, &message[sent..], SendFlags::empty())
+-            .map_err(io::Error::from)?;
++        let from = sent;
++        sent += parent
++            .async_io(Interest::WRITABLE, || {
++                match from {
++                    0 => rustix::net::sendmsg(parent, &[IoSlice::new(message)], &mut control, SendFlags::empty()),
++                    _ => rustix::net::send(parent, &message[from..], SendFlags::empty()),
++                }
++                .map_err(io::Error::from)
++            })
++            .await?;
+     }
+ 
+     // Keep the connection's file descriptor open until the child acknowledges the
+     // handoff; observed on macOS: closing the parent's copy while the descriptor is
+     // still in flight tears down the connection.
+-    let mut ack = [0];
+-    let mut iov = [IoSliceMut::new(&mut ack)];
+-    let mut control = RecvAncillaryBuffer::default();
+-    let received = rustix::net::recvmsg(&parent, &mut iov, &mut control, RecvFlags::empty())
+-        .map_err(io::Error::from)?;
+-    match received.bytes {
+-        0 => Err(Error::InvalidState(
+-            "session process exited before acknowledging handoff",
+-        )),
+-        _ => Ok(child),
++    let received = parent
++        .async_io(Interest::READABLE, || {
++            let mut ack = [0];
++            let mut iov = [IoSliceMut::new(&mut ack)];
++            let mut control = RecvAncillaryBuffer::default();
++            rustix::net::recvmsg(parent, &mut iov, &mut control, RecvFlags::empty())
++                .map(|received| received.bytes)
++                .map_err(io::Error::from)
++        })
++        .await?;
++    match received {
++        0 => Err(Error::InvalidState("session process exited before acknowledging handoff")),
++        _ => Ok(()),
+     }
  }
  
  /// Resume an SSH session from the session state received over the Unix socket `source`
@@ -7408,7 +7899,15 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74
      let source = rustix::stdio::stdin();
      let mut length = None;
      let mut received = Zeroizing::new(Vec::new());
-@@ -321,289 +276,10 @@ pub fn resume(provider: &'static dyn CryptoProvider) -> Result<Session<TcpStream
+     let mut tcp = None;
+     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
+-    let mut chunk = vec![0; 16_384];
++    // Chunks of the handoff carry the host key: wipe the buffer when it goes out of scope.
++    let mut chunk = Zeroizing::new(vec![0; 16_384]);
+ 
+     loop {
+         let mut control = RecvAncillaryBuffer::new(&mut space);
+@@ -321,289 +325,10 @@ pub fn resume(provider: &'static dyn CryptoProvider) -> Result<Session<TcpStream
          channels: Channels::default(),
          post_quantum_kx,
          options,
@@ -7699,7 +8198,7 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74
  /// Whether an `accept()` error is caused by the process or system running out of resources
  ///
  /// Unlike errors for an individual connection, these persist until resources are released.
-@@ -621,37 +297,18 @@ pub(crate) fn is_resource_exhaustion(error: &io::Error) -> bool {
+@@ -621,37 +346,18 @@ pub(crate) fn is_resource_exhaustion(error: &io::Error) -> bool {
      }
  }
  
@@ -7747,10 +8246,10 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74
  }
 diff --git a/oxish/src/unix/privileges.rs b/oxish/src/unix/privileges.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6824b709862d91a5999e7d43e69c4445bcf8a207
+index 0000000000000000000000000000000000000000..b2c75582c9956d89a773e7715ed641c1057156d5
 --- /dev/null
 +++ b/oxish/src/unix/privileges.rs
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,107 @@
 +use std::io;
 +
 +use crate::login::UserEntry;
@@ -7763,10 +8262,30 @@ index 0000000000000000000000000000000000000000..6824b709862d91a5999e7d43e69c4445
 +/// change identity: it is accepted only when it already is the account.
 +pub(crate) fn drop_to(user: &UserEntry, allow_root: bool) -> io::Result<()> {
 +    user.check(allow_root).map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))?;
++    // Non-dumpable before the credentials change, and again after: the kernel resets the flag to
++    // `fs.suid_dumpable` when the effective IDs change, which is 1 (dumpable) on some systems. The
++    // host key only arrives after both, so no copy of it is ever in a dumpable process.
++    seal()?;
 +    switch(user)?;
++    seal()?;
 +    let _ = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
-+    #[cfg(target_os = "linux")]
-+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
++    Ok(())
++}
++
++/// Mark the process non-dumpable (no `ptrace`, no `/proc/PID/mem`) and prove it
++#[cfg(target_os = "linux")]
++fn seal() -> io::Result<()> {
++    use rustix::process::{DumpableBehavior, dumpable_behavior, set_dumpable_behavior};
++
++    set_dumpable_behavior(DumpableBehavior::NotDumpable)?;
++    match dumpable_behavior()? {
++        DumpableBehavior::NotDumpable => Ok(()),
++        _ => Err(denied("the process could not be made non-dumpable".to_owned())),
++    }
++}
++
++#[cfg(not(target_os = "linux"))]
++fn seal() -> io::Result<()> {
 +    Ok(())
 +}
 +
@@ -7816,8 +8335,14 @@ index 0000000000000000000000000000000000000000..6824b709862d91a5999e7d43e69c4445
 +    if held != wanted {
 +        return Err(denied(format!("supplementary groups of {} are {held:?}, not {wanted:?}", user.name)));
 +    }
-+    if user.uid != 0 && (set_thread_uid(Uid::ROOT).is_ok() || set_thread_gid(Gid::ROOT).is_ok()) {
-+        return Err(denied(format!("root can be regained after dropping to {}", user.name)));
++    // Root can be regained only if an ID the account does not hold can be taken. Probe with an ID
++    // other than the account's own: an account in group 0 (allowed with `--allow-root-login`)
++    // may of course become group 0, and that proves nothing. A uid 0 account is root already.
++    if user.uid != 0 {
++        let other_gid = Gid::from_raw(if user.gid == 0 { 1 } else { 0 });
++        if set_thread_uid(Uid::ROOT).is_ok() || set_thread_gid(other_gid).is_ok() {
++            return Err(denied(format!("root can be regained after dropping to {}", user.name)));
++        }
 +    }
 +    Ok(())
 +}
@@ -7833,7 +8358,7 @@ index 0000000000000000000000000000000000000000..6824b709862d91a5999e7d43e69c4445
 +    }
 +}
 diff --git a/oxish/src/unix/terminal.rs b/oxish/src/unix/terminal.rs
-index 1772ea418fa9dde03813f76891e86f8064a3d532..2d5f82f7f384d8b622603b93f78701a6a5fccd0a 100644
+index 1772ea418fa9dde03813f76891e86f8064a3d532..5388cc7c0750f4a79e6e9d5480b06541a4be9e1b 100644
 --- a/oxish/src/unix/terminal.rs
 +++ b/oxish/src/unix/terminal.rs
 @@ -1,48 +1,37 @@
@@ -7902,7 +8427,7 @@ index 1772ea418fa9dde03813f76891e86f8064a3d532..2d5f82f7f384d8b622603b93f78701a6
          pty::grantpt(&controller)?;
          pty::unlockpt(&controller)?;
  
-@@ -53,133 +42,67 @@ impl Terminal {
+@@ -53,133 +42,70 @@ impl Terminal {
              rustix::fs::Mode::empty(),
          )?;
  
@@ -7915,6 +8440,9 @@ index 1772ea418fa9dde03813f76891e86f8064a3d532..2d5f82f7f384d8b622603b93f78701a6
 -                ws_ypixel: req.height_px as u16,
 -            },
 -        )?;
++        // The slave belongs to the account that opened it (this process, after the privilege drop);
++        // `grantpt` and devpts may give it group `tty` or other write access, so close that.
++        rustix::fs::fchmod(&user_fd, rustix::fs::Mode::from_raw_mode(0o600))?;
 +        termios::tcsetwinsize(&user_fd, winsize(req.cols, req.rows, req.width_px, req.height_px))?;
          apply_terminal_modes(&user_fd, &req.terminal_modes)?;
  

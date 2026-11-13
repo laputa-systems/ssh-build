@@ -41,7 +41,7 @@ mod server;
 pub use server::{Config, Server};
 #[cfg(unix)]
 mod unix;
-pub use platform::{drop_privileges, launch, resume, resume_login};
+pub use platform::{detach_session, drop_privileges, launch, resume, resume_login};
 #[cfg(unix)]
 use unix as platform;
 
