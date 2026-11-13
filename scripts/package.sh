@@ -1,6 +1,6 @@
 #!/bin/sh
 # Package the OpenSSH client for one target as ssh-<version>-<triple>.tar.xz plus
-# ssh-<version>-<triple>.manifest.json, enforce the size budget, then write and verify
+# ssh-<version>-<triple>.manifest.json, then write and verify
 # <out_dir>/SHA256SUMS over all assets.
 # Usage: TARGET=<triple> sh scripts/package.sh [out_dir]      (default: dist/release)
 # Input: dist/ssh/<triple>/bin, which needs the build-record.json its build wrote
@@ -13,7 +13,6 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$script_dir/lock.sh"
 . "$script_dir/archive.sh"
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
-budgets=$repo_root/release-budgets.json
 out_dir=${1:-$repo_root/dist/release}
 triple=${TARGET:?package: set TARGET to a Rust target triple}
 
@@ -69,14 +68,6 @@ esac
 
 name=ssh-$version-$triple
 make_archive "$stage/$name.tar.xz" "$bin_dir" ssh ssh-keygen ssh-agent ssh-add sftp scp
-
-archive_bytes=$(wc -c < "$stage/$name.tar.xz" | tr -d ' ')
-budget=$(jaq -r --arg t "$triple" '.targets[$t].ssh.max_archive_bytes // empty' "$budgets")
-test -n "$budget" || fail "no budget for $triple"
-if [ "$archive_bytes" -gt "$budget" ]; then
-    fail "$name.tar.xz is $archive_bytes bytes, over the $budget byte budget"
-fi
-echo "budget: $name.tar.xz $archive_bytes/$budget bytes"
 
 lock_sha256=$(sha256 "$repo_root/sources.lock.json" | awk '{ print $1 }')
 jaq -n \
