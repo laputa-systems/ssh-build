@@ -26,8 +26,8 @@ rm -rf "$dest"
 mkdir -p "$dest"
 server_target=$root_dir/.work/target-oxish-release/release
 client_target=$root_dir/.work/target-oxish-client-release/release
-cp "$server_target/oxish-server" "$server_target/oxish-session" "$client_target/oxish-keygen" "$dest/"
-if [ -f "$client_target/oxish" ]; then cp "$client_target/oxish" "$dest/"; fi
+cp "$server_target/oxish-server" "$server_target/oxish-session" "$client_target/oxish-keygen" \
+    "$client_target/oxish" "$client_target/oxish-sftp" "$client_target/oxish-scp" "$dest/"
 bins=$(oxish_bins "$dest")
 for bin in $bins; do
     codesign --force -s - "$dest/$bin"

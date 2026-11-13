@@ -11,7 +11,7 @@
     },
     "x86_64-unknown-linux-musl": {
       "ssh": {"max_archive_bytes": 880000},
-      "oxish": {"max_archive_bytes": 1740000}
+      "oxish": {"max_archive_bytes": 2010000}
     }
   }
 }
