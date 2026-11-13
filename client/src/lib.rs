@@ -3,15 +3,20 @@
 pub mod agent;
 pub mod auth;
 pub mod channel;
+pub mod cli;
 pub mod client;
 pub mod cpu;
 pub mod error;
 pub mod exec;
 pub mod host_key;
 pub mod kex;
+pub mod copy;
 pub mod known_hosts;
+pub mod progress;
 pub mod session;
+pub mod sftp;
 pub mod stream;
+pub mod subsystem;
 pub mod terminal;
 pub mod wire;
 

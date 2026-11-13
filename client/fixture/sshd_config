@@ -11,3 +11,4 @@ StrictModes no
 PerSourcePenalties no
 MaxStartups 500:30:1000
 AcceptEnv LANG LC_*
+Subsystem sftp internal-sftp

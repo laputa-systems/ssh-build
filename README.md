@@ -7,7 +7,8 @@ Two optional downloads, built without OpenSSL:
 - **OxiSH** (experimental), Graviola-only SSH tools, as `oxish-<version>-<triple>.tar.xz`:
   `oxish-server`, which by default only serves `git-upload-pack` and `git-receive-pack` and with
   `--mode login` gives configured accounts a shell or command; its `oxish-session` helper; the
-  interactive `oxish` client; and `oxish-keygen` (see [Key generation](#key-generation) and
+  interactive `oxish` client; the `oxish-sftp` and `oxish-scp` file-transfer clients; and
+  `oxish-keygen` (see [File transfer](#file-transfer), [Key generation](#key-generation) and
   `docs/interactive.md`).
 
 Targets (`<triple>`): `aarch64-apple-darwin`, `x86_64-unknown-linux-musl` and
@@ -25,6 +26,39 @@ Without libcrypto OpenSSH offers only `aes128-ctr`, `aes192-ctr`, `aes256-ctr` a
 `chacha20-poly1305@openssh.com` for packet encryption, and only Ed25519 keys. There is no GCM, RSA
 or ECDSA, so hosts that insist on those will not negotiate with this client. `sftp` and `scp` run
 the `ssh` found on `PATH`.
+
+## File transfer
+
+`oxish-sftp` and `oxish-scp` are SFTP version 3 clients that need no OpenSSH. They share the
+identity and trust flags of `oxish`, with no trust on first use: `-i KEY` (an unencrypted Ed25519
+key; default `~/.ssh/id_ed25519`) or `--agent SOCKET --agent-identity SHA256:...`, and exactly one
+of `--host-key SHA256:...` or `--known-hosts PATH`. The port is `-P`. A host-key mismatch ends the
+attempt before authentication, so no credential or data is sent. The server must offer the `sftp`
+subsystem; the client uses `limits@openssh.com`, `posix-rename@openssh.com`, `statvfs@openssh.com`,
+`fsync@openssh.com` and `hardlink@openssh.com` when the server announces them.
+
+```sh
+oxish-scp -P 2222 -i key --host-key SHA256:... [-r] [-p] SOURCE... DEST
+oxish-sftp -P 2222 -i key --known-hosts known_hosts [-b BATCHFILE] [user@]host[:path]
+```
+
+`oxish-scp` copies between local paths and one remote side, written `[user@]host:path` or
+`user@[::1]:path`. A path with a slash before its first colon is local. A relative remote path is
+relative to the account's home directory, and `host:` names the home directory. `-r` copies
+directories, `-p` keeps permission bits and access and modification times, and several sources
+need a directory as destination. Copies between two remote hosts, remote wildcards and local to
+local copies are refused. Symbolic links and special files inside a copied directory are skipped
+with a warning, and a directory entry name the server lists with a slash, `..` or a NUL aborts the
+copy.
+
+`oxish-sftp` reads commands from the terminal, from standard input or from `-b FILE` (`-b -` is
+standard input): `ls [-1alh] [path]`, `cd`, `lcd`, `pwd`, `lpwd`, `lmkdir`, `get [-pr] remote
+[local]`, `put [-pr] local [remote]`, `mkdir`, `rmdir`, `rm`, `rename`, `ln [-s]`, `symlink`,
+`chmod`, `df [-h]`, `help` and `exit`. Words may be quoted with single or double quotes or escaped
+with a backslash; there are no wildcards. In a batch file a failing command stops the batch with
+status 1 unless it starts with `-`. Transfers keep up to 64 requests of 32 to 64 KiB in flight.
+Both tools exit 1 after any failure and print a progress meter only when standard output is a
+terminal.
 
 ## Key generation
 

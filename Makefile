@@ -83,6 +83,8 @@ binaries-oxish:
 				.; \
 			test -x "$$dist/oxish-server"; \
 			test -x "$$dist/oxish-keygen"; \
+			test -x "$$dist/oxish-sftp"; \
+			test -x "$$dist/oxish-scp"; \
 			sh scripts/build-record.sh write oxish "$$dist" $(TARGET) ;; \
 		esac; \
 		echo "wrote $$dist"
