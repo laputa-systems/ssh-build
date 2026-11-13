@@ -253,6 +253,11 @@ pub struct IncomingPacket<'a> {
 }
 
 impl IncomingPacket<'_> {
+    /// The message body after the message type byte
+    pub fn payload(&self) -> &[u8] {
+        self.payload
+    }
+
     /// Check that `self` is one of the expected message types
     pub fn expect(&self, expected: &'static [MessageType]) -> Result<(), ProtoError> {
         match expected.contains(&self.message_type) {

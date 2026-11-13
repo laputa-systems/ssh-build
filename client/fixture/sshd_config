@@ -1,0 +1,13 @@
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers xinfra
+RekeyLimit 1M
+LogLevel VERBOSE
+StrictModes no
+PerSourcePenalties no
+MaxStartups 500:30:1000
+AcceptEnv LANG LC_*

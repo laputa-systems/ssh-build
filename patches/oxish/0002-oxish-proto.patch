@@ -91,10 +91,7 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..1a1b8feb33f7399fe593c3815eeaca20
 -            value: has_command,
 -            next,
 -        } = bool::decode(bytes)?;
-+        let Some((&tag, next)) = bytes.split_first() else {
-+            return Err(ProtoError::InvalidPacket("truncated key options"));
-+        };
- 
+-
 -        let (command, next) = match has_command {
 -            true => {
 -                let Decoded {
@@ -104,7 +101,10 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..1a1b8feb33f7399fe593c3815eeaca20
 -
 -                let command = str::from_utf8(command)
 -                    .map_err(|_| ProtoError::InvalidPacket("invalid UTF-8 in forced command"))?;
--
++        let Some((&tag, next)) = bytes.split_first() else {
++            return Err(ProtoError::InvalidPacket("truncated key options"));
++        };
+ 
 -                (Some(command.to_owned()), next)
 -            }
 -            false => (None, next),
@@ -349,8 +349,54 @@ index f8328cc4a1b8f4b76af824f430a2473eeb0578f8..f64f11e6373544981bd443e32ac891ff
  /// The `SSH_MSG_CHANNEL_WINDOW_ADJUST` message
  ///
  /// See <https://www.rfc-editor.org/rfc/rfc4254#section-5.2>.
+diff --git a/oxish-proto/src/crypto.rs b/oxish-proto/src/crypto.rs
+index 9e9c247bd9348056685a2cb13173af4324d6f566..5abad11581105eb9a1431fde078d63d751d3cb85 100644
+--- a/oxish-proto/src/crypto.rs
++++ b/oxish-proto/src/crypto.rs
+@@ -143,7 +143,8 @@ pub struct KeySourceSide {
+ }
+ 
+ impl KeySourceSide {
+-    pub(crate) fn client_to_server(
++    /// Derive the client-to-server direction from the exchange hash and session id.
++    pub fn client_to_server(
+         derivation: &KeyDerivation,
+         algorithm: EncryptionAlgorithm<'static>,
+     ) -> Result<Self, CryptoError> {
+@@ -162,7 +163,8 @@ impl KeySourceSide {
+         })
+     }
+ 
+-    pub(crate) fn server_to_client(
++    /// Derive the server-to-client direction from the exchange hash and session id.
++    pub fn server_to_client(
+         derivation: &KeyDerivation,
+         algorithm: EncryptionAlgorithm<'static>,
+     ) -> Result<Self, CryptoError> {
+@@ -211,12 +213,16 @@ pub struct KeyLengths {
+     pub iv_len: usize,
+ }
+ 
+-pub(crate) struct KeyDerivation {
+-    pub(crate) hash: &'static dyn Hash,
++/// The inputs to the SSH key derivation function
++pub struct KeyDerivation {
++    /// Hash implementation selected by the key exchange algorithm
++    pub hash: &'static dyn Hash,
+     /// The shared secret `K`, encoded exactly as fed into the exchange hash
+-    pub(crate) shared_secret: SharedSecret,
+-    pub(crate) exchange_hash: Digest,
+-    pub(crate) session_id: Digest,
++    pub shared_secret: SharedSecret,
++    /// The exchange hash `H`
++    pub exchange_hash: Digest,
++    /// The session identifier, equal to the first exchange hash
++    pub session_id: Digest,
+ }
+ 
+ impl KeyDerivation {
 diff --git a/oxish-proto/src/host_keys.rs b/oxish-proto/src/host_keys.rs
-index ee5f8758753bb060f8fd2ce06a1b8b18da9cbe05..abc4efe734e499b0d1bfbf6155baf481cdb9b37f 100644
+index ee5f8758753bb060f8fd2ce06a1b8b18da9cbe05..6a582e47fd0c65550a8dcc0366df8018045c9933 100644
 --- a/oxish-proto/src/host_keys.rs
 +++ b/oxish-proto/src/host_keys.rs
 @@ -154,6 +154,11 @@ pub struct OpenSshKeyV1 {
@@ -365,6 +411,33 @@ index ee5f8758753bb060f8fd2ce06a1b8b18da9cbe05..abc4efe734e499b0d1bfbf6155baf481
      /// Create an OpenSSH-format private key file holding the given keys
      ///
      /// Returns `None` if `keys` is empty, as the format requires at least one key.
+@@ -260,7 +265,7 @@ impl FromStr for OpenSshKeyV1 {
+             return Err(ProtoError::InvalidHostKey("missing PEM header"));
+         }
+ 
+-        let mut base64 = Zeroizing::new(String::new());
++        let mut base64 = Zeroizing::new(String::with_capacity(input.len()));
+         let mut footer = false;
+         for line in lines {
+             if line == "-----END OPENSSH PRIVATE KEY-----" {
+@@ -275,11 +280,14 @@ impl FromStr for OpenSshKeyV1 {
+             return Err(ProtoError::InvalidHostKey("missing PEM footer"));
+         }
+ 
+-        let Ok(blob) = data_encoding::BASE64.decode(base64.as_bytes()) else {
++        let Ok(size) = data_encoding::BASE64.decode_len(base64.len()) else {
+             return Err(ProtoError::InvalidHostKey("invalid base64"));
+         };
+-
+-        let blob = Zeroizing::new(blob);
++        let mut blob = Zeroizing::new(vec![0; size]);
++        let Ok(size) = data_encoding::BASE64.decode_mut(base64.as_bytes(), &mut blob) else {
++            return Err(ProtoError::InvalidHostKey("invalid base64"));
++        };
++        blob.truncate(size);
+         let Some(next) = blob.strip_prefix(b"openssh-key-v1\0") else {
+             return Err(ProtoError::InvalidHostKey("invalid magic"));
+         };
 diff --git a/oxish-proto/src/io.rs b/oxish-proto/src/io.rs
 index ac4e03f472a457433e0269d0f4ead770da5e0718..5e6b7d16c1808265068c1d7006be621e4ea00dcb 100644
 --- a/oxish-proto/src/io.rs
@@ -402,7 +475,7 @@ index ac4e03f472a457433e0269d0f4ead770da5e0718..5e6b7d16c1808265068c1d7006be621e
  
      /// Reset the send sequence number to zero
 diff --git a/oxish-proto/src/key_exchange.rs b/oxish-proto/src/key_exchange.rs
-index a8b133756294bb31f21a09eba8263f90b73db249..0ba082e2bd8ed766c94a47ba014308fbe2a9e9d0 100644
+index a8b133756294bb31f21a09eba8263f90b73db249..f7a1230edf815333c0d76e1dcfa4e9492aa59052 100644
 --- a/oxish-proto/src/key_exchange.rs
 +++ b/oxish-proto/src/key_exchange.rs
 @@ -86,6 +86,14 @@ impl<'a> InitialKeyExchangeState<'a> {
@@ -420,8 +493,17 @@ index a8b133756294bb31f21a09eba8263f90b73db249..0ba082e2bd8ed766c94a47ba014308fb
                  write.encode_kx(&local, Some(&mut kx.exchange))?;
                  *self = Self::AwaitingEcdhInit {
                      kx,
+@@ -854,7 +862,7 @@ impl Encode for TaggedSignature<'_> {
+ ///
+ /// Leading zero bytes are stripped, and a single zero byte is prepended when the
+ /// most significant bit is set so the value is interpreted as positive.
+-pub(crate) fn encode_mpint(value: &[u8], buf: &mut Vec<u8>) {
++pub fn encode_mpint(value: &[u8], buf: &mut Vec<u8>) {
+     let trimmed = match value.iter().position(|&b| b != 0) {
+         Some(first) => &value[first..],
+         None => &[],
 diff --git a/oxish-proto/src/lib.rs b/oxish-proto/src/lib.rs
-index ea2e4f793afdb925cad8192d28ba79048ac91e06..734c70613e6e9cc99a74b56496432e6e923f1a23 100644
+index ea2e4f793afdb925cad8192d28ba79048ac91e06..a093f83ccdb4bf247dabafd07aa308a2786487a4 100644
 --- a/oxish-proto/src/lib.rs
 +++ b/oxish-proto/src/lib.rs
 @@ -3,7 +3,8 @@
@@ -461,7 +543,19 @@ index ea2e4f793afdb925cad8192d28ba79048ac91e06..734c70613e6e9cc99a74b56496432e6e
          }))
      }
  }
-@@ -747,3 +755,31 @@ pub const MAX_PACKET_LEN: u32 = 64 * 1024;
+@@ -245,6 +253,11 @@ pub struct IncomingPacket<'a> {
+ }
+ 
+ impl IncomingPacket<'_> {
++    /// The message body after the message type byte
++    pub fn payload(&self) -> &[u8] {
++        self.payload
++    }
++
+     /// Check that `self` is one of the expected message types
+     pub fn expect(&self, expected: &'static [MessageType]) -> Result<(), ProtoError> {
+         match expected.contains(&self.message_type) {
+@@ -747,3 +760,31 @@ pub const MAX_PACKET_LEN: u32 = 64 * 1024;
  ///
  /// See <https://www.rfc-editor.org/rfc/rfc4253#section-4.2>.
  pub const PROTOCOL: &str = "2.0";

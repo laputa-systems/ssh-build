@@ -4,3 +4,5 @@ dist/
 out/
 zipcheck/
 stage/
+/vendor/oxish/target/
+/client/target/
