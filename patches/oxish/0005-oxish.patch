@@ -3468,7 +3468,7 @@ index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0c
 +    assert_eq!(run.stdout(), format!("{}\n0\n", me.uid), "{}", run.stderr);
 +}
 diff --git a/oxish/src/server.rs b/oxish/src/server.rs
-index 22f918accf1bad482547186e8bcb6c26fb5af238..2f625c191d9ecc676ac8012b72b9f16508798acc 100644
+index 22f918accf1bad482547186e8bcb6c26fb5af238..7d4c017e64602d0f4d139033b1e254a441681026 100644
 --- a/oxish/src/server.rs
 +++ b/oxish/src/server.rs
 @@ -1,7 +1,7 @@
@@ -3602,7 +3602,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..2f625c191d9ecc676ac8012b72b9f165
      }
  
 +    /// Shorten the wait for a session process to acknowledge the handoff (tests)
-+    #[cfg(test)]
++    #[cfg(all(test, target_os = "linux"))]
 +    pub(crate) fn with_handoff_timeout(mut self, timeout: Duration) -> Self {
 +        self.handoff_timeout = timeout;
 +        self
@@ -7559,7 +7559,7 @@ index 0000000000000000000000000000000000000000..7969c6ff1eacec24467f685f3dd3bbc5
 +    }
 +}
 diff --git a/oxish/src/unix/mod.rs b/oxish/src/unix/mod.rs
-index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..0dcb20f4652201dc63e58e3530c38dd4e8d0d6b3 100644
+index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..2b2f8df02e30e6a2cc231dead8784f1ba7fc75df 100644
 --- a/oxish/src/unix/mod.rs
 +++ b/oxish/src/unix/mod.rs
 @@ -1,25 +1,20 @@
@@ -7621,7 +7621,7 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..0dcb20f4652201dc63e58e3530c38dd4
 +mod privileges;
  mod terminal;
 -pub(crate) use terminal::Terminal;
-+#[cfg(test)]
++#[cfg(all(test, target_os = "linux"))]
 +pub(crate) use terminal::open_controller;
  
 -/// Spawn a child process for the authenticated session

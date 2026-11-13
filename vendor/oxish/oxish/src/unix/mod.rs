@@ -39,7 +39,7 @@ mod exec;
 pub(crate) use exec::{Output, Process, STOP_LIMIT};
 mod privileges;
 mod terminal;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) use terminal::open_controller;
 
 /// Leave the listener's session and process group, and with them its controlling terminal

@@ -119,7 +119,7 @@ impl Server {
     }
 
     /// Shorten the wait for a session process to acknowledge the handoff (tests)
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn with_handoff_timeout(mut self, timeout: Duration) -> Self {
         self.handoff_timeout = timeout;
         self
