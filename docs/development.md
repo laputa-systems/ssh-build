@@ -96,12 +96,14 @@ and the session-binary owner check) need root: build the test executable and `ox
 with the client to a world-readable directory, and run it in a container (`OXISH_TEST_SESSION_BIN`
 names the session binary). The session binary must be root-owned there, so copy it inside the
 container and `chown` it; mounted host files belong to your user and are refused. The ptrace checks of
-`login_session_process_is_sealed_from_the_account` run when `python3` is on `PATH`:
+`login_session_process_is_sealed_from_the_account` run when `python3` is on `PATH`. The SFTP tests
+(`login_sftp_`, `login_scp_`) run the `sftp` and `scp` found next to the `ssh` they use, and `sha256sum`;
+the account-ownership one (`login_sftp_files_belong_to_the_account_…`) only runs as root:
 
 ```sh
 EXE=$(cargo test --locked --manifest-path vendor/oxish/Cargo.toml -p oxish --lib --no-run 2>&1 | sed -n 's/.*lib.rs (\(.*\))/\1/p')
 mkdir -p /tmp/rt/bin && cp "$EXE" /tmp/rt/oxish-tests && cp vendor/oxish/target/debug/oxish-session /tmp/rt/ \
-    && cp dist/ssh/<triple>/bin/ssh /tmp/rt/bin/ && chmod -R a+rX /tmp/rt
+    && cp dist/ssh/<triple>/bin/{ssh,sftp,scp} /tmp/rt/bin/ && chmod -R a+rX /tmp/rt
 docker run --rm -v /tmp/rt:/rt:ro alpine:3.24 sh -c 'mkdir /opt/rt && cp -r /rt/. /opt/rt/ && chown -R 0:0 /opt/rt \
     && chmod -R go-w /opt/rt && OXISH_TEST_SESSION_BIN=/opt/rt/oxish-session PATH=/opt/rt/bin:/usr/bin:/bin /opt/rt/oxish-tests login_'
 ```

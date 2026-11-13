@@ -125,10 +125,23 @@ flat files `--passwd-file` (default `/etc/passwd`) and `--group-file` (default `
 is no NSS. The account's own login shell from `passwd` runs the session: `shell` and `pty-req` start
 it as a login shell (`argv[0]` begins with `-`), `exec` runs `shell -c COMMAND` exactly as OpenSSH
 does, with or without a terminal. `window-change`, `exit-status`, `exit-signal` and EOF work as in
-OpenSSH. Port forwarding, agent and X11 forwarding, subsystems (SFTP) and other `env` requests are
-refused. The environment is `TERM` (only with a terminal, plain terminfo names only), `HOME`,
+OpenSSH. Port forwarding, agent and X11 forwarding, subsystems other than `sftp` and other `env`
+requests are refused. The environment is `TERM` (only with a terminal, plain terminfo names only), `HOME`,
 `USER`, `LOGNAME`, `SHELL` and `PATH` (`--login-path`, default `/usr/local/bin:/usr/bin:/bin`);
 `--accept-locale` also passes the client's `LANG` and `LC_*`.
+
+**SFTP and scp.** The `sftp` subsystem works, so OpenSSH `sftp` and `scp` (which uses SFTP since
+OpenSSH 9) can transfer files with a login-mode account: `sftp -P 2222 alice@host`,
+`scp -P 2222 -r dir alice@host:`. Git mode refuses every subsystem. The protocol (SFTP version 3
+with the `posix-rename`, `statvfs`, `fstatvfs`, `hardlink`, `fsync`, `lsetstat`, `limits` and
+`expand-path` OpenSSH extensions) is spoken by `oxish-session` itself, after it has become the
+account, so every file operation runs with the account's user, groups and `umask` 022; no
+`sftp-server` is executed and the shell is not involved (`nologin` shells are refused as for every
+login). Relative paths start in the account's home directory. There is no chroot: the account
+reaches whatever its credentials allow, as with OpenSSH's default. A request has at most
+255 KiB of data, a packet at most 256 KiB, a session 256 open handles and 1024 queued requests;
+a malformed packet closes the channel. An SFTP session counts toward the 4 live commands of a
+connection. Files on `procfs` are never opened through SFTP (see `SECURITY.md`).
 
 Run as root, the listener only accepts and authenticates. Each authenticated connection is handed to
 `oxish-session`, which sets supplementary groups, group and user to the account, proves that root

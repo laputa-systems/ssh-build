@@ -278,6 +278,17 @@ impl<'a> TryFrom<IncomingPacket<'a>> for ChannelRequest<'a> {
                     }
                 }
             }
+            b"subsystem" => {
+                let Decoded { value, next } = Subsystem::decode(next)?;
+                match next.is_empty() {
+                    true => ChannelRequestType::Subsystem(value),
+                    false => {
+                        return Err(ProtoError::InvalidPacket(
+                            "extra data in subsystem channel request",
+                        ));
+                    }
+                }
+            }
             b"auth-agent-req@openssh.com" => ChannelRequestType::AuthAgentReq,
             _ => match str::from_utf8(r#type) {
                 Ok(r#type) => ChannelRequestType::Unknown(r#type),
@@ -356,6 +367,10 @@ pub enum ChannelRequestType<'a> {
     ///
     /// As defined in <https://www.rfc-editor.org/rfc/rfc4254#section-6.5>.
     Exec(Exec<'a>),
+    /// `subsystem`, start a named subsystem such as `sftp`
+    ///
+    /// As defined in <https://www.rfc-editor.org/rfc/rfc4254#section-6.5>.
+    Subsystem(Subsystem<'a>),
     /// `window-change`, report new terminal dimensions
     ///
     /// As defined in <https://www.rfc-editor.org/rfc/rfc4254#section-6.7>.
@@ -374,6 +389,7 @@ impl ChannelRequestType<'_> {
             Self::Env(_) => "env",
             Self::Exec(_) => "exec",
             Self::Shell => "shell",
+            Self::Subsystem(_) => "subsystem",
             Self::WindowChange(_) => "window-change",
             Self::Unknown(name) => name,
         }
@@ -452,6 +468,27 @@ impl<'a> Decode<'a> for Env<'a> {
 
         Ok(Decoded {
             value: Env { name, value },
+            next,
+        })
+    }
+}
+
+/// Type-specific data for the `subsystem` channel request
+///
+/// See <https://www.rfc-editor.org/rfc/rfc4254#section-6.5>.
+#[derive(Debug)]
+pub struct Subsystem<'a> {
+    /// The subsystem name
+    pub name: &'a str,
+}
+
+impl<'a> Decode<'a> for Subsystem<'a> {
+    fn decode(input: &'a [u8]) -> Result<Decoded<'a, Self>, ProtoError> {
+        let Decoded { value: name, next } = <&[u8]>::decode(input)?;
+        let name = str::from_utf8(name)
+            .map_err(|_| ProtoError::InvalidPacket("invalid UTF-8 in subsystem name"))?;
+        Ok(Decoded {
+            value: Subsystem { name },
             next,
         })
     }

@@ -1,7 +1,10 @@
 use core::{net::Ipv4Addr, net::SocketAddr, time::Duration};
 use std::{
     env, fs,
-    os::{fd::OwnedFd, unix::fs::PermissionsExt as _},
+    os::{
+        fd::OwnedFd,
+        unix::fs::{MetadataExt as _, PermissionsExt as _, symlink},
+    },
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::Arc,
@@ -189,23 +192,80 @@ fn ssh_program() -> PathBuf {
         .expect("no ssh client for the tests")
 }
 
+const CLIENT_OPTIONS: [&str; 14] = [
+    "-F", "/dev/null",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "GlobalKnownHostsFile=/dev/null",
+    "-o", "IdentitiesOnly=yes",
+    "-o", "BatchMode=yes",
+    "-o", "LogLevel=ERROR",
+];
+
 /// The test ssh client for one account, with `options` ahead of the destination
 fn ssh_command(addr: SocketAddr, key: &Path, user: &str, options: &[&str]) -> Command {
     let mut command = Command::new(ssh_program());
     command.args(options);
-    command.args([
-        "-F", "/dev/null",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "GlobalKnownHostsFile=/dev/null",
-        "-o", "IdentitiesOnly=yes",
-        "-o", "BatchMode=yes",
-        "-o", "LogLevel=ERROR",
-    ]);
+    command.args(CLIENT_OPTIONS);
     command.args(["-p".to_owned(), addr.port().to_string(), "-i".to_owned(), key.display().to_string()]);
     command.arg(format!("{user}@127.0.0.1"));
     command.env_remove("SSH_AUTH_SOCK").kill_on_drop(true);
     command
+}
+
+/// `sftp` or `scp` from the directory of the test ssh client, which they run as their transport
+fn file_transfer_program(name: &str) -> PathBuf {
+    let sibling = ssh_program().with_file_name(name);
+    if sibling.is_file() {
+        return sibling;
+    }
+    env::split_paths(&env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("no {name} client for the tests"))
+}
+
+fn transfer_command(program: &str, addr: SocketAddr, key: &Path) -> Command {
+    let mut command = Command::new(file_transfer_program(program));
+    command.args(CLIENT_OPTIONS);
+    command.args(["-S".to_owned(), ssh_program().display().to_string()]);
+    command.args(["-P".to_owned(), addr.port().to_string(), "-i".to_owned(), key.display().to_string()]);
+    command.env_remove("SSH_AUTH_SOCK").kill_on_drop(true);
+    command
+}
+
+/// Run `sftp -b` with these commands as `user`, in `local` on this side
+async fn sftp_batch(addr: SocketAddr, key: &Path, user: &str, local: &Path, commands: &[&str]) -> Run {
+    let batch = local.with_extension("batch");
+    fs::write(&batch, format!("lcd {}\n{}\n", local.display(), commands.join("\n"))).unwrap();
+    let mut command = transfer_command("sftp", addr, key);
+    command.arg("-b").arg(&batch).arg(format!("{user}@127.0.0.1"));
+    finish(command, b"").await
+}
+
+/// Run `scp -q` with these arguments (remote names are `alice@127.0.0.1:…`)
+async fn scp(addr: SocketAddr, key: &Path, args: &[&str]) -> Run {
+    let mut command = transfer_command("scp", addr, key);
+    command.arg("-q").args(args);
+    finish(command, b"").await
+}
+
+fn pattern(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+async fn sha256(path: &Path) -> String {
+    let output = Command::new("sha256sum").arg(path).output().await.unwrap();
+    assert!(output.status.success(), "sha256sum {}: {}", path.display(), String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(output.stdout).unwrap().split_whitespace().next().unwrap().to_owned()
 }
 
 struct Run {
@@ -369,7 +429,7 @@ async fn login_locale_variables_pass_only_when_allowed() {
 }
 
 #[tokio::test]
-async fn login_refuses_forwarding_and_subsystems() {
+async fn login_refuses_forwarding_and_other_subsystems() {
     let world = World::new(&["alice"]);
     let (addr, _guard) = world.serve().await;
     let key = &world.key("alice").path;
@@ -378,9 +438,11 @@ async fn login_refuses_forwarding_and_subsystems() {
     assert!(!run.status.success(), "stdio forwarding was accepted");
     assert!(run.stderr.contains("forwarding failed"), "{}", run.stderr);
 
-    let run = ssh(addr, key, "alice", &["-s"], "sftp", b"").await;
-    assert!(!run.status.success(), "a subsystem was accepted");
-    assert!(run.stdout.is_empty());
+    for name in ["shell", "netconf", "sftp-server", "SFTP", "sftp "] {
+        let run = ssh(addr, key, "alice", &["-s"], name, b"").await;
+        assert!(!run.status.success(), "the subsystem {name:?} was accepted");
+        assert!(run.stdout.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -818,7 +880,7 @@ async fn login_session_binary_and_its_directory_must_be_trusted() {
     mode(&dir, 0o755);
 
     let link = dir.join("link");
-    std::os::unix::fs::symlink(&program, &link).unwrap();
+    symlink(&program, &link).unwrap();
     world.session = Some(link);
     assert!(world.server().await.is_err(), "a symlinked session binary was accepted");
 
@@ -844,4 +906,235 @@ async fn login_allows_an_account_in_group_zero_only_when_root_login_is_allowed()
     let (addr, _guard) = world.serve().await;
     let run = ssh(addr, &world.key("alice").path, "alice", &[], "id -u; id -g", b"").await;
     assert_eq!(run.stdout(), format!("{}\n0\n", me.uid), "{}", run.stderr);
+}
+
+fn local_dir(world: &World) -> PathBuf {
+    let local = world.dir.path().join("local");
+    fs::create_dir_all(&local).unwrap();
+    local
+}
+
+#[tokio::test]
+async fn login_sftp_batch_commands_manage_files() {
+    let world = World::new(&["alice"]);
+    let (addr, _guard) = world.serve().await;
+    let key = &world.key("alice").path;
+    let local = local_dir(&world);
+    let home = world.home();
+    let small = pattern(70_000, 1);
+    fs::write(local.join("small.txt"), &small).unwrap();
+    let stamp = std::time::UNIX_EPOCH + Duration::from_secs(1_500_000_000);
+    fs::File::options().write(true).open(local.join("small.txt")).unwrap().set_modified(stamp).unwrap();
+
+    let run = sftp_batch(addr, key, "alice", &local, &[
+        "pwd",
+        "put small.txt up.txt",
+        "get up.txt got.txt",
+        "mkdir d1",
+        "rename up.txt d1/moved.txt",
+        "chmod 600 d1/moved.txt",
+        "ln d1/moved.txt hard.txt",
+        "ln -s d1/moved.txt soft.txt",
+        "put -p small.txt kept.txt",
+        "ls -l d1",
+        "df",
+        "mkdir gone",
+        "rmdir gone",
+        "rm soft.txt",
+    ]).await;
+    assert!(run.status.success(), "{}\n{}", run.stdout(), run.stderr);
+    let out = run.stdout();
+    assert!(out.contains(&format!("Remote working directory: {}", fs::canonicalize(&home).unwrap().display())), "{out}");
+    assert!(out.lines().any(|line| line.starts_with("-rw-------") && line.ends_with("moved.txt")), "{out}");
+    assert!(out.contains("Avail"), "{out}");
+
+    assert_eq!(fs::read(local.join("got.txt")).unwrap(), small);
+    assert_eq!(fs::read(home.join("d1/moved.txt")).unwrap(), small);
+    assert_eq!(fs::metadata(home.join("d1/moved.txt")).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(fs::metadata(home.join("hard.txt")).unwrap().nlink(), 2);
+    assert!(!home.join("up.txt").exists());
+    assert!(!home.join("soft.txt").exists() && !home.join("gone").exists());
+    assert_eq!(fs::metadata(home.join("kept.txt")).unwrap().modified().unwrap(), stamp);
+
+    let run = sftp_batch(addr, key, "alice", &local, &[
+        "symlink d1/moved.txt via-link",
+        "get via-link via-link.txt",
+        "cd d1",
+        "pwd",
+        "ls",
+        "put small.txt ../dup.txt",
+        "-get missing.txt",
+        "get moved.txt copy.txt",
+    ]).await;
+    assert!(run.status.success(), "{}\n{}", run.stdout(), run.stderr);
+    assert_eq!(fs::read_link(home.join("via-link")).unwrap(), Path::new("d1/moved.txt"));
+    assert_eq!(fs::read(local.join("via-link.txt")).unwrap(), small);
+    assert_eq!(fs::read(home.join("dup.txt")).unwrap(), small);
+    assert_eq!(fs::read(local.join("copy.txt")).unwrap(), small);
+    assert!(run.stdout().contains("moved.txt"), "{}", run.stdout());
+
+    for (commands, message) in [
+        (&["get missing.txt"][..], "not found"),
+        (&["put small.txt nodir/up.txt"][..], "No such file"),
+        (&["mkdir d1"][..], "remote mkdir"),
+        (&["rmdir d1"][..], "remote rmdir"),
+        (&["rm d1"][..], "remote delete"),
+        (&["rename missing.txt other.txt"][..], "remote rename"),
+    ] {
+        let run = sftp_batch(addr, key, "alice", &local, commands).await;
+        assert!(!run.status.success(), "{commands:?} succeeded");
+        assert!(run.stderr.contains(message) || run.stdout().contains(message), "{commands:?}: {}", run.stderr);
+    }
+}
+
+#[tokio::test]
+async fn login_scp_copies_a_large_file_and_a_directory_tree_both_ways() {
+    let world = World::new(&["alice"]);
+    let (addr, _guard) = world.serve().await;
+    let key = &world.key("alice").path;
+    let local = local_dir(&world);
+    let home = world.home();
+
+    let big = local.join("big.bin");
+    fs::write(&big, pattern(10 * 1024 * 1024, 7)).unwrap();
+    let run = scp(addr, key, &[big.to_str().unwrap(), "alice@127.0.0.1:big.bin"]).await;
+    assert!(run.status.success(), "{}", run.stderr);
+    let back = local.join("back.bin");
+    let run = scp(addr, key, &["alice@127.0.0.1:big.bin", back.to_str().unwrap()]).await;
+    assert!(run.status.success(), "{}", run.stderr);
+
+    let original = sha256(&big).await;
+    assert_eq!(sha256(&home.join("big.bin")).await, original, "the uploaded file differs");
+    assert_eq!(sha256(&back).await, original, "the downloaded file differs");
+    let remote = ssh(addr, key, "alice", &[], "sha256sum big.bin", b"").await;
+    assert!(remote.stdout().starts_with(&original), "{}", remote.stdout());
+    assert_eq!(fs::metadata(&back).unwrap().len(), 10 * 1024 * 1024);
+
+    let tree = local.join("tree");
+    fs::create_dir_all(tree.join("sub/deep")).unwrap();
+    fs::write(tree.join("a.txt"), b"alpha\n").unwrap();
+    fs::write(tree.join("sub/b.txt"), pattern(5000, 2)).unwrap();
+    fs::write(tree.join("sub/deep/c.bin"), pattern(200_000, 3)).unwrap();
+    fs::write(tree.join("sub/empty"), b"").unwrap();
+    symlink("a.txt", tree.join("link-to-a")).unwrap();
+    fs::set_permissions(tree.join("a.txt"), fs::Permissions::from_mode(0o640)).unwrap();
+
+    let run = scp(addr, key, &["-r", tree.to_str().unwrap(), "alice@127.0.0.1:copy"]).await;
+    assert!(run.status.success(), "{}", run.stderr);
+    for name in ["a.txt", "sub/b.txt", "sub/deep/c.bin", "sub/empty"] {
+        assert_eq!(fs::read(home.join("copy").join(name)).unwrap(), fs::read(tree.join(name)).unwrap(), "{name}");
+    }
+    assert_eq!(fs::read(home.join("copy/link-to-a")).unwrap(), b"alpha\n");
+    assert_eq!(fs::metadata(home.join("copy/a.txt")).unwrap().permissions().mode() & 0o777, 0o640);
+
+    let out = local.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let run = scp(addr, key, &["-r", "alice@127.0.0.1:copy", out.to_str().unwrap()]).await;
+    assert!(run.status.success(), "{}", run.stderr);
+    for name in ["a.txt", "sub/b.txt", "sub/deep/c.bin", "sub/empty"] {
+        assert_eq!(fs::read(out.join("copy").join(name)).unwrap(), fs::read(tree.join(name)).unwrap(), "{name}");
+    }
+
+    let run = scp(addr, key, &["alice@127.0.0.1:missing.bin", local.to_str().unwrap()]).await;
+    assert!(!run.status.success());
+    assert!(run.stderr.contains("No such file") || run.stderr.contains("not found"), "{}", run.stderr);
+}
+
+#[tokio::test]
+async fn login_sftp_speaks_only_the_subsystem_protocol() {
+    let world = World::new(&["alice"]);
+    let (addr, _guard) = world.serve().await;
+    let key = &world.key("alice").path;
+
+    let init = [&[0, 0, 0, 5, 1][..], &[0, 0, 0, 3]].concat();
+    let run = ssh(addr, key, "alice", &["-s"], "sftp", &init).await;
+    assert!(run.status.success(), "ending the stream ends the session: {}", run.stderr);
+    assert_eq!(&run.stdout[..9], [0, 0, 0, run.stdout[3], 2, 0, 0, 0, 3], "{:?}", run.stdout);
+    assert!(String::from_utf8_lossy(&run.stdout).contains("limits@openssh.com"));
+
+    for garbage in [
+        &[0xff, 0xff, 0xff, 0xff, 1][..],
+        &[0, 0, 0, 0][..],
+        &[0, 0, 0, 5, 3, 0, 0, 0, 1][..],
+        b"SSH-2.0-not-sftp\r\n",
+    ] {
+        let run = ssh(addr, key, "alice", &["-s"], "sftp", garbage).await;
+        assert_eq!(run.status.code(), Some(1), "{garbage:?}: {}", run.stderr);
+        assert!(run.stdout.is_empty(), "{garbage:?} got {:?}", run.stdout);
+    }
+
+    let run = ssh(addr, key, "alice", &["-tt", "-s"], "sftp", &init).await;
+    assert!(run.stdout.is_empty() || !run.stdout.windows(4).any(|window| window == [0, 0, 0, 3]), "a terminal was given to sftp");
+}
+
+#[tokio::test]
+async fn login_sftp_cannot_read_the_session_process_through_procfs() {
+    let world = World::new(&["alice"]);
+    let (addr, _guard) = world.serve().await;
+    let key = &world.key("alice").path;
+    let local = local_dir(&world);
+    for path in ["/proc/self/mem", "/proc/self/maps", "/proc/self/environ", "/proc/thread-self/maps"] {
+        let run = sftp_batch(addr, key, "alice", &local, &[&format!("get {path} stolen")]).await;
+        assert!(!run.status.success(), "{path} was readable through sftp: {}", run.stdout());
+        assert!(!local.join("stolen").exists() || fs::metadata(local.join("stolen")).unwrap().len() == 0, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn login_sftp_files_belong_to_the_account_and_nothing_else_is_reachable() {
+    if !is_root() {
+        return;
+    }
+    let world = World::new(&["alice", "bob"]);
+    let (addr, _guard) = world.serve().await;
+    let (alice, bob) = (identity(0), identity(1));
+    let local = local_dir(&world);
+    let home = world.home();
+    fs::write(local.join("f.txt"), b"mine").unwrap();
+
+    let run = sftp_batch(addr, &world.key("alice").path, "alice", &local, &[
+        "put f.txt by-alice.txt",
+        "mkdir by-alice-dir",
+        "symlink by-alice.txt by-alice-link",
+        "ls -ln",
+    ]).await;
+    assert!(run.status.success(), "{}\n{}", run.stdout(), run.stderr);
+    for name in ["by-alice.txt", "by-alice-dir"] {
+        let meta = fs::metadata(home.join(name)).unwrap();
+        assert_eq!((meta.uid(), meta.gid()), (alice.uid, alice.gid), "{name}");
+    }
+    let meta = fs::symlink_metadata(home.join("by-alice-link")).unwrap();
+    assert_eq!((meta.uid(), meta.gid()), (alice.uid, alice.gid));
+    assert!(run.stdout().lines().any(|line| line.contains(&alice.uid.to_string()) || line.contains(" alice ")), "{}", run.stdout());
+
+    let run = scp(addr, &world.key("bob").path, &[local.join("f.txt").to_str().unwrap(), "bob@127.0.0.1:by-bob.txt"]).await;
+    assert!(run.status.success(), "{}", run.stderr);
+    let meta = fs::metadata(home.join("by-bob.txt")).unwrap();
+    assert_eq!((meta.uid(), meta.gid()), (bob.uid, bob.gid));
+
+    fs::write(home.join("secret"), b"secret").unwrap();
+    std::os::unix::fs::chown(home.join("secret"), Some(bob.uid), Some(bob.gid)).unwrap();
+    fs::set_permissions(home.join("secret"), fs::Permissions::from_mode(0o600)).unwrap();
+    let denied = [
+        "get secret stolen.txt",
+        "put f.txt secret",
+        "ls /root",
+        "put f.txt /etc/passwd",
+        "chmod 777 /etc/passwd",
+        "rm /etc/passwd",
+        "get /etc/shadow shadow.txt",
+        "chown 0 by-alice.txt",
+    ];
+    for command in denied {
+        let run = sftp_batch(addr, &world.key("alice").path, "alice", &local, &[command]).await;
+        assert!(!run.status.success(), "{command} succeeded as alice: {}", run.stdout());
+    }
+    assert_eq!(fs::read(home.join("secret")).unwrap(), b"secret");
+    assert!(!local.join("stolen.txt").exists());
+    assert_ne!(fs::read("/etc/passwd").unwrap(), b"mine");
+    assert!(!local.join("shadow.txt").exists());
+    assert_eq!(fs::metadata(home.join("by-alice.txt")).unwrap().uid(), alice.uid);
+
+    let run = sftp_batch(addr, &world.key("alice").path, "alice", &local, &["get secret stolen.txt"]).await;
+    assert!(run.stderr.contains("Permission denied") || run.stderr.contains("not found"), "{}", run.stderr);
 }

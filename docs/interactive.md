@@ -122,7 +122,8 @@ Restore upstream's PTY, shell and window-change handling as login mode, add
   allowed.
 - Environment: only `TERM`, `LANG`/`LC_*` (if allowed), `HOME`, `USER`,
   `LOGNAME`, `SHELL`, `PATH` from configuration.
-- No port forwarding, agent forwarding, X11 or SFTP.
+- No port forwarding, agent forwarding or X11. SFTP (and so OpenSSH `sftp` and `scp`) is the only
+  subsystem, served in-process after the privilege drop.
 - Runs on Linux musl and on the Asterinas kernel (PTY, `setgroups`, `setuid`).
 
 Acceptance: server tests for authentication refusal, privilege drop
@@ -168,4 +169,4 @@ qualifies on macOS and Linux for daily use.
 ## Out of scope
 
 Mosh-style roaming and local echo prediction, Tailscale SSH (`none`)
-authentication, SFTP/scp, forwarding, RSA/ECDSA keys.
+authentication, an SFTP or scp client in `oxish`, forwarding, RSA/ECDSA keys.

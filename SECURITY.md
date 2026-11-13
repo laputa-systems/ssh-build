@@ -38,8 +38,9 @@ than switched off.
 `oxish-server --mode login` is a second, separate mode. It authenticates Ed25519 keys from a
 server-owned accounts file (account name and key per line; never `~/.ssh`) and gives the account its
 own login shell: `pty-req`, `shell`, `exec` (`shell -c COMMAND`, with or without a terminal),
-`window-change`, a fixed environment and exit status or signal. Forwarding, agent, X11, subsystems
-and any other request are refused. Git mode keeps every restriction above.
+`window-change`, a fixed environment and exit status or signal, and the `sftp` subsystem (below).
+Forwarding, agent, X11, every other subsystem and any other request are refused. Git mode keeps
+every restriction above, including refusing all subsystems.
 
 - **Privilege model.** The listener may run as root, only to accept, key-exchange and authenticate.
   It then starts `oxish-session` with an empty environment and the account's user, group and
@@ -87,6 +88,32 @@ and any other request are refused. Git mode keeps every restriction above.
   The environment is `TERM` (with a terminal, plain terminfo characters only, at most 64),
   `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH` from `--login-path`, and with `--accept-locale`
   `LANG` and `LC_*` (at most 16, 64 plain characters each). Everything else a client sends is dropped.
+- **SFTP.** The `sftp` subsystem (version 3, with OpenSSH's `posix-rename`, `statvfs`, `fstatvfs`,
+  `hardlink`, `fsync`, `lsetstat`, `limits` and `expand-path` extensions) runs inside the session
+  process after the drop, on the channel's data stream, so each file operation has the account's
+  credentials and `umask` 022; there is no helper program and no shell. Paths are resolved by the
+  kernel against the account's home directory (a descriptor, never `chdir`); there is no chroot and no
+  path filtering, so the account reaches what its credentials reach, as with OpenSSH's default. Symbolic
+  links are followed except for `lstat`, directory listings, `lsetstat`, `readlink` and `symlink`, and
+  descriptors are opened `O_CLOEXEC` and `O_NOCTTY`, so a device cannot become a controlling terminal.
+  Files are opened non-blocking and made blocking only when they are regular files, so a FIFO or device
+  cannot hold the session; regular-file reads and writes still run on the session's one thread, so a
+  stalled network file system stalls that connection's other channels (and no other connection).
+  Bounds: packets of at most 256 KiB (a bad length closes the channel), 255 KiB of data per read or
+  write (advertised by `limits@openssh.com`), 256 open handles, 1024 queued requests, 1 MiB of
+  unprocessed input (the channel window), responses produced only while under 512 KiB are waiting, 100
+  names per directory reply, 4096-byte paths, and an SFTP session takes one of the connection's 4
+  live-command slots. A malformed or oversized packet, a request before the version exchange or a
+  second one ends the channel with exit status 1; an unknown request or extension gets
+  `SSH_FX_OP_UNSUPPORTED`. **The session process holds the host key and is non-dumpable, but it now
+  also opens files for the client.** `/proc/self/mem`, `maps` and `fd` of that very process are
+  readable by itself regardless of the dumpable flag, so every opened file is checked with `fstatfs` and
+  any file on a `procfs` (any mount of it, by any path or link) is refused with `SSH_FX_PERMISSION_DENIED`
+  (`files_on_procfs_are_never_opened`, `login_sftp_cannot_read_the_session_process_through_procfs`).
+  This is a deny-list for one file system type; another route to the process's memory or descriptors
+  through the file system would defeat the seal, and the unprivileged-listener and host-key-in-listener
+  alternatives below would remove the issue. The protocol parser is covered by unit tests but not yet
+  fuzzed.
 - **Terminals.** The terminal is opened after the drop, so its slave belongs to the account. The
   shell starts through `oxish-session launch`, which makes it a session leader with the terminal as
   its controlling terminal and then executes it; this avoids `unsafe` pre-exec hooks. Disconnection

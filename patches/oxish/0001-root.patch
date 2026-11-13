@@ -393,3 +393,16 @@ index 3c82432e458aee44ed5188f96164529a567d2243..a654633dae411cba6d641f1bd7f5ce85
 +panic = "abort"
 +strip = "symbols"
 +debug = false
+diff --git a/README.md b/README.md
+index 1929cc184243e3325dce3613f50e8a043c1d1fa8..804e8a6870eaf3a1c46030eaff6cfc05322cf513 100644
+--- a/README.md
++++ b/README.md
+@@ -21,7 +21,7 @@ If any features you need are missing, please open an issue or submit a pull requ
+ 
+ - Only supports Linux and macOS for now (looking for a Windows contributor)
+ - Only supports public key authentication for now
+-- No SFTP support yet
++- SFTP (version 3) only in login mode, served by the session process as the account
+ - Requires clients with support for mlkem768x25519-sha256 key exchange (OpenSSH 9.9+)
+ - No support for older cryptographic algorithms
+ 
