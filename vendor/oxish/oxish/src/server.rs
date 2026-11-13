@@ -9,14 +9,14 @@ use serde::Deserialize;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{Semaphore, TryAcquireError},
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tracing::{debug, instrument, warn};
 
 use crate::{
     Connection, Error, GitPolicy, LoginAccounts, LoginPolicy, LoginSession, SessionState, SideState,
     authentication::{Account, Authenticated, Principals, authenticate},
-    platform::spawn,
+    platform::{is_resource_exhaustion, spawn},
 };
 
 /// What the server serves after authentication
@@ -114,16 +114,23 @@ impl Server {
     /// Accepts connections from the `listener` and spawns a task for each accepted connection.
     /// After authentication the server hands the connection to a session process.
     ///
-    /// This function never returns unless the listener is closed or an error occurs.
+    /// This function never returns: failures to accept a connection are logged and skipped.
     pub async fn run(self: &Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
         loop {
-            let (stream, addr) = match listener.accept().await {
+            let (stream, mut addr) = match listener.accept().await {
                 Ok((stream, addr)) => (stream, addr),
+                Err(error) if is_resource_exhaustion(&error) => {
+                    warn!(%error, "failed to accept connection, retrying in 1s");
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 Err(error) => {
                     warn!(%error, "failed to accept connection");
                     continue;
                 }
             };
+
+            canonicalize(&mut addr);
 
             let server = self.clone();
             tokio::spawn(async move {
@@ -351,6 +358,15 @@ impl Drop for PerIpGuard {
     }
 }
 
+/// Turn an IPv4-mapped peer address into the plain IPv4 one
+///
+/// On an IPv6 socket that accepts IPv4, IPv4 peers show up as IPv4-mapped addresses. Without this
+/// the same host would be logged, and counted against the per-address limits, as two addresses.
+/// `set_ip()` keeps the scope ID of other IPv6 addresses.
+fn canonicalize(addr: &mut SocketAddr) {
+    addr.set_ip(addr.ip().to_canonical());
+}
+
 /// Probe dead peers within about two minutes instead of the OS default of two hours
 fn enable_keepalive(stream: &TcpStream) -> std::io::Result<()> {
     use rustix::net::sockopt;
@@ -365,6 +381,27 @@ fn enable_keepalive(stream: &TcpStream) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv4_mapped_peers_share_the_ipv4_address() {
+        let mut mapped: SocketAddr = "[::ffff:192.0.2.1]:22".parse().unwrap();
+        canonicalize(&mut mapped);
+        assert_eq!(mapped, "192.0.2.1:22".parse().unwrap());
+
+        let mut scoped: SocketAddr = "[fe80::1%3]:22".parse().unwrap();
+        canonicalize(&mut scoped);
+        assert_eq!(scoped, "[fe80::1%3]:22".parse().unwrap());
+
+        let owner = Arc::new(PerIp::new(1));
+        let _held = PerIp::acquire(&owner, mapped_then_canonical("[::ffff:192.0.2.1]:22")).unwrap();
+        assert!(PerIp::acquire(&owner, mapped_then_canonical("192.0.2.1:22")).is_none());
+    }
+
+    fn mapped_then_canonical(addr: &str) -> IpAddr {
+        let mut addr: SocketAddr = addr.parse().unwrap();
+        canonicalize(&mut addr);
+        addr.ip()
+    }
 
     #[test]
     fn per_address_limit_releases_on_drop() {

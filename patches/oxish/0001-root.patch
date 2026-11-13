@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..32e172a4b42c8fbbea3399504bb5a7bd93693f0b 100644
+index 515f9fe6733778ac72793a4657f41c53b115cc0e..1256420935e5cc55c549d3798934d15a0fbefe6d 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -67,65 +67,6 @@ version = "1.0.104"
@@ -320,7 +320,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..32e172a4b42c8fbbea3399504bb5a7bd
 -
  [[package]]
  name = "rustix"
- version = "1.1.5"
+ version = "1.1.6"
 @@ -785,12 +580,6 @@ dependencies = [
   "lazy_static",
  ]

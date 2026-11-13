@@ -62,10 +62,17 @@ oxish-server --port 2222 \
     --authorized-keys authorized_keys
 ```
 
-Run it as a dedicated unprivileged account; it refuses root. It binds `127.0.0.1` unless you pass
-`--bind`, and on Linux it also accepts a socket from `LISTEN_FDS`, so an existing supervisor or
-socket activation works. It installs no service unit, opens no firewall port and creates no keys on
-its own. Run `oxish-server --help` for every option.
+Run it as a dedicated unprivileged account; it refuses root. It listens on loopback only, on
+`127.0.0.1` and `::1` (the IPv6 one is skipped with a warning on a host without IPv6), unless you
+pass `--bind ADDRESS`, which replaces that default and may repeat. `--bind ::` accepts IPv6 and IPv4
+on every interface (one dual-stack socket, or a second IPv4 socket where the platform has no
+dual-stack), `--bind 0.0.0.0` only IPv4. With `--port 0` every listener shares the port the first
+one got. On Linux it instead serves every socket from `LISTEN_FDS` (for example separate IPv4 and
+IPv6 `ListenStream=` lines), so an existing supervisor or socket activation works; `--port` or
+`--bind` together with `LISTEN_FDS` is an error. IPv4 peers that arrive on an IPv6 socket are logged
+and limited as their IPv4 address. When `accept()` fails because the process or system is out of
+descriptors or memory, it logs and retries after 1 s. It installs no service unit, opens no firewall
+port and creates no keys on its own. Run `oxish-server --help` for every option.
 
 **Keys.** `authorized_keys` uses OpenSSH syntax with one required option per key,
 `git-access="read"` (clone and fetch) or `git-access="write"` (also push). Any other option, a

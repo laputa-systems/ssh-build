@@ -19,6 +19,9 @@ use crate::authentication::read_trusted_file;
 const MAX_ACCOUNT_KEYS: usize = 1024;
 const MAX_NAME_LEN: usize = 64;
 const MAX_GROUPS: usize = 256;
+/// Longest locale variable name and value an `env` request may set
+const MAX_ENV_NAME_LEN: usize = 64;
+const MAX_ENV_VALUE_LEN: usize = 64;
 const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const DEFAULT_SHELL: &str = "/bin/sh";
 
@@ -353,9 +356,10 @@ impl LoginSession {
     /// Whether an `env` request names a variable the client may set
     pub(crate) fn accepts_env(&self, name: &str, value: &str) -> bool {
         self.accept_locale
+            && name.len() <= MAX_ENV_NAME_LEN
             && (name == "LANG" || name.strip_prefix("LC_").is_some_and(|rest| !rest.is_empty()))
             && name.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-            && value.len() <= 64
+            && value.len() <= MAX_ENV_VALUE_LEN
             && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'@' | b'-' | b'+' | b'='))
     }
 
@@ -580,6 +584,11 @@ mod tests {
         ] {
             assert!(!on.accepts_env(name, value), "{name}={value}");
         }
+        let name = format!("LC_{}", "A".repeat(MAX_ENV_NAME_LEN - 3));
+        assert!(on.accepts_env(&name, "C"));
+        assert!(!on.accepts_env(&format!("{name}A"), "C"));
+        assert!(on.accepts_env("LANG", &"a".repeat(MAX_ENV_VALUE_LEN)));
+        assert!(!on.accepts_env("LANG", &"a".repeat(MAX_ENV_VALUE_LEN + 1)));
     }
 
     #[test]

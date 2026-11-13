@@ -17,9 +17,9 @@
       "name": "oxish",
       "version": "0.2.0",
       "repo": "https://github.com/djc/oxish",
-      "rev": "d81b20b7ea494b6aa4cadea179699adbae9bb374",
-      "url": "https://github.com/djc/oxish/archive/d81b20b7ea494b6aa4cadea179699adbae9bb374.tar.gz",
-      "sha256": "4efc61a54bb83094ac08102ec7f477e03a5616c835280da0f1339db9dcec9812",
+      "rev": "67b62729030875a607008081f2413e84eeff2776",
+      "url": "https://github.com/djc/oxish/archive/67b62729030875a607008081f2413e84eeff2776.tar.gz",
+      "sha256": "26d83785a7682d670b00bc7ffc2d10fce31d604b1db49e295578a172de3d8963",
       "role": "source",
       "note": "pinned main rev at preflight; provides oxish-proto, oxish-graviola, oxish server; scripts/vendor-oxish.sh verifies the git rev, sha256 is of the GitHub archive of that rev"
     },

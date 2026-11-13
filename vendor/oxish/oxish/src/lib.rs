@@ -7,6 +7,8 @@ use core::{fmt, future, net::SocketAddr, pin::Pin, str::FromStr};
 use std::{io, str, task::ready};
 
 use anyhow::Context as _;
+/// The only cryptography provider: Graviola
+pub use graviola::DEFAULT_PROVIDER;
 use proto::{
     Completion, Decode, Decoded, Encode, HostKeys, Identification, IdentificationError, Ignore,
     IncomingPacket, PROTOCOL, ProtoError, ReadState, ServerHostKey, SessionHostKey, WriteState,
@@ -20,9 +22,6 @@ use proto::{
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, trace, warn};
-
-/// The only cryptography provider: Graviola
-pub use graviola::DEFAULT_PROVIDER;
 
 mod cpu;
 pub use cpu::{MissingCpuFeature, require_supported_cpu};

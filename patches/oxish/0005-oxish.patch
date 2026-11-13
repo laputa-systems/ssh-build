@@ -612,18 +612,16 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..7cc3ffdd4a696fcfae1d4b88932df9a1
      #[test]
      fn parse_fake_keys() {
 diff --git a/oxish/src/bin/oxish-server.rs b/oxish/src/bin/oxish-server.rs
-index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e866b90a208 100644
+index a60aada8b8aabbe7f5ee372b8d4982f126e3ee80..e4e2dbd8192539c4da182baf04917c750bb5a4b9 100644
 --- a/oxish/src/bin/oxish-server.rs
 +++ b/oxish/src/bin/oxish-server.rs
-@@ -1,4 +1,6 @@
--use core::net::{Ipv4Addr, SocketAddr};
+@@ -1,3 +1,5 @@
 +#![forbid(unsafe_code)]
 +
-+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
- 
+ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
  #[cfg(unix)]
  use std::os::unix::fs::OpenOptionsExt;
-@@ -11,14 +13,15 @@ use std::{
+@@ -10,14 +12,15 @@ use std::{
  };
  
  use anyhow::Context as _;
@@ -644,7 +642,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
      named::{Named, PublicKeyAlgorithm},
      pem_encode,
  };
-@@ -31,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
+@@ -34,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
          .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
          .init();
  
@@ -652,7 +650,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
      let provider = DEFAULT_PROVIDER;
      let args = Args::parse();
  
-@@ -65,13 +69,14 @@ async fn main() -> anyhow::Result<()> {
+@@ -68,13 +72,14 @@ async fn main() -> anyhow::Result<()> {
          };
      }
  
@@ -672,7 +670,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
          Some(path) => path,
          None => {
              let exe = env::current_exe()?;
-@@ -82,6 +87,8 @@ async fn main() -> anyhow::Result<()> {
+@@ -85,6 +90,8 @@ async fn main() -> anyhow::Result<()> {
          }
      };
  
@@ -681,26 +679,24 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
      if !session_bin.is_file() {
          anyhow::bail!("session binary `{}` not found", session_bin.display());
      }
-@@ -92,25 +99,18 @@ async fn main() -> anyhow::Result<()> {
-             listener.set_nonblocking(true)?;
-             TcpListener::from_std(listener)?
+@@ -102,8 +109,9 @@ async fn main() -> anyhow::Result<()> {
          }
--        (None, Some(port)) => {
--            let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
--            TcpListener::bind(addr).await?
--        }
-+        (None, Some(port)) => TcpListener::bind(SocketAddr::new(args.bind, port)).await?,
-         (Some(_), Some(_)) => anyhow::bail!("LISTEN_FDS and --port conflict with each other"),
-         (None, None) => anyhow::bail!("unless LISTEN_FDS is set, --port is required"),
-     };
+ 
+         match (listeners.is_empty(), args.port) {
+-            (false, None) => listeners,
+-            (true, Some(port)) => bind(port)?,
++            (false, None) if args.bind.is_empty() => listeners,
++            (false, None) => anyhow::bail!("LISTEN_FDS and --bind conflict with each other"),
++            (true, Some(port)) => bind(&args.bind, port)?,
+             (false, Some(_)) => anyhow::bail!("LISTEN_FDS and --port conflict with each other"),
+             (true, None) => anyhow::bail!("unless LISTEN_FDS is set, --port is required"),
+         }
+@@ -111,12 +119,11 @@ async fn main() -> anyhow::Result<()> {
  
      #[cfg(not(target_os = "linux"))]
-     let listener = match args.port {
--        Some(port) => {
--            let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
--            TcpListener::bind(addr).await?
--        }
-+        Some(port) => TcpListener::bind(SocketAddr::new(args.bind, port)).await?,
+     let listeners = match args.port {
+-        Some(port) => bind(port)?,
++        Some(port) => bind(&args.bind, port)?,
          None => anyhow::bail!("--port is required"),
      };
  
@@ -710,7 +706,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
          Some(path) => {
              let s = fs::read_to_string(path)
                  .with_context(|| format!("failed to read config file `{}`", path.display()))?;
-@@ -119,43 +119,148 @@ async fn main() -> anyhow::Result<()> {
+@@ -125,25 +132,62 @@ async fn main() -> anyhow::Result<()> {
          }
          None => Config::default(),
      };
@@ -719,8 +715,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
 -        config.spawn = args.spawn;
 -    }
  
--    info!(addr = %listener.local_addr()?, "listening for connections");
--    Arc::new(
+-    let server = Arc::new(
 -        Server::new(
 -            DefaultStore::new(provider)?,
 -            host_keys,
@@ -728,9 +723,7 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
 -            provider,
 -        )?
 -        .with_config(config),
--    )
--    .run(listener)
--    .await
+-    );
 +    let host_keys_loaded = host_keys;
 +    let server = match args.mode {
 +        Mode::Git => {
@@ -775,10 +768,25 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
 +        }
 +    };
 +
-+    info!(addr = %listener.local_addr()?, mode = ?args.mode, "listening for connections");
-+    Arc::new(server.with_config(config)).run(listener).await
-+}
-+
++    let server = Arc::new(server.with_config(config));
+ 
+     let mut tasks = JoinSet::new();
+     for listener in listeners {
+         let addr = listener.local_addr()?;
+-        info!(%addr, accepting = accepting(&listener, addr)?, "listening for connections");
++        info!(
++            %addr,
++            accepting = accepting(&listener, addr)?,
++            mode = ?args.mode,
++            "listening for connections"
++        );
+         let server = server.clone();
+         tasks.spawn(async move { server.run(listener).await });
+     }
+@@ -156,31 +200,150 @@ async fn main() -> anyhow::Result<()> {
+     }
+ }
+ 
 +/// What the server serves after authentication
 +#[derive(Clone, Copy, Debug, ValueEnum)]
 +enum Mode {
@@ -786,8 +794,8 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
 +    Git,
 +    /// A shell or command for each configured account, run as that account
 +    Login,
- }
- 
++}
++
  #[derive(Debug, Parser)]
 +#[command(about = "SSH server with public-key authentication: Git-only by default, or login accounts with --mode login")]
  struct Args {
@@ -797,9 +805,10 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
 +    /// TCP port to listen on (or set LISTEN_FDS for socket activation)
      #[clap(short, long)]
      port: Option<u16>,
-+    /// Address to listen on; loopback unless you deliberately choose otherwise
-+    #[clap(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
-+    bind: IpAddr,
++    /// Address to listen on; repeat for several (default: loopback, `127.0.0.1` and `::1`).
++    /// `::` accepts IPv6 and IPv4 on every interface, `0.0.0.0` only IPv4; both are deliberate
++    #[clap(long)]
++    bind: Vec<IpAddr>,
 +    /// TOML file with `max-sessions`, `max-unauthenticated-per-ip` and `max-sessions-per-ip`
      #[clap(short, long)]
      config: Option<PathBuf>,
@@ -876,18 +885,110 @@ index 858a38b98838c22b0e471c65185fa9f9d3d338d6..122914e5d25256e2305595603c784e86
 +        .filter_map(|(set, name)| set.then_some(name))
 +        .collect()
 +    }
++}
++
++/// Bind a listener for each `--bind` address, or for loopback in both families if there is none
++///
++/// With `--port 0` every later address reuses the port the first one got. The IPv6 loopback
++/// address is skipped, with a warning, when the host has no IPv6 and no `--bind` asked for it.
++fn bind(addrs: &[IpAddr], port: u16) -> anyhow::Result<Vec<TcpListener>> {
++    let default = [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)];
++    let explicit = !addrs.is_empty();
++    let mut port = port;
++    let mut listeners = Vec::new();
++    for &ip in if explicit { addrs } else { &default } {
++        match bind_one(ip, port) {
++            Ok(bound) => listeners.extend(bound),
++            Err(error) if !explicit && ip.is_ipv6() && ipv6_unavailable(&error) => {
++                warn!(%error, "IPv6 loopback not available, listening on IPv4 only");
++            }
++            Err(error) => {
++                return Err(error).with_context(|| format!("cannot listen on {}", SocketAddr::new(ip, port)));
++            }
++        }
++        if let (0, Some(first)) = (port, listeners.first()) {
++            port = first.local_addr()?.port();
++        }
++    }
++
++    Ok(listeners)
++}
++
++fn bind_one(ip: IpAddr, port: u16) -> io::Result<Vec<TcpListener>> {
++    match ip {
++        IpAddr::V6(ip) if ip.is_unspecified() => bind_all(port),
++        IpAddr::V6(ip) => Ok(vec![listen(TcpSocket::new_v6()?, SocketAddr::new(ip.into(), port))?]),
++        IpAddr::V4(ip) => Ok(vec![listen(TcpSocket::new_v4()?, SocketAddr::new(ip.into(), port))?]),
++    }
++}
++
++/// Whether `error` says the host has no usable IPv6 (no stack, not allowed, or no `::1`)
++fn ipv6_unavailable(error: &io::Error) -> bool {
++    matches!(
++        Errno::from_io_error(error),
++        Some(Errno::AFNOSUPPORT | Errno::PROTONOSUPPORT | Errno::ADDRNOTAVAIL)
++    )
  }
  
- fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
-@@ -164,8 +269,3 @@ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
-         algorithm => Ok(algorithm.to_owned()),
+ /// Bind listeners on all local addresses, accepting both IPv6 and IPv4 connections
+ ///
+ /// Uses a single dual-stack socket where the platform supports it, and separate IPv6 and IPv4
+ /// sockets otherwise. Falls back to listening on IPv4 only if IPv6 is unavailable.
+-fn bind(port: u16) -> io::Result<Vec<TcpListener>> {
++fn bind_all(port: u16) -> io::Result<Vec<TcpListener>> {
+     let socket = match TcpSocket::new_v6() {
+         Ok(socket) => socket,
+         Err(error) => match Errno::from_io_error(&error) {
+@@ -246,7 +409,45 @@ fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {
      }
  }
--
+ 
 -const DEFAULT_HOST_KEY_FILES: &[&str] = &[
 -    "/etc/ssh/ssh_host_ed25519_key",
 -    "/etc/ssh/ssh_host_ecdsa_key",
 -];
++#[cfg(test)]
++mod tests {
++    use tokio::net::TcpStream;
++
++    use super::*;
++
++    #[tokio::test]
++    async fn default_binds_loopback_in_both_families_on_one_port() {
++        let listeners = bind(&[], 0).unwrap();
++        assert!(!listeners.is_empty() && listeners.len() <= 2);
++        let first = listeners[0].local_addr().unwrap();
++        assert_eq!(first.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
++        for listener in &listeners {
++            let addr = listener.local_addr().unwrap();
++            assert!(addr.ip().is_loopback(), "{addr}");
++            assert_eq!(addr.port(), first.port());
++        }
++    }
++
++    #[tokio::test]
++    async fn explicit_addresses_replace_the_default() {
++        let listeners = bind(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], 0).unwrap();
++        assert_eq!(listeners.len(), 1);
++        assert!(listeners[0].local_addr().unwrap().is_ipv4());
++        assert!(bind(&[IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))], 0).is_err());
++    }
++
++    #[tokio::test]
++    async fn unspecified_ipv6_accepts_ipv4_peers() {
++        let listeners = bind(&[IpAddr::V6(Ipv6Addr::UNSPECIFIED)], 0).unwrap();
++        let port = listeners[0].local_addr().unwrap().port();
++        assert!(listeners.iter().all(|listener| listener.local_addr().unwrap().port() == port));
++        // Dual-stack, or the separate IPv4 socket that comes last; IPv4-only hosts have just that
++        let v4 = listeners.last().unwrap();
++        let (stream, accepted) =
++            tokio::join!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)), v4.accept());
++        stream.unwrap();
++        let (_, peer) = accepted.unwrap();
++        // IPv4-mapped or plain, depending on the socket that took it
++        assert_eq!(peer.ip().to_canonical(), IpAddr::V4(Ipv4Addr::LOCALHOST));
++    }
++}
 diff --git a/oxish/src/bin/oxish-session.rs b/oxish/src/bin/oxish-session.rs
 index e603b4c80214d514cb869901db47b30862ef241e..c59bbdbc680676e2e24ae2351c6c4569ddab1933 100644
 --- a/oxish/src/bin/oxish-session.rs
@@ -1753,10 +1854,10 @@ index 0000000000000000000000000000000000000000..0dda74162fe1a89d34e0c5c039091f62
 +    }
 +}
 diff --git a/oxish/src/lib.rs b/oxish/src/lib.rs
-index af3a4a7fdb54654311788861d9f8d8e68df8668b..15f4d5ae0728dc950e70e84c7d12c3abe8a49ae8 100644
+index 3f9d273c9bdde1628e75dce04442927ad082eede..397431d83b87c4d98f35b5c6ab560066abccb204 100644
 --- a/oxish/src/lib.rs
 +++ b/oxish/src/lib.rs
-@@ -1,6 +1,7 @@
+@@ -1,20 +1,13 @@
  //! OxiSH: a modern, memory-safe SSH server implementation
  
  #![warn(missing_docs)]
@@ -1764,10 +1865,8 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..15f4d5ae0728dc950e70e84c7d12c3ab
  
  use core::{fmt, future, net::SocketAddr, pin::Pin, str::FromStr};
  use std::{io, str, task::ready};
-@@ -20,35 +21,33 @@ use thiserror::Error;
- use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
- use tracing::{debug, trace, warn};
  
+ use anyhow::Context as _;
 -/// Default cryptography provider, as determined based on the enabled features
 -#[cfg(any(feature = "aws-lc", feature = "aws-lc-fips"))]
 -pub use aws_lc::DEFAULT_PROVIDER;
@@ -1779,6 +1878,12 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..15f4d5ae0728dc950e70e84c7d12c3ab
 -))]
 +/// The only cryptography provider: Graviola
  pub use graviola::DEFAULT_PROVIDER;
+ use proto::{
+     Completion, Decode, Decoded, Encode, HostKeys, Identification, IdentificationError, Ignore,
+@@ -29,25 +22,31 @@ use proto::{
+ use thiserror::Error;
+ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+ use tracing::{debug, trace, warn};
 -#[cfg(all(
 -    not(feature = "aws-lc"),
 -    not(feature = "aws-lc-fips"),
@@ -1818,10 +1923,10 @@ index af3a4a7fdb54654311788861d9f8d8e68df8668b..15f4d5ae0728dc950e70e84c7d12c3ab
  
 diff --git a/oxish/src/login.rs b/oxish/src/login.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..478445995f5b2cd5aa60eab581dc4f70005f6ce7
+index 0000000000000000000000000000000000000000..a0cc01f26045a9ef6501f95ecf933d839fd79f5d
 --- /dev/null
 +++ b/oxish/src/login.rs
-@@ -0,0 +1,594 @@
+@@ -0,0 +1,603 @@
 +//! Login mode: accounts, the user database and the policy for one login session
 +
 +use std::{
@@ -1843,6 +1948,9 @@ index 0000000000000000000000000000000000000000..478445995f5b2cd5aa60eab581dc4f70
 +const MAX_ACCOUNT_KEYS: usize = 1024;
 +const MAX_NAME_LEN: usize = 64;
 +const MAX_GROUPS: usize = 256;
++/// Longest locale variable name and value an `env` request may set
++const MAX_ENV_NAME_LEN: usize = 64;
++const MAX_ENV_VALUE_LEN: usize = 64;
 +const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 +const DEFAULT_SHELL: &str = "/bin/sh";
 +
@@ -2177,9 +2285,10 @@ index 0000000000000000000000000000000000000000..478445995f5b2cd5aa60eab581dc4f70
 +    /// Whether an `env` request names a variable the client may set
 +    pub(crate) fn accepts_env(&self, name: &str, value: &str) -> bool {
 +        self.accept_locale
++            && name.len() <= MAX_ENV_NAME_LEN
 +            && (name == "LANG" || name.strip_prefix("LC_").is_some_and(|rest| !rest.is_empty()))
 +            && name.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-+            && value.len() <= 64
++            && value.len() <= MAX_ENV_VALUE_LEN
 +            && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'@' | b'-' | b'+' | b'='))
 +    }
 +
@@ -2404,6 +2513,11 @@ index 0000000000000000000000000000000000000000..478445995f5b2cd5aa60eab581dc4f70
 +        ] {
 +            assert!(!on.accepts_env(name, value), "{name}={value}");
 +        }
++        let name = format!("LC_{}", "A".repeat(MAX_ENV_NAME_LEN - 3));
++        assert!(on.accepts_env(&name, "C"));
++        assert!(!on.accepts_env(&format!("{name}A"), "C"));
++        assert!(on.accepts_env("LANG", &"a".repeat(MAX_ENV_VALUE_LEN)));
++        assert!(!on.accepts_env("LANG", &"a".repeat(MAX_ENV_VALUE_LEN + 1)));
 +    }
 +
 +    #[test]
@@ -3010,7 +3124,7 @@ index 0000000000000000000000000000000000000000..45758b111e4c17be812521d6740ea18f
 +    assert!(world.server().await.is_err(), "a nologin account was accepted");
 +}
 diff --git a/oxish/src/server.rs b/oxish/src/server.rs
-index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d461717fc65753 100644
+index 22f918accf1bad482547186e8bcb6c26fb5af238..a1ffcfdb1592b844caa93f8f6c70c92d5d7bd69e 100644
 --- a/oxish/src/server.rs
 +++ b/oxish/src/server.rs
 @@ -1,7 +1,7 @@
@@ -3034,7 +3148,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
 -    authentication::{Authenticated, UserStore, authenticate},
 +    Connection, Error, GitPolicy, LoginAccounts, LoginPolicy, LoginSession, SessionState, SideState,
 +    authentication::{Account, Authenticated, Principals, authenticate},
-     platform::spawn,
+     platform::{is_resource_exhaustion, spawn},
  };
  
 +/// What the server serves after authentication
@@ -3141,9 +3255,20 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
 -    /// the session will continue running in the server process.
 +    /// After authentication the server hands the connection to a session process.
      ///
-     /// This function never returns unless the listener is closed or an error occurs.
+     /// This function never returns: failures to accept a connection are logged and skipped.
      pub async fn run(self: &Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
-@@ -79,6 +131,9 @@ impl Server {
+@@ -78,9 +130,7 @@ impl Server {
+                 }
+             };
+ 
+-            // On an IPv6 socket that accepts IPv4, IPv4 peers show up as IPv4-mapped addresses
+-            // (`set_ip()` keeps the scope ID of other IPv6 addresses)
+-            addr.set_ip(addr.ip().to_canonical());
++            canonicalize(&mut addr);
+ 
+             let server = self.clone();
+             tokio::spawn(async move {
+@@ -88,6 +138,9 @@ impl Server {
                  if let Err(err) = stream.set_nodelay(true) {
                      warn!(%addr, %err, "failed to set TCP_NODELAY on connection");
                  }
@@ -3153,7 +3278,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
  
                  let _ = server.accept(stream, addr).await;
              });
-@@ -87,6 +142,11 @@ impl Server {
+@@ -96,6 +149,11 @@ impl Server {
  
      #[instrument(name = "handshake", skip(self, stream, addr), fields(addr = %addr))]
      pub(crate) async fn accept(&self, stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
@@ -3165,7 +3290,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
          let authenticating = match self.authenticating.try_acquire() {
              Ok(permit) => permit,
              Err(TryAcquireError::NoPermits) => {
-@@ -107,27 +167,35 @@ impl Server {
+@@ -116,27 +174,35 @@ impl Server {
          };
  
          let future = conn.exchange_keys(&self.host_keys, self.provider);
@@ -3210,7 +3335,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
  
          let Connection {
              stream,
-@@ -169,7 +237,8 @@ impl Server {
+@@ -178,7 +244,8 @@ impl Server {
              options,
          };
  
@@ -3220,7 +3345,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
              .await
              .context("failed to spawn session process")?;
  
-@@ -184,6 +253,27 @@ impl Server {
+@@ -193,6 +260,27 @@ impl Server {
      }
  }
  
@@ -3248,7 +3373,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
  /// Additional configuration for the SSH server
  ///
  /// Can be used with [`Server::with_config()`] to override the default configuration.
-@@ -191,30 +281,101 @@ impl Server {
+@@ -200,30 +288,131 @@ impl Server {
  #[derive(Debug, Deserialize)]
  #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
  pub struct Config {
@@ -3339,6 +3464,15 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
 +    }
 +}
 +
++/// Turn an IPv4-mapped peer address into the plain IPv4 one
++///
++/// On an IPv6 socket that accepts IPv4, IPv4 peers show up as IPv4-mapped addresses. Without this
++/// the same host would be logged, and counted against the per-address limits, as two addresses.
++/// `set_ip()` keeps the scope ID of other IPv6 addresses.
++fn canonicalize(addr: &mut SocketAddr) {
++    addr.set_ip(addr.ip().to_canonical());
++}
++
 +/// Probe dead peers within about two minutes instead of the OS default of two hours
 +fn enable_keepalive(stream: &TcpStream) -> std::io::Result<()> {
 +    use rustix::net::sockopt;
@@ -3355,6 +3489,27 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
 +    use super::*;
 +
 +    #[test]
++    fn ipv4_mapped_peers_share_the_ipv4_address() {
++        let mut mapped: SocketAddr = "[::ffff:192.0.2.1]:22".parse().unwrap();
++        canonicalize(&mut mapped);
++        assert_eq!(mapped, "192.0.2.1:22".parse().unwrap());
++
++        let mut scoped: SocketAddr = "[fe80::1%3]:22".parse().unwrap();
++        canonicalize(&mut scoped);
++        assert_eq!(scoped, "[fe80::1%3]:22".parse().unwrap());
++
++        let owner = Arc::new(PerIp::new(1));
++        let _held = PerIp::acquire(&owner, mapped_then_canonical("[::ffff:192.0.2.1]:22")).unwrap();
++        assert!(PerIp::acquire(&owner, mapped_then_canonical("192.0.2.1:22")).is_none());
++    }
++
++    fn mapped_then_canonical(addr: &str) -> IpAddr {
++        let mut addr: SocketAddr = addr.parse().unwrap();
++        canonicalize(&mut addr);
++        addr.ip()
++    }
++
++    #[test]
 +    fn per_address_limit_releases_on_drop() {
 +        let owner = Arc::new(PerIp::new(2));
 +        let a: IpAddr = "192.0.2.1".parse().unwrap();
@@ -3368,7 +3523,7 @@ index 7f807df2cd33360f8aaaccda043dbc85f34becbf..c7597bd97d1a0c25a7a6a0da46d46171
 +    }
  }
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914bc857e10b 100644
+index db13219b232848bcffe055ed1254cde0e0f7d3a1..b0bca5b59671555105c3315dabbf914bc857e10b 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
 @@ -1,38 +1,71 @@
@@ -3455,10 +3610,12 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
      pub(crate) fn open(
          &mut self,
          open: ChannelOpen<'_>,
-@@ -43,27 +76,43 @@ impl Channels {
+@@ -43,32 +76,43 @@ impl Channels {
              return Ok(());
          }
  
+-        if self.channels.len() + 1 >= MAX_OPEN_CHANNELS_PER_SESSION {
+-            write.encode(&ChannelOpenFailure::connect_failed(open.sender_channel))?;
 +        if open.maximum_packet_size < MIN_PACKET_SIZE {
 +            write.encode(&ChannelOpenFailure::packet_size_too_small(open.sender_channel))?;
 +            return Ok(());
@@ -3466,9 +3623,9 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
 +
 +        if self.channels.len() >= MAX_CHANNELS {
 +            write.encode(&ChannelOpenFailure::resource_shortage(open.sender_channel))?;
-+            return Ok(());
-+        }
-+
+             return Ok(());
+         }
+ 
          let local_id = self.next_id;
          self.next_id = self.next_id.wrapping_add(1);
 -        let entry = match self.channels.entry(local_id) {
@@ -3511,7 +3668,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
          Ok(())
      }
  
-@@ -71,101 +120,141 @@ impl Channels {
+@@ -76,106 +120,141 @@ impl Channels {
          &mut self,
          request: ChannelRequest<'_>,
          write: &mut WriteState,
@@ -3531,15 +3688,13 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
 -            ChannelRequestType::Env(env) => {
 -                const ALLOW_ENV: &[&str] = &["TZ", "LANG"];
 -                match ALLOW_ENV.contains(&env.name) || env.name.starts_with("LC_") {
--                    true if channel.env.len() < 32 => channel
--                        .env
--                        .push((env.name.to_owned(), env.value.to_owned())),
--                    _ => {
--                        debug!(name = env.name, "ignoring environment variable request");
--                        if request.want_reply {
--                            write.encode(&channel.failure())?;
--                        }
--                        return Ok(());
+-                    true if channel.env.len() < MAX_ENV_VARIABLE_COUNT
+-                        && env.name.len() <= MAX_ENV_VARIABLE_NAME_LEN
+-                        && env.value.len() <= MAX_ENV_VARIABLE_VALUE_LEN =>
+-                    {
+-                        channel
+-                            .env
+-                            .push((env.name.to_owned(), env.value.to_owned()))
 +        let accepted = match request.r#type {
 +            ChannelRequestType::Env(env) => match (env.name, &channel.run) {
 +                ("GIT_PROTOCOL", Run::Idle) => match validate_protocol(env.value) {
@@ -3547,10 +3702,16 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
 +                        channel.protocol = Some(protocol);
 +                        true
                      }
+-                    _ => {
+-                        debug!(name = env.name, "ignoring environment variable request");
+-                        if request.want_reply {
+-                            write.encode(&channel.failure())?;
+-                        }
+-                        return Ok(());
 +                    None => {
 +                        debug!(value = env.value, "rejecting GIT_PROTOCOL value");
 +                        false
-+                    }
+                     }
 +                },
 +                _ => {
 +                    debug!(name = env.name, "rejecting environment variable request");
@@ -3729,7 +3890,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
          Ok(())
      }
  
-@@ -176,26 +265,21 @@ impl Channels {
+@@ -186,26 +265,21 @@ impl Channels {
              ));
          };
  
@@ -3761,7 +3922,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
              Some(window) => channel.receive_window = window,
              None => {
                  return Err(ProtoError::InvalidPacket(
-@@ -204,30 +288,34 @@ impl Channels {
+@@ -214,30 +288,34 @@ impl Channels {
              }
          }
  
@@ -3811,7 +3972,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
          debug!(channel_id = %eof.recipient_channel, "received channel eof from client");
          Ok(())
      }
-@@ -242,7 +330,6 @@ impl Channels {
+@@ -252,7 +330,6 @@ impl Channels {
              return Ok(());
          };
  
@@ -3819,7 +3980,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
          if !channel.close_sent {
              channel.close_sent = true;
              write.encode(&ChannelClose {
-@@ -250,272 +337,403 @@ impl Channels {
+@@ -260,272 +337,403 @@ impl Channels {
              })?;
          }
  
@@ -4442,7 +4603,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
      }
  }
  
-@@ -567,7 +785,312 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
+@@ -577,17 +785,312 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
      }
  }
  
@@ -4451,6 +4612,16 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
 -/// How long to wait for a shell to become reapable after its PTY reports EOF
 -/// or after it is killed
 -const EXIT_GRACE_PERIOD: Duration = Duration::from_secs(5);
+-
+-/// Maximum number of environment variables allowed
+-const MAX_ENV_VARIABLE_COUNT: usize = 128;
+-/// Maximum length of an environment variable name
+-const MAX_ENV_VARIABLE_NAME_LEN: usize = 256;
+-/// Maximum length of an environment variable value
+-const MAX_ENV_VARIABLE_VALUE_LEN: usize = 16 * 1024;
+-
+-/// Maximum number of open channels per session
+-const MAX_OPEN_CHANNELS_PER_SESSION: usize = 256;
 +/// Smallest maximum packet size a client may advertise; smaller channels are refused, never rounded up
 +const MIN_PACKET_SIZE: u32 = 128;
 +const READ_CHUNK: usize = 32 * 1024;
@@ -4759,7 +4930,7 @@ index e3e1fe57fb7a7a4ccf39959b6bcff3e705aa9add..b0bca5b59671555105c3315dabbf914b
 +    }
 +}
 diff --git a/oxish/src/session/mod.rs b/oxish/src/session/mod.rs
-index 22f5fe06e48722edacf5b980413230640f864dd3..5de67c0f93989951c690f99992af1612dde6a821 100644
+index 7e09ff4a235fd670d4978ebfbbd04884f62c54b1..5de67c0f93989951c690f99992af1612dde6a821 100644
 --- a/oxish/src/session/mod.rs
 +++ b/oxish/src/session/mod.rs
 @@ -1,24 +1,29 @@
@@ -4884,7 +5055,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..5de67c0f93989951c690f99992af1612
                              }
                              continue;
                          }
-@@ -108,149 +116,42 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
+@@ -108,148 +116,42 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                      debug!(message = %Pretty(&channel_message), "handling channel message");
                      match channel_message {
                          IncomingChannelMessage::Open(open) => self.channels.open(open, &mut self.conn.write),
@@ -5003,8 +5174,7 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..5de67c0f93989951c690f99992af1612
 -
 -#[cfg(test)]
 -mod tests {
--    use std::borrow::Cow;
--    use std::collections::BTreeMap;
+-    use std::{borrow::Cow, collections::BTreeMap};
 -
 -    use proto::channels::PtyReq;
 -
@@ -5061,21 +5231,20 @@ index 22f5fe06e48722edacf5b980413230640f864dd3..5de67c0f93989951c690f99992af1612
 +/// How long buffered output may wait for a peer that is not reading
 +const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b25fea419 100644
+index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875bf688ffe4 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
-@@ -1,20 +1,17 @@
- use core::{net::Ipv4Addr, net::SocketAddr, time::Duration};
- 
+@@ -2,20 +2,18 @@ use core::{
+     net::{Ipv4Addr, SocketAddr},
+     time::Duration,
+ };
 -#[cfg(unix)]
 -use std::os::unix::fs::PermissionsExt;
  use std::{
      env, fs, io,
 -    panic::resume_unwind,
--    path::Path,
--    path::PathBuf,
 +    os::unix::fs::{PermissionsExt, symlink},
-+    path::{Path, PathBuf},
+     path::{Path, PathBuf},
      process::{ExitStatus, Stdio},
 -    sync::Once,
 +    sync::{Arc, Once},
@@ -5089,7 +5258,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b
      crypto::{CryptoProvider, Digest, KeySourceSide},
      key_exchange::Identities,
      named::{EncryptionAlgorithm, PublicKeyAlgorithm},
-@@ -27,19 +24,12 @@ use tokio::{
+@@ -28,19 +26,12 @@ use tokio::{
  };
  use zeroize::Zeroizing;
  
@@ -5110,7 +5279,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b
          graviola::DEFAULT_PROVIDER,
      ];
  
-@@ -92,41 +82,298 @@ async fn openssh_keygen_agrees() {
+@@ -93,41 +84,298 @@ async fn openssh_keygen_agrees() {
      }
  }
  
@@ -5435,7 +5604,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -134,392 +381,592 @@ async fn handshake_ed25519_graviola() {
+@@ -135,392 +383,592 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -6340,7 +6509,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b
  }
  
  #[test]
-@@ -561,7 +1008,7 @@ fn session_state_round_trip() {
+@@ -562,7 +1010,7 @@ fn session_state_round_trip() {
          },
          read_buf: b"pipelined".to_vec(),
          options: KeyOptions {
@@ -6349,7 +6518,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b
          },
      };
  
-@@ -581,69 +1028,120 @@ fn session_state_round_trip() {
+@@ -582,69 +1030,120 @@ fn session_state_round_trip() {
      assert_eq!(decoded.post_quantum_kx, state.post_quantum_kx);
      assert_eq!(decoded.session_id.as_ref(), state.session_id.as_ref());
      assert_eq!(decoded.read_buf, state.read_buf);
@@ -6517,7 +6686,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b
  }
  
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
-@@ -654,7 +1152,10 @@ static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
+@@ -655,7 +1154,10 @@ static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  /// binary here (a no-op when fresh). Unit tests run from `target/<profile>/deps/` (or
  /// `target/<profile>/build/<package>/<hash>/out/` with Cargo's newer build directory layout),
  /// while cargo places the binary in `target/<profile>/`.
@@ -6529,7 +6698,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b
      let exe = env::current_exe()?;
      // TODO: simplify for new build directory layout once MSRV hits 1.100
      let Some(profile_dir) = exe
-@@ -693,7 +1194,7 @@ async fn build_session_binary() -> anyhow::Result<PathBuf> {
+@@ -694,7 +1196,7 @@ async fn build_session_binary() -> anyhow::Result<PathBuf> {
      Ok(bin)
  }
  
@@ -6538,7 +6707,7 @@ index 151147cfbfaf967cbbea73dbd209ff50a17105cd..2e15720cd568ab3a104fe80b827aed8b
      static INSTALL_TRACING_SUBSCRIBER: Once = Once::new();
      INSTALL_TRACING_SUBSCRIBER.call_once(|| {
          let subscriber = tracing_subscriber::FmtSubscriber::builder()
-@@ -704,8 +1205,3 @@ fn subscribe() {
+@@ -705,8 +1207,3 @@ fn subscribe() {
      });
  }
  
@@ -7007,7 +7176,7 @@ index 0000000000000000000000000000000000000000..7969c6ff1eacec24467f685f3dd3bbc5
 +    }
 +}
 diff --git a/oxish/src/unix/mod.rs b/oxish/src/unix/mod.rs
-index 07c62ffe1dbbd106e63923af4c471165efec7a8e..b60e9c549acce96a7fe1a5df5953afbc3b4d2800 100644
+index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..f24292cf065a5bcbe672a946ea73af74cf6a3fcb 100644
 --- a/oxish/src/unix/mod.rs
 +++ b/oxish/src/unix/mod.rs
 @@ -1,25 +1,20 @@
@@ -7039,10 +7208,10 @@ index 07c62ffe1dbbd106e63923af4c471165efec7a8e..b60e9c549acce96a7fe1a5df5953afbc
  };
  use rustix::{
 -    fs::{Mode, OFlags, open, openat},
-     io::FdFlags,
+     io::{Errno, FdFlags},
      net::{
          RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
-@@ -30,130 +25,71 @@ use tokio::{
+@@ -30,129 +25,71 @@ use tokio::{
      net::TcpStream,
      process::{Child, Command},
  };
@@ -7054,8 +7223,7 @@ index 07c62ffe1dbbd106e63923af4c471165efec7a8e..b60e9c549acce96a7fe1a5df5953afbc
 -    Connection, Error, RootPolicy, SessionState,
 -    authentication::{CachedUser, SingleUser, User, UserStore, Username},
 -    server::Server,
--    session::Channels,
--    session::Session,
+-    session::{Channels, Session},
 +    Connection, Error, GitPolicy, LoginSession, SessionState,
 +    session::{Channels, Policy, Session},
  };
@@ -7213,7 +7381,7 @@ index 07c62ffe1dbbd106e63923af4c471165efec7a8e..b60e9c549acce96a7fe1a5df5953afbc
  
      // The `[u8]` encoding yields the `u32` length prefix followed by the state itself.
      let mut message = Zeroizing::new(vec![0; 4]);
-@@ -198,7 +134,25 @@ pub(crate) async fn spawn(
+@@ -197,7 +134,25 @@ pub(crate) async fn spawn(
  }
  
  /// Resume an SSH session from the session state received over the Unix socket `source`
@@ -7240,14 +7408,14 @@ index 07c62ffe1dbbd106e63923af4c471165efec7a8e..b60e9c549acce96a7fe1a5df5953afbc
      let source = rustix::stdio::stdin();
      let mut length = None;
      let mut received = Zeroizing::new(Vec::new());
-@@ -322,320 +276,6 @@ pub fn resume(provider: &'static dyn CryptoProvider) -> Result<Session<TcpStream
+@@ -321,289 +276,10 @@ pub fn resume(provider: &'static dyn CryptoProvider) -> Result<Session<TcpStream
          channels: Channels::default(),
          post_quantum_kx,
          options,
 +        policy,
      })
  }
--
+ 
 -/// Default [`UserStore`] implementation
 -///
 -/// Uses the system database when running as root, and a single-user store otherwise.
@@ -7528,6 +7696,13 @@ index 07c62ffe1dbbd106e63923af4c471165efec7a8e..b60e9c549acce96a7fe1a5df5953afbc
 -    const DEFAULT_SHELL: *const c_char = c"/bin/sh".as_ptr().cast::<c_char>();
 -}
 -
+ /// Whether an `accept()` error is caused by the process or system running out of resources
+ ///
+ /// Unlike errors for an individual connection, these persist until resources are released.
+@@ -621,37 +297,18 @@ pub(crate) fn is_resource_exhaustion(error: &io::Error) -> bool {
+     }
+ }
+ 
 -fn check_permissions(file: &File, uid: u32, level: &str) -> ControlFlow<()> {
 -    let meta = match file.metadata() {
 -        Ok(meta) => meta,
@@ -7549,19 +7724,27 @@ index 07c62ffe1dbbd106e63923af4c471165efec7a8e..b60e9c549acce96a7fe1a5df5953afbc
 -#[cfg(not(target_os = "macos"))]
 -type RawGroupId = libc::gid_t;
 -
--#[cfg(test)]
--mod tests {
--    use super::*;
--
--    #[test]
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
+     #[test]
 -    fn root_policy() {
 -        let root = Username::try_from("root".to_owned()).unwrap();
 -        assert!(SystemStore.lookup(root.clone(), RootPolicy::Deny).is_none());
 -
 -        let user = SystemStore.lookup(root, RootPolicy::Allow).unwrap();
 -        assert_eq!(user.id, 0);
--    }
--}
++    fn only_resource_exhaustion_is_backed_off_from() {
++        for errno in [Errno::MFILE, Errno::NFILE, Errno::NOBUFS, Errno::NOMEM] {
++            assert!(is_resource_exhaustion(&io::Error::from(errno)), "{errno}");
++        }
++        for errno in [Errno::CONNABORTED, Errno::INTR, Errno::PERM] {
++            assert!(!is_resource_exhaustion(&io::Error::from(errno)), "{errno}");
++        }
++        assert!(!is_resource_exhaustion(&io::Error::other("not an OS error")));
+     }
+ }
 diff --git a/oxish/src/unix/privileges.rs b/oxish/src/unix/privileges.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..6824b709862d91a5999e7d43e69c4445bcf8a207

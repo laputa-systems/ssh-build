@@ -15,7 +15,7 @@ use proto::{
     crypto::CryptoProvider, key_exchange::RekeyState,
 };
 use rustix::{
-    io::FdFlags,
+    io::{Errno, FdFlags},
     net::{
         RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
         SendAncillaryMessage, SendFlags,
@@ -278,4 +278,37 @@ fn resume_with(
         options,
         policy,
     })
+}
+
+/// Whether an `accept()` error is caused by the process or system running out of resources
+///
+/// Unlike errors for an individual connection, these persist until resources are released.
+pub(crate) fn is_resource_exhaustion(error: &io::Error) -> bool {
+    // Match on the raw errno, as `io::ErrorKind` can't express most of these on stable: std maps
+    // `EMFILE` and `ENFILE` to the unstable `TooManyOpenFiles`, and doesn't categorize `ENOBUFS`
+    // or `ENOSR` at all
+    match Errno::from_io_error(error) {
+        // TODO: on Windows, `accept()` reports these as `WSAEMFILE` and `WSAENOBUFS`
+        Some(Errno::MFILE | Errno::NFILE | Errno::NOBUFS | Errno::NOMEM) => true,
+        // Out of STREAMS resources
+        #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+        Some(Errno::NOSR) => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_resource_exhaustion_is_backed_off_from() {
+        for errno in [Errno::MFILE, Errno::NFILE, Errno::NOBUFS, Errno::NOMEM] {
+            assert!(is_resource_exhaustion(&io::Error::from(errno)), "{errno}");
+        }
+        for errno in [Errno::CONNABORTED, Errno::INTR, Errno::PERM] {
+            assert!(!is_resource_exhaustion(&io::Error::from(errno)), "{errno}");
+        }
+        assert!(!is_resource_exhaustion(&io::Error::other("not an OS error")));
+    }
 }
