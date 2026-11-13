@@ -1,0 +1,16 @@
+{
+  "repo": "joshuarli/ish",
+  "tag": "release-454ca60a8b962c0dcd37f60ccea9807ebf120fa0",
+  "assets": {
+    "aarch64-unknown-linux-musl": {
+      "name": "ish-aarch64-unknown-linux-musl-static.zip",
+      "member": "ish-aarch64-unknown-linux-musl-static",
+      "sha256": "ed6796877c4ed547f426d1b141009a50dede1b0a6bbbe8cf056be3c3f74b86d4"
+    },
+    "x86_64-unknown-linux-musl": {
+      "name": "ish-x86_64-unknown-linux-musl-static.zip",
+      "member": "ish-x86_64-unknown-linux-musl-static",
+      "sha256": "ad58a90b25c3e70a4fb83a94a57a7e12c9c11808d9f0706d7ceea38786d0c70d"
+    }
+  }
+}

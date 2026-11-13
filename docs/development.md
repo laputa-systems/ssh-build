@@ -111,6 +111,37 @@ because `docker run` hangs on the macOS development machine; its header shows th
 The keygen test runs the `ssh-keygen` in `SSH_BIN_DIR` when set (the repository's OpenSSH build)
 and otherwise the one on `PATH`; it fails rather than skips when none runs.
 
+### Interactive end-to-end test
+
+Linux only; it needs Docker (with buildx), `jaq`, and a network to fetch the pinned tmux sources and
+ish release on first use. It runs the real `oxish --attach` client, `oxish-server --mode login` (as
+root, with `oxish-session`) and `oxish-keygen` from the bin directory, against the pinned ish
+(`ish.lock.json`, through `scripts/fetch-ish.sh`) and a static tmux built from `tmux.lock.json`. No
+`ssh`, `git` or `tmux` of the host is used.
+
+```sh
+make binaries PRODUCT=oxish TARGET=x86_64-unknown-linux-musl
+OXISH_BIN_DIR=dist/oxish/x86_64-unknown-linux-musl/bin sh test/e2e-interactive.sh
+E2E_MODE=standin SSH_BIN_DIR=dist/ssh/x86_64-unknown-linux-musl/bin sh test/e2e-interactive.sh   # harness check with OpenSSH
+```
+
+`KEEP=1` leaves the server container and network after a failure; `DRIVER_ARGS` passes flags to
+`test/interactive-driver.py` (`--show-screen`, and `--inject '1;2c'`, a self-test that must make the
+run fail). `make verify` runs it on the unpacked archive of Linux targets. The scenario is in
+`docs/interactive.md` phase 4; the one place that spells out the binaries' command lines is
+`test/interactive-binaries.sh`.
+
+It proves, with the screen of a terminal emulator inside the driver and tmux's own view as ground
+truth: the client attaches tmux session `work` as the `work` account (ish login shell) over a
+host-key-pinned Ed25519 connection and owns raw mode; after the TCP path between the containers is
+cut for 8 s and restored, the same `oxish` process (same pid) reattaches the same tmux session on the
+same server, the marker is still on screen and a counter that kept running server-side has advanced;
+input typed during the outage is not replayed; no terminal-reply garbage is left at the prompt; typed
+input works; a window resize reaches `tput cols`; when the tmux session ends the client exits with
+the remote status 0 and the local terminal attributes are byte-identical to before the run. The
+stand-in mode shares the harness but restarts the OpenSSH client itself, so it does not exercise the
+reconnect assertions that are specific to `oxish --attach`.
+
 `Dockerfile.oxish` links Rust with Alpine's gcc and musl rather than Rust's bundled start files:
 the bundled ones crash static-PIE binaries at startup. Two clean builds of the Linux arm64 server
 are byte-identical.
