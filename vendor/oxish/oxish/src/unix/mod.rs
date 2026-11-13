@@ -39,6 +39,8 @@ mod exec;
 pub(crate) use exec::{Output, Process, STOP_LIMIT};
 mod privileges;
 mod terminal;
+#[cfg(test)]
+pub(crate) use terminal::open_controller;
 
 /// Leave the listener's session and process group, and with them its controlling terminal
 ///

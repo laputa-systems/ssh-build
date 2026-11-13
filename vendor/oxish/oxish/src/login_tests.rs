@@ -12,7 +12,7 @@ use proto::{
 };
 use rustix::{
     fs::OFlags,
-    pty::{self, OpenptFlags},
+    pty,
     termios::{self, Winsize},
 };
 use tempfile::TempDir;
@@ -411,7 +411,7 @@ struct Terminal {
 
 impl Terminal {
     fn open(rows: u16, cols: u16) -> (Self, OwnedFd) {
-        let master = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
+        let master = crate::unix::open_controller().unwrap();
         pty::grantpt(&master).unwrap();
         pty::unlockpt(&master).unwrap();
         let slave = rustix::fs::open(

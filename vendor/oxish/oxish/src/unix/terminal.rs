@@ -31,7 +31,7 @@ impl PtyMaster {
     /// Allocate a terminal sized and configured as the client requested; returns the slave side
     pub(crate) fn open(req: &PtyReq<'_>) -> io::Result<(Self, OwnedFd)> {
         debug!(?req, "allocating a terminal");
-        let controller = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
+        let controller = open_controller()?;
         pty::grantpt(&controller)?;
         pty::unlockpt(&controller)?;
 
@@ -259,4 +259,18 @@ fn set_flag<T: Flags>(flags: &mut T, flag: T, value: u32) {
         0 => flags.remove(flag),
         _ => flags.insert(flag),
     }
+}
+
+/// Open a pseudoterminal controller that is not inherited across exec
+pub(crate) fn open_controller() -> io::Result<OwnedFd> {
+    // posix_openpt has no O_CLOEXEC on macOS and the BSDs, so the flag is set right after there.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let controller = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let controller = {
+        let controller = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+        rustix::io::fcntl_setfd(&controller, rustix::io::FdFlags::CLOEXEC)?;
+        controller
+    };
+    Ok(controller)
 }

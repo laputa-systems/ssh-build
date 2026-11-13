@@ -1029,7 +1029,7 @@ mod tests {
     fn exec(channel: u32) -> ChannelRequest<'static> {
         ChannelRequest {
             recipient_channel: channel,
-            r#type: ChannelRequestType::Exec(proto::channels::Exec {
+            r#type: ChannelRequestType::Exec(Exec {
                 command: b"git-upload-pack 'a.git'",
             }),
             want_reply: true,

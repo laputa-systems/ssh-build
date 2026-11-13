@@ -2616,7 +2616,7 @@ index 0000000000000000000000000000000000000000..0d6127c2b82baf2e5e9c48ad2f4c565b
 +}
 diff --git a/oxish/src/login_tests.rs b/oxish/src/login_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c4b128f70e8d2659671e4ab360c9035f0a5f0fcd
+index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0ce8d1e822
 --- /dev/null
 +++ b/oxish/src/login_tests.rs
 @@ -0,0 +1,847 @@
@@ -2634,7 +2634,7 @@ index 0000000000000000000000000000000000000000..c4b128f70e8d2659671e4ab360c9035f
 +};
 +use rustix::{
 +    fs::OFlags,
-+    pty::{self, OpenptFlags},
++    pty,
 +    termios::{self, Winsize},
 +};
 +use tempfile::TempDir;
@@ -3033,7 +3033,7 @@ index 0000000000000000000000000000000000000000..c4b128f70e8d2659671e4ab360c9035f
 +
 +impl Terminal {
 +    fn open(rows: u16, cols: u16) -> (Self, OwnedFd) {
-+        let master = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
++        let master = crate::unix::open_controller().unwrap();
 +        pty::grantpt(&master).unwrap();
 +        pty::unlockpt(&master).unwrap();
 +        let slave = rustix::fs::open(
@@ -3905,7 +3905,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
 +    }
  }
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index db13219b232848bcffe055ed1254cde0e0f7d3a1..b0bca5b59671555105c3315dabbf914bc857e10b 100644
+index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc021d0490 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
 @@ -1,38 +1,71 @@
@@ -5246,7 +5246,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..b0bca5b59671555105c3315dabbf914b
 +    fn exec(channel: u32) -> ChannelRequest<'static> {
 +        ChannelRequest {
 +            recipient_channel: channel,
-+            r#type: ChannelRequestType::Exec(proto::channels::Exec {
++            r#type: ChannelRequestType::Exec(Exec {
 +                command: b"git-upload-pack 'a.git'",
 +            }),
 +            want_reply: true,
@@ -7558,7 +7558,7 @@ index 0000000000000000000000000000000000000000..7969c6ff1eacec24467f685f3dd3bbc5
 +    }
 +}
 diff --git a/oxish/src/unix/mod.rs b/oxish/src/unix/mod.rs
-index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..d1b3d5e4abfdb0efc02b04ed6366f13201de42a5 100644
+index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..0dcb20f4652201dc63e58e3530c38dd4e8d0d6b3 100644
 --- a/oxish/src/unix/mod.rs
 +++ b/oxish/src/unix/mod.rs
 @@ -1,25 +1,20 @@
@@ -7593,7 +7593,7 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..d1b3d5e4abfdb0efc02b04ed6366f132
      io::{Errno, FdFlags},
      net::{
          RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
-@@ -27,132 +22,98 @@ use rustix::{
+@@ -27,132 +22,100 @@ use rustix::{
      },
  };
  use tokio::{
@@ -7620,6 +7620,8 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..d1b3d5e4abfdb0efc02b04ed6366f132
 +mod privileges;
  mod terminal;
 -pub(crate) use terminal::Terminal;
++#[cfg(test)]
++pub(crate) use terminal::open_controller;
  
 -/// Spawn a child process for the authenticated session
 +/// Leave the listener's session and process group, and with them its controlling terminal
@@ -7791,7 +7793,7 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..d1b3d5e4abfdb0efc02b04ed6366f132
  
      // The `[u8]` encoding yields the `u32` length prefix followed by the state itself.
      let mut message = Zeroizing::new(vec![0; 4]);
-@@ -160,6 +121,26 @@ pub(crate) async fn spawn(
+@@ -160,6 +123,26 @@ pub(crate) async fn spawn(
      let payload_len = (message.len() - 4) as u32;
      message[..4].copy_from_slice(&payload_len.to_be_bytes());
  
@@ -7818,7 +7820,7 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..d1b3d5e4abfdb0efc02b04ed6366f132
      let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
      let mut control = SendAncillaryBuffer::new(&mut space);
      let fds = [tcp.as_fd()];
-@@ -167,43 +148,66 @@ pub(crate) async fn spawn(
+@@ -167,43 +150,66 @@ pub(crate) async fn spawn(
  
      // The file descriptor rides along with the first message; if the socket buffer cannot
      // hold the full message, send the rest without ancillary data.
@@ -7907,7 +7909,7 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..d1b3d5e4abfdb0efc02b04ed6366f132
  
      loop {
          let mut control = RecvAncillaryBuffer::new(&mut space);
-@@ -321,289 +325,10 @@ pub fn resume(provider: &'static dyn CryptoProvider) -> Result<Session<TcpStream
+@@ -321,289 +327,10 @@ pub fn resume(provider: &'static dyn CryptoProvider) -> Result<Session<TcpStream
          channels: Channels::default(),
          post_quantum_kx,
          options,
@@ -8198,7 +8200,7 @@ index 5f74cd2f419527550bbd3ad38ec11c14bcb5a733..d1b3d5e4abfdb0efc02b04ed6366f132
  /// Whether an `accept()` error is caused by the process or system running out of resources
  ///
  /// Unlike errors for an individual connection, these persist until resources are released.
-@@ -621,37 +346,18 @@ pub(crate) fn is_resource_exhaustion(error: &io::Error) -> bool {
+@@ -621,37 +348,18 @@ pub(crate) fn is_resource_exhaustion(error: &io::Error) -> bool {
      }
  }
  
@@ -8358,7 +8360,7 @@ index 0000000000000000000000000000000000000000..b2c75582c9956d89a773e7715ed641c1
 +    }
 +}
 diff --git a/oxish/src/unix/terminal.rs b/oxish/src/unix/terminal.rs
-index 1772ea418fa9dde03813f76891e86f8064a3d532..5388cc7c0750f4a79e6e9d5480b06541a4be9e1b 100644
+index 1772ea418fa9dde03813f76891e86f8064a3d532..557009fd7d23ae7837be31246d2ba67c675630fa 100644
 --- a/oxish/src/unix/terminal.rs
 +++ b/oxish/src/unix/terminal.rs
 @@ -1,48 +1,37 @@
@@ -8423,7 +8425,7 @@ index 1772ea418fa9dde03813f76891e86f8064a3d532..5388cc7c0750f4a79e6e9d5480b06541
 +    /// Allocate a terminal sized and configured as the client requested; returns the slave side
 +    pub(crate) fn open(req: &PtyReq<'_>) -> io::Result<(Self, OwnedFd)> {
 +        debug!(?req, "allocating a terminal");
-+        let controller = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
++        let controller = open_controller()?;
          pty::grantpt(&controller)?;
          pty::unlockpt(&controller)?;
  
@@ -8601,3 +8603,21 @@ index 1772ea418fa9dde03813f76891e86f8064a3d532..5388cc7c0750f4a79e6e9d5480b06541
      }
  }
  
+@@ -334,3 +260,17 @@ fn set_flag<T: Flags>(flags: &mut T, flag: T, value: u32) {
+         _ => flags.insert(flag),
+     }
+ }
++
++/// Open a pseudoterminal controller that is not inherited across exec
++pub(crate) fn open_controller() -> io::Result<OwnedFd> {
++    // posix_openpt has no O_CLOEXEC on macOS and the BSDs, so the flag is set right after there.
++    #[cfg(any(target_os = "linux", target_os = "android"))]
++    let controller = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
++    #[cfg(not(any(target_os = "linux", target_os = "android")))]
++    let controller = {
++        let controller = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
++        rustix::io::fcntl_setfd(&controller, rustix::io::FdFlags::CLOEXEC)?;
++        controller
++    };
++    Ok(controller)
++}
