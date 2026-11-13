@@ -55,12 +55,21 @@ impl Agent {
         let address = SocketAddrUnix::new(socket).map_err(failed)?;
         let started = Instant::now();
         loop {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             let stream = socket_with(
                 AddressFamily::UNIX,
                 SocketType::STREAM,
                 SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
                 None,
             ).map_err(failed)?;
+            // macOS has no SOCK_NONBLOCK or SOCK_CLOEXEC, so both are set right after socket().
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let stream = {
+                let stream = socket_with(AddressFamily::UNIX, SocketType::STREAM, SocketFlags::empty(), None).map_err(failed)?;
+                rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::CLOEXEC).map_err(failed)?;
+                rustix::io::ioctl_fionbio(&stream, true).map_err(failed)?;
+                stream
+            };
             let agent = Self { stream: UnixStream::from(stream), idle: timeout, deadline, interrupt: interrupt.clone() };
             agent.wait_slice(started)?;
             match connect(&agent.stream, &address) {

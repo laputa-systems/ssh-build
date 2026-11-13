@@ -87,12 +87,18 @@ impl OutputSink for FileSink {
 }
 
 fn pipe() -> Result<(File, File), Error> {
-    let (reader, writer) =
-        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).map_err(|error| {
-            Error::NotSubmitted {
-                detail: format!("cannot create a pipe: {error}"),
-            }
-        })?;
+    let failed = |error| Error::NotSubmitted { detail: format!("cannot create a pipe: {error}") };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let (reader, writer) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).map_err(failed)?;
+    // macOS has no pipe2, so close-on-exec is set right after the pipe is created.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let (reader, writer) = {
+        let (reader, writer) = rustix::pipe::pipe().map_err(failed)?;
+        for end in [&reader, &writer] {
+            rustix::io::fcntl_setfd(end, rustix::io::FdFlags::CLOEXEC).map_err(failed)?;
+        }
+        (reader, writer)
+    };
     Ok((File::from(reader), File::from(writer)))
 }
 
