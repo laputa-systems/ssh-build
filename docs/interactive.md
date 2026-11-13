@@ -147,6 +147,9 @@ statuses and signals, and Git mode's existing tests unchanged.
   screen, and the ish prompt contains no terminal-reply garbage; resize and
   assert `tput cols` follows; exit and assert the local terminal attributes
   are restored.
+- Transfer: `oxish-scp` uploads and downloads a 4 MiB file and an
+  `oxish-sftp` batch makes a directory, puts, renames, lists and gets it; the
+  copies match byte for byte and the server-side files belong to the account.
 
 ### 5. Release (SSHB-6)
 
@@ -169,4 +172,4 @@ qualifies on macOS and Linux for daily use.
 ## Out of scope
 
 Mosh-style roaming and local echo prediction, Tailscale SSH (`none`)
-authentication, an SFTP or scp client in `oxish`, forwarding, RSA/ECDSA keys.
+authentication, forwarding, RSA/ECDSA keys.

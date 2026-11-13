@@ -168,4 +168,24 @@ before=$(cat "$ctl/counter.break")
 after=$(cat "$ctl/counter.restore")
 [ "$after" -gt "$before" ] || fail "the server-side counter did not advance during the outage ($before -> $after)"
 ok "server-side counter kept running while disconnected ($before -> $after)"
+
+# ---- file transfer: oxish-scp and oxish-sftp against the login-mode SFTP subsystem ----------------------
+if [ "$E2E_MODE" = oxish ]; then
+    in_client --network "$net" -v "$work/keys:/keys:ro" -e "FP=$fingerprint" "$client_image" sh -euc '
+        flags="-P 22 -i /keys/user --host-key $FP"
+        head -c 4194304 /dev/urandom > /tmp/up
+        /opt/client/oxish-scp $flags /tmp/up work@server:e2e-up
+        /opt/client/oxish-scp $flags work@server:e2e-up /tmp/down
+        cmp /tmp/up /tmp/down
+        printf "%s\n" "mkdir e2e-dir" "put /tmp/up e2e-dir/copy" "rename e2e-dir/copy e2e-dir/moved" "ls e2e-dir" "get e2e-dir/moved /tmp/again" > /tmp/batch
+        /opt/client/oxish-sftp $flags -b /tmp/batch work@server > /tmp/batch.out
+        grep -q moved /tmp/batch.out
+        cmp /tmp/up /tmp/again
+        sha256sum /tmp/up | cut -d" " -f1' > "$work/transfer.sha256" || fail "oxish-scp/oxish-sftp transfer failed"
+    remote=$(docker exec -u work "$server" sh -c 'sha256sum ~/e2e-up ~/e2e-dir/moved | cut -d" " -f1 | sort -u')
+    [ "$remote" = "$(cat "$work/transfer.sha256")" ] || fail "server-side copies differ from the uploaded file"
+    owner=$(docker exec "$server" stat -c %U /home/work/e2e-up /home/work/e2e-dir | sort -u)
+    [ "$owner" = work ] || fail "transferred files are owned by '$owner', not the account"
+    ok "oxish-scp and oxish-sftp round-tripped 4 MiB through the login-mode server as the account"
+fi
 echo "interactive end-to-end passed ($E2E_MODE)"
