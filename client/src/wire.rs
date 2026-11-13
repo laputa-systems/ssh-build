@@ -17,6 +17,7 @@ use oxish_proto::{
 };
 
 use crate::error::{Certainty, Error};
+use crate::session::Keepalive;
 
 /// Append an SSH `string`.
 pub(crate) fn put_string(buffer: &mut Vec<u8>, value: &[u8]) {
@@ -225,6 +226,15 @@ pub struct Transport {
     awaiting_command: bool,
     peer_closed: bool,
     abort: Option<OwnedFd>,
+    last_receive: Instant,
+    keepalive: Option<KeepaliveState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeepaliveState {
+    limits: Keepalive,
+    last_probe: Option<Instant>,
+    unanswered: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -277,7 +287,72 @@ impl Transport {
             since_kex: KexUsage::new(),
             awaiting_command: false,
             abort: None,
+            last_receive: now,
+            keepalive: None,
         })
+    }
+
+    /// Probe a silent peer during the following operation, or stop probing. The probe schedule
+    /// and the dead-peer bound count from now.
+    pub fn set_keepalive(&mut self, keepalive: Option<Keepalive>) {
+        self.last_receive = Instant::now();
+        self.keepalive = keepalive.map(|limits| KeepaliveState {
+            limits,
+            last_probe: None,
+            unanswered: 0,
+        });
+    }
+
+    /// Whether the peer has been silent long enough to send another keepalive probe.
+    pub fn keepalive_due(&self) -> bool {
+        let Some(state) = &self.keepalive else {
+            return false;
+        };
+        let interval = state.limits.interval;
+        self.last_receive.elapsed() >= interval
+            && state.last_probe.is_none_or(|sent| sent.elapsed() >= interval)
+    }
+
+    /// Queue a `keepalive@openssh.com` global request that wants a reply.
+    pub fn send_keepalive(&mut self) -> Result<(), Error> {
+        let mut request = Vec::new();
+        request.push(u8::from(MessageType::GlobalRequest));
+        put_string(&mut request, b"keepalive@openssh.com");
+        request.push(1);
+        self.encode_raw(&request)?;
+        if let Some(state) = self.keepalive.as_mut() {
+            state.last_probe = Some(Instant::now());
+            state.unanswered = state.unanswered.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Account for a global request reply. It is false when no probe is waiting for one.
+    pub fn keepalive_answered(&mut self) -> bool {
+        match self.keepalive.as_mut() {
+            Some(state) if state.unanswered > 0 => {
+                state.unanswered -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn keepalive_silence(&self) -> Option<(Duration, Keepalive)> {
+        self.keepalive
+            .as_ref()
+            .map(|state| (self.last_receive.elapsed(), state.limits))
+    }
+
+    fn keepalive_wait(&self) -> Option<Duration> {
+        let state = self.keepalive.as_ref()?;
+        let silence = self.last_receive.elapsed();
+        let dead = state.limits.dead_after.saturating_sub(silence);
+        let spaced = state
+            .last_probe
+            .map_or(Duration::ZERO, |sent| state.limits.interval.saturating_sub(sent.elapsed()));
+        let probe = state.limits.interval.saturating_sub(silence).max(spaced);
+        Some(dead.min(probe))
     }
 
     pub(crate) fn set_abort(&mut self, descriptor: OwnedFd) {
@@ -325,6 +400,7 @@ impl Transport {
     pub fn end_operation(&mut self) {
         self.deadline = None;
         self.interrupt = None;
+        self.keepalive = None;
         self.awaiting_command = false;
     }
 
@@ -367,6 +443,14 @@ impl Transport {
                 certainty: self.certainty,
             });
         }
+        if self
+            .keepalive_silence()
+            .is_some_and(|(silence, limits)| silence >= limits.dead_after)
+        {
+            return Some(Error::Timeout {
+                certainty: self.certainty,
+            });
+        }
         let now = Instant::now();
         let idle_bound = self.idle_bound();
         let write_stalled =
@@ -384,7 +468,7 @@ impl Transport {
 
     /// Wait for read readiness, and write readiness when `write` is set.
     pub fn wait(&mut self, write: bool) -> Result<PollFlags, Error> {
-        self.wait_for(true, write, None, [None, None], None)
+        self.wait_for(true, write, None, [None, None], None, false)
     }
 
     /// Like [`Self::wait`], and also return once `input` can be read or one of `outputs` can be
@@ -396,7 +480,7 @@ impl Transport {
         outputs: [Option<BorrowedFd<'_>>; 2],
         wake: Option<BorrowedFd<'_>>,
     ) -> Result<PollFlags, Error> {
-        self.wait_for(true, write, input, outputs, wake)
+        self.wait_for(true, write, input, outputs, wake, true)
     }
 
     fn wait_for(
@@ -406,10 +490,22 @@ impl Transport {
         input: Option<BorrowedFd<'_>>,
         outputs: [Option<BorrowedFd<'_>>; 2],
         wake: Option<BorrowedFd<'_>>,
+        probing: bool,
     ) -> Result<PollFlags, Error> {
         loop {
+            if probing
+                && self
+                    .keepalive_silence()
+                    .is_some_and(|(silence, limits)| silence >= limits.interval)
+                && self.fill_nonblocking()?
+            {
+                return Ok(PollFlags::empty());
+            }
             if let Some(error) = self.limit_error() {
                 return Err(error);
+            }
+            if probing && self.keepalive_due() {
+                return Ok(PollFlags::empty());
             }
             let now = Instant::now();
             let mut remaining = if self.interrupt.is_some() {
@@ -425,6 +521,9 @@ impl Transport {
             }
             if self.has_pending_output() {
                 remaining = remaining.min((self.write_progress + self.idle).saturating_duration_since(now));
+            }
+            if probing && let Some(wait) = self.keepalive_wait() {
+                remaining = remaining.min(wait);
             }
             let mut events = PollFlags::empty();
             if read {
@@ -499,6 +598,7 @@ impl Transport {
             Ok(read) => {
                 self.read.buf.extend_from_slice(&buffer[..read]);
                 self.last_progress = Instant::now();
+                self.last_receive = self.last_progress;
                 self.since_kex.bytes += read as u64;
                 Ok(true)
             }
@@ -627,6 +727,7 @@ impl Transport {
                 }
                 Ok(_) => {
                     self.last_progress = Instant::now();
+                    self.last_receive = self.last_progress;
                     return Ok(byte[0]);
                 }
                 Err(error)
@@ -761,7 +862,7 @@ impl Transport {
     pub fn flush(&mut self) -> Result<(), Error> {
         while !self.flush_nonblocking()? {
             let reading = self.read.buf.len() < READ_BUFFER_LIMIT;
-            let events = self.wait_for(reading, true, None, [None, None], None)?;
+            let events = self.wait_for(reading, true, None, [None, None], None, false)?;
             if reading && events.contains(PollFlags::IN) {
                 self.fill_nonblocking()?;
             }
@@ -772,7 +873,7 @@ impl Transport {
     /// Flush buffered packets without reading anything.
     pub fn drain(&mut self) -> Result<(), Error> {
         while !self.flush_nonblocking()? {
-            self.wait_for(false, true, None, [None, None], None)?;
+            self.wait_for(false, true, None, [None, None], None, false)?;
         }
         Ok(())
     }

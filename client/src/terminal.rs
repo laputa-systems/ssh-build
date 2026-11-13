@@ -3,9 +3,10 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rustix::event::{PollFd, PollFlags, poll};
 use rustix::termios::{
-    ControlModes, InputModes, LocalModes, OptionalActions, OutputModes, SpecialCodeIndex, Termios,
-    Winsize, tcgetattr, tcgetwinsize, tcsetattr,
+    ControlModes, InputModes, LocalModes, OptionalActions, OutputModes, QueueSelector,
+    SpecialCodeIndex, Termios, Winsize, tcflush, tcgetattr, tcgetwinsize, tcsetattr,
 };
 
 use crate::session::{PtyRequest, TerminalSize};
@@ -143,6 +144,38 @@ pub fn pty_request(fd: impl AsFd, term: &str) -> io::Result<PtyRequest> {
         size: terminal_size(&fd),
         modes: encode_modes(&termios),
     })
+}
+
+/// Read and drop everything the terminal on `fd` has ready to read, then flush what it still
+/// holds, including a partly typed line a cooked terminal has not yet made readable. It never
+/// blocks. Returns the bytes read; flushed bytes are not counted.
+pub fn discard_input(fd: impl AsFd) -> io::Result<usize> {
+    let mut dropped = 0;
+    let mut scratch = [0u8; 1024];
+    loop {
+        let mut ready = [PollFd::new(&fd, PollFlags::IN)];
+        let none = rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        match poll(&mut ready, Some(&none)) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(error.into()),
+        }
+        if !ready[0].revents().contains(PollFlags::IN) {
+            break;
+        }
+        match rustix::io::read(&fd, &mut scratch) {
+            Ok(0) => break,
+            Ok(count) => dropped += count,
+            Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    tcflush(&fd, QueueSelector::IFlush)?;
+    Ok(dropped)
 }
 
 /// A terminal in raw mode. Dropping it restores the attributes the terminal had when it was
@@ -305,6 +338,7 @@ impl<S: InputSource> InputSource for EscapeInput<S> {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
+    use std::io::Write;
     use std::os::fd::OwnedFd;
 
     use rustix::fs::{Mode, OFlags, open};
@@ -496,6 +530,39 @@ mod tests {
         let error = input.read(&mut buffer).expect_err("nothing to forward");
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    fn readable(fd: &OwnedFd) -> bool {
+        let mut ready = [PollFd::new(fd, PollFlags::IN)];
+        let wait = rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 50_000_000,
+        };
+        poll(&mut ready, Some(&wait)).expect("poll") > 0
+    }
+
+    #[test]
+    fn discarding_drops_full_lines_and_a_partial_line_and_keeps_later_input() {
+        let (master, slave) = pty();
+        let master = File::from(master);
+        (&master).write_all(b"first line\nsecond\nunfinished").expect("type");
+        assert_eq!(discard_input(&slave).expect("discard"), 18);
+        let raw = RawMode::enter(slave.as_fd()).expect("enter");
+        assert!(!readable(&slave), "nothing survives the discard");
+        (&master).write_all(b"x").expect("type");
+        let mut byte = [0u8; 1];
+        assert!(readable(&slave));
+        assert_eq!(rustix::io::read(&slave, &mut byte).expect("read"), 1);
+        assert_eq!(byte, *b"x");
+        drop(raw);
+    }
+
+    #[test]
+    fn discarding_an_idle_terminal_returns_at_once() {
+        let (_master, slave) = pty();
+        let started = std::time::Instant::now();
+        assert_eq!(discard_input(&slave).expect("discard"), 0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

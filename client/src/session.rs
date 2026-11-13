@@ -27,6 +27,20 @@ pub struct PtyRequest {
     pub modes: Vec<u8>,
 }
 
+/// Liveness probing for a session whose peer may vanish without closing the connection.
+///
+/// After `interval` without any bytes from the server the client sends a
+/// `keepalive@openssh.com` global request, and repeats it every further `interval` of silence.
+/// Any received byte restarts the count. The session fails with a timeout once the server has
+/// been silent for `dead_after`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keepalive {
+    /// Silence that triggers a probe, and the spacing between probes.
+    pub interval: Duration,
+    /// Silence after which the peer is declared dead.
+    pub dead_after: Duration,
+}
+
 /// One session channel: a shell or a command, with or without a pseudo-terminal.
 #[derive(Clone, Default)]
 pub struct SessionRequest {
@@ -40,6 +54,8 @@ pub struct SessionRequest {
     pub timeout: Option<Duration>,
     /// Reports that the caller wants the session abandoned.
     pub interrupt: Option<Interrupt>,
+    /// Probe a silent peer and fail the session when it stays silent too long.
+    pub keepalive: Option<Keepalive>,
 }
 
 impl std::fmt::Debug for SessionRequest {

@@ -600,6 +600,7 @@ pub(crate) fn exec_stream(
         env: options.env.clone(),
         timeout: options.timeout,
         interrupt: options.interrupt.clone(),
+        keepalive: None,
     };
     session(connection, &request, stdin, stdout, stderr, None)
 }
@@ -617,6 +618,7 @@ pub(crate) fn session(
     connection
         .transport()
         .begin_operation(request.timeout, request.interrupt.clone());
+    connection.transport().set_keepalive(request.keepalive);
     let result = run(
         connection,
         request.command.as_deref(),
@@ -786,6 +788,9 @@ fn drive(
 ) -> Result<(), Error> {
     loop {
         connection.transport().check()?;
+        if connection.transport().keepalive_due() {
+            connection.transport().send_keepalive()?;
+        }
         while let Some(packet) = connection.try_next_packet()? {
             on_packet(connection, channel, completion, packet, outputs)?;
         }
@@ -960,6 +965,13 @@ fn on_packet(
         MessageType::ChannelClose => {
             expect_recipient_only(channel, &packet.payload)?;
             channel.close_received = true;
+        }
+        MessageType::RequestSuccess | MessageType::RequestFailure => {
+            if !connection.transport().keepalive_answered() {
+                return Err(Error::Protocol {
+                    detail: "unrequested global request reply".to_owned(),
+                });
+            }
         }
         other => {
             return Err(Error::Protocol {

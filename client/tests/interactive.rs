@@ -157,14 +157,18 @@ impl Terminal {
     }
 
     fn read_until(&mut self, needle: &str) {
+        self.read_until_with(needle, |text| text.contains(needle));
+    }
+
+    fn read_until_with(&mut self, what: &str, found: impl Fn(&str) -> bool) {
         let deadline = Instant::now() + LIMIT;
         loop {
-            if String::from_utf8_lossy(&self.output).contains(needle) {
+            if found(&String::from_utf8_lossy(&self.output)) {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "did not see {needle:?} in {:?}",
+                "did not see {what:?} in {:?}",
                 String::from_utf8_lossy(&self.output)
             );
             let mut fds = [PollFd::new(&self.master, PollFlags::IN)];
@@ -181,6 +185,21 @@ impl Terminal {
             }
         }
     }
+
+    fn query(&mut self, command: &str, prefix: &str) -> u64 {
+        self.output.clear();
+        self.type_in(command);
+        self.read_until_with(prefix, |text| number_in(text, prefix).is_some());
+        number_in(&String::from_utf8_lossy(&self.output), prefix).expect("number")
+    }
+}
+
+fn number_in(text: &str, prefix: &str) -> Option<u64> {
+    text.rmatch_indices(prefix).find_map(|(at, _)| {
+        let rest = &text[at + prefix.len()..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        (digits > 0 && digits < rest.len()).then(|| rest[..digits].parse().ok()).flatten()
+    })
 }
 
 #[test]
@@ -414,20 +433,31 @@ fn trust_is_never_assumed() {
     assert!(output.stdout.is_empty());
 }
 
+const UP: u8 = 0;
+const DOWN: u8 = 1;
+const BLACKHOLE: u8 = 2;
+
 struct Proxy {
     port: u16,
     connections: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl Proxy {
     fn start(target: &Target) -> Self {
+        use std::sync::atomic::Ordering;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("address").port();
         let upstream = format!("{}:{}", target.host, target.port);
         let connections = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(UP));
         let held = std::sync::Arc::clone(&connections);
+        let state = std::sync::Arc::clone(&mode);
         std::thread::spawn(move || {
             while let Ok((client, _)) = listener.accept() {
+                if state.load(Ordering::SeqCst) != UP {
+                    continue;
+                }
                 let Ok(server) = std::net::TcpStream::connect(&upstream) else {
                     continue;
                 };
@@ -438,18 +468,40 @@ impl Proxy {
                     (client.try_clone().expect("clone"), server.try_clone().expect("clone")),
                     (server, client),
                 ] {
+                    let state = std::sync::Arc::clone(&state);
                     std::thread::spawn(move || {
-                        let _ = std::io::copy(&mut from, &mut to);
+                        let mut buffer = [0u8; 16 * 1024];
+                        loop {
+                            match from.read(&mut buffer) {
+                                Ok(0) | Err(_) => break,
+                                Ok(count) => {
+                                    if state.load(Ordering::SeqCst) == BLACKHOLE {
+                                        continue;
+                                    }
+                                    if to.write_all(&buffer[..count]).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         let _ = to.shutdown(std::net::Shutdown::Both);
                     });
                 }
             }
         });
-        Self { port, connections }
+        Self {
+            port,
+            connections,
+            mode,
+        }
+    }
+
+    fn set(&self, mode: u8) {
+        self.mode.store(mode, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn cut(&self) {
-        for stream in self.connections.lock().expect("lock").iter() {
+        for stream in self.connections.lock().expect("lock").drain(..) {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -470,4 +522,175 @@ fn transport_loss_restores_the_terminal_and_fails_the_session() {
     proxy.cut();
     assert_eq!(client.wait().code(), Some(255));
     assert_eq!(attributes(&terminal.slave), before);
+}
+
+fn attach_command(target: &Target, proxy: &Proxy, name: &str, extra: &[&str]) -> Command {
+    let mut command = target.command();
+    command
+        .args(["-p", &proxy.port.to_string()])
+        .args(["--attach", name])
+        .args(extra)
+        .arg(target.address());
+    command
+}
+
+fn resize(terminal: &Terminal, rows: u16, cols: u16) {
+    tcsetwinsize(
+        &terminal.slave,
+        Winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    )
+    .expect("resize");
+}
+
+#[test]
+fn attach_reconnects_to_the_same_tmux_session_and_drops_input_typed_while_disconnected() {
+    let target = target();
+    let proxy = Proxy::start(&target);
+    let mut terminal = terminal(24, 80);
+    let before = attributes(&terminal.slave);
+    let mut client = terminal.spawn(attach_command(&target, &proxy, "reattach", &[]));
+    terminal.wait_raw();
+
+    terminal.type_in("echo MARKER_$((40+2))\r");
+    terminal.read_until("MARKER_42");
+    terminal.type_in("(i=0; while :; do i=$((i+1)); echo $i > /tmp/oxish-counter; sleep 1; done) &\r");
+    let created = terminal.query("tmux display -p 'CR=#{session_created}'\r", "CR=");
+    std::thread::sleep(Duration::from_millis(1500));
+    let counter = terminal.query("echo C1=$(cat /tmp/oxish-counter)\r", "C1=");
+
+    proxy.set(DOWN);
+    proxy.cut();
+    terminal.read_until("oxish: connection lost; reconnecting to 127.0.0.1 (attempt 1)\u{2026}");
+    assert_eq!(attributes(&terminal.slave), before, "the terminal is cooked while disconnected");
+
+    terminal.type_in("touch /tmp/oxish-leak-line\r");
+    terminal.type_in("LEAKPARTIAL");
+    resize(&terminal, 33, 111);
+    client.signal(Signal::WINCH);
+    terminal.read_until("(attempt 2)");
+    assert_eq!(attributes(&terminal.slave), before, "the terminal stays cooked between attempts");
+    std::thread::sleep(Duration::from_millis(1500));
+    proxy.set(UP);
+
+    terminal.wait_raw();
+    terminal.output.clear();
+    terminal.read_until("MARKER_42");
+
+    let same = terminal.query("tmux display -p 'CR=#{session_created}'\r", "CR=");
+    assert_eq!(same, created, "the same tmux session is attached");
+    let advanced = terminal.query("echo C2=$(cat /tmp/oxish-counter)\r", "C2=");
+    assert!(advanced >= counter + 3, "the counter kept running: {counter} then {advanced}");
+    let leaked = terminal.query("[ -e /tmp/oxish-leak-line ]; echo LEAKCHECK=$?\r", "LEAKCHECK=");
+    assert_eq!(leaked, 1, "input typed while disconnected was replayed");
+    terminal.type_in("stty size\r");
+    terminal.read_until("32 111");
+
+    terminal.type_in("exit\r");
+    assert_eq!(client.wait().code(), Some(0));
+    assert_eq!(attributes(&terminal.slave), before);
+}
+
+#[test]
+fn attach_notices_a_silent_peer_and_ctrl_c_ends_the_reconnecting() {
+    let target = target();
+    let proxy = Proxy::start(&target);
+    let mut terminal = terminal(24, 80);
+    let before = attributes(&terminal.slave);
+    let command = attach_command(
+        &target,
+        &proxy,
+        "silent",
+        &["--keepalive-interval", "1", "--keepalive-timeout", "4"],
+    );
+    let mut client = terminal.spawn(command);
+    terminal.wait_raw();
+    terminal.type_in("echo UP_$((1+1))\r");
+    terminal.read_until("UP_2");
+
+    proxy.set(BLACKHOLE);
+    let silent_since = Instant::now();
+    terminal.read_until("oxish: connection lost; reconnecting to 127.0.0.1 (attempt 1)");
+    let noticed = silent_since.elapsed();
+    assert!(noticed >= Duration::from_secs(3), "declared dead after {noticed:?}");
+    assert!(noticed < Duration::from_secs(12), "declared dead after {noticed:?}");
+    assert_eq!(attributes(&terminal.slave), before);
+
+    client.signal(Signal::INT);
+    assert_eq!(client.wait().code(), Some(255));
+    assert_eq!(attributes(&terminal.slave), before);
+}
+
+#[test]
+fn an_idle_attached_session_answers_keepalives_and_stays_up() {
+    let target = target();
+    let proxy = Proxy::start(&target);
+    let mut terminal = terminal(24, 80);
+    let before = attributes(&terminal.slave);
+    let command = attach_command(
+        &target,
+        &proxy,
+        "idle",
+        &["--keepalive-interval", "1", "--keepalive-timeout", "3"],
+    );
+    let mut client = terminal.spawn(command);
+    terminal.wait_raw();
+    terminal.type_in("echo FIRST_$((1+1))\r");
+    terminal.read_until("FIRST_2");
+    std::thread::sleep(Duration::from_secs(6));
+    terminal.type_in("echo SECOND_$((1+2))\r");
+    terminal.read_until("SECOND_3");
+    assert!(!String::from_utf8_lossy(&terminal.output).contains("connection lost"));
+    terminal.type_in("exit\r");
+    assert_eq!(client.wait().code(), Some(0));
+    assert_eq!(attributes(&terminal.slave), before);
+}
+
+#[test]
+fn attach_does_not_reconnect_after_tilde_dot_or_a_detach() {
+    let target = target();
+    let proxy = Proxy::start(&target);
+    let mut terminal = terminal(24, 80);
+    let before = attributes(&terminal.slave);
+    let mut client = terminal.spawn(attach_command(&target, &proxy, "leaving", &[]));
+    terminal.wait_raw();
+    terminal.type_in("echo HERE_$((1+1))\r");
+    terminal.read_until("HERE_2");
+    terminal.type_in("~.");
+    assert_eq!(client.wait().code(), Some(255));
+    assert!(!String::from_utf8_lossy(&terminal.output).contains("connection lost"));
+    assert_eq!(attributes(&terminal.slave), before);
+
+    let mut client = terminal.spawn(attach_command(&target, &proxy, "leaving", &[]));
+    terminal.wait_raw();
+    terminal.type_in("echo BACK_$((1+1))\r");
+    terminal.read_until("BACK_2");
+    terminal.type_in("tmux detach-client\r");
+    assert_eq!(client.wait().code(), Some(0));
+    assert!(!String::from_utf8_lossy(&terminal.output).contains("connection lost"));
+    assert_eq!(attributes(&terminal.slave), before);
+}
+
+#[test]
+fn attach_refuses_unsafe_names_and_a_missing_terminal() {
+    for name in ["a;touch x", "a b", "-w", "a$(id)", ""] {
+        let output = Command::new(env!("CARGO_BIN_EXE_oxish"))
+            .args(["-i", "key", "--host-key", "SHA256:x", "--attach", name, "user@127.0.0.1"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run oxish");
+        assert_eq!(output.status.code(), Some(255), "{name:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--attach needs a name"), "{name:?}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_oxish"))
+        .args(["-i", "key", "--host-key", "SHA256:x", "--attach", "work", "user@127.0.0.1"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run oxish");
+    assert_eq!(output.status.code(), Some(255));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("needs a terminal"));
 }

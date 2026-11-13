@@ -3,7 +3,7 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-image=oxish-client-fixture:alpine-3.22-openssh
+image=oxish-client-fixture:alpine-3.22-openssh-tmux
 user=xinfra
 [ "${1:-}" = exec ] && [ $# -ge 2 ] || { echo "usage: $0 exec COMMAND [ARG...]" >&2; exit 2; }
 shift

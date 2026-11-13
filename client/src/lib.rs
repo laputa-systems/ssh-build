@@ -19,7 +19,7 @@ pub use auth::Identity;
 pub use client::{ClientConfig, Connection, RekeyLimits};
 pub use error::{Certainty, Error};
 pub use exec::{ExecOptions, ExecResult, ExecStatus};
-pub use session::{PtyRequest, SessionEvents, SessionRequest, TerminalSize};
+pub use session::{Keepalive, PtyRequest, SessionEvents, SessionRequest, TerminalSize};
 pub use stream::{FileSink, InputSource, OutputSink, StreamOptions};
 pub use wire::Interrupt;
 pub use host_key::{Fingerprint, HostTrust};

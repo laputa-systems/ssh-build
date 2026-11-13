@@ -67,6 +67,44 @@ remote and keeps it attached across transport loss:
 This is reattachment, not Mosh-style roaming: the remote tmux server keeps the
 programs; the transport is new. Acceptance is the integration test below.
 
+Implemented behavior:
+
+- `NAME` is 1 to 64 ASCII letters, digits, `_` or `-`, not starting with `-`;
+  it is checked before any connection, so nothing else reaches the remote
+  command line. `--attach` needs a terminal on stdin and excludes a command
+  and `-T`. The remote command is exactly `tmux new-session -A -s NAME`.
+- Keepalives: after `--keepalive-interval` (default 10 s) without any byte from
+  the server the client sends a `keepalive@openssh.com` global request, and
+  repeats it every further interval of silence. The peer is dead after
+  `--keepalive-timeout` (default 30 s) of silence, so a vanished peer is
+  noticed within 30 s of its last byte. Socket errors, resets and EOF are
+  detected at once. The timers use the monotonic clock, which does not advance
+  while the host sleeps; after a wake the bound counts awake time, so a dead
+  connection is replaced within 30 s of the wake, and a connection that
+  survived the sleep carries on. A process stopped with SIGSTOP and continued
+  may reconnect spuriously; that is harmless because attach is idempotent.
+- On loss the terminal is restored to its original cooked attributes, mouse,
+  bracketed-paste, focus and alternate-screen modes the remote application set
+  are reset, and `oxish: connection lost; reconnecting to HOST (attempt N)…` is
+  printed. Attempt 1 follows at once; later attempts wait 1 s, doubling to 30 s.
+  A connection that stayed attached for 10 s or more restarts the sequence with
+  an immediate attempt. Attempts continue until the user interrupts with
+  Ctrl-C, which exits 255 (other signals exit `128+n`).
+- Every attempt is a new connection that verifies the host key before
+  authenticating. Transport failures retry; host-key, authentication and
+  protocol failures end the program with status 255. The first connection
+  never retries: a failure before the session started is reported as usual.
+- Input typed while disconnected is read and dropped while waiting, and flushed
+  again, including any partly typed line, just before raw mode returns.
+- On reconnect the local terminal re-enters raw mode, `pty-req` carries the
+  current size, and tmux redraws on attach. A normal exit, including a tmux
+  detach or session end, exits with the remote status without reconnecting; `~.`
+  disconnects with status 255 and does not reconnect. A channel that closes
+  with no exit status counts as loss.
+- A client that vanished without closing its connection stays attached to the
+  tmux session until sshd notices, because `-D` is not used: it would also
+  detach a second terminal that attached on purpose.
+
 ### 3. Login-mode server (SSHB-4)
 
 Restore upstream's PTY, shell and window-change handling as login mode, add
