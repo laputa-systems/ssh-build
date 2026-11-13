@@ -107,6 +107,9 @@ Implemented behavior:
 
 ### 3. Login-mode server (SSHB-4)
 
+Status: implemented in `vendor/oxish` (`--mode login`); see `README.md` for the configuration and
+`SECURITY.md` for the privilege model and what is not verified. Not yet run on Asterinas.
+
 Restore upstream's PTY, shell and window-change handling as login mode, add
 `exec` for login accounts, and keep Git mode unchanged:
 

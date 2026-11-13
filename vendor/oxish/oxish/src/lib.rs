@@ -32,6 +32,8 @@ mod git;
 pub use git::{GitAccess, GitCommand, GitPolicy, GitService, PolicyError, validate_protocol};
 mod authentication;
 pub use authentication::{Account, AuthError, Username};
+mod login;
+pub use login::{LoginAccounts, LoginPolicy, LoginSession, UserDatabase, UserEntry};
 mod session;
 pub use session::Session;
 #[doc(hidden)]
@@ -40,10 +42,12 @@ mod server;
 pub use server::{Config, Server};
 #[cfg(unix)]
 mod unix;
-pub use platform::resume;
+pub use platform::{drop_privileges, launch, resume, resume_login};
 #[cfg(unix)]
 use unix as platform;
 
+#[cfg(test)]
+mod login_tests;
 #[cfg(test)]
 mod tests;
 

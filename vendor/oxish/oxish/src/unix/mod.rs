@@ -1,10 +1,12 @@
 use core::{cmp::Ordering, mem::MaybeUninit};
 use std::{
+    ffi::OsString,
     io::{self, IoSlice, IoSliceMut},
     os::{
         fd::{AsFd, OwnedFd},
         unix::net::UnixStream,
     },
+    path::Path,
     process::Stdio,
 };
 
@@ -27,32 +29,54 @@ use tracing::debug;
 use zeroize::Zeroizing;
 
 use crate::{
-    Connection, Error, GitPolicy, SessionState,
-    server::Server,
-    session::Channels,
-    session::Session,
+    Connection, Error, GitPolicy, LoginSession, SessionState,
+    session::{Channels, Policy, Session},
 };
 
 mod exec;
-pub(crate) use exec::{GitProcess, Output, STOP_LIMIT};
+pub(crate) use exec::{Output, Process, STOP_LIMIT};
+mod privileges;
+mod terminal;
+
+/// Become the account a login session serves, before anything else runs in the process
+pub fn drop_privileges(login: &LoginSession) -> io::Result<()> {
+    privileges::drop_to(login.user(), login.allow_root())
+}
+
+/// Replace this process with a shell on the terminal it was started on
+///
+/// The helper for terminal sessions: it takes the terminal on standard input as its controlling
+/// terminal, then executes `program` with `argv0` and `args`, keeping the environment it was
+/// given. It returns only when that fails.
+pub fn launch(program: &OsString, argv0: &OsString, args: &[OsString]) -> io::Error {
+    use std::os::unix::process::CommandExt as _;
+
+    if let Err(error) = rustix::process::setsid() {
+        return error.into();
+    }
+    if let Err(error) = rustix::process::ioctl_tiocsctty(rustix::stdio::stdin()) {
+        return error.into();
+    }
+    std::process::Command::new(program).arg0(argv0).args(args).exec()
+}
 
 /// Spawn the session process for an authenticated connection
 ///
-/// The session process runs as the server's user (the server refuses to run as root) with an
-/// empty environment. It receives the connection and the negotiated state over a Unix socket
-/// and the validated Git policy directories as arguments.
+/// The session process runs with an empty environment and receives the connection and the
+/// negotiated state over a Unix socket. `args` select what it serves: the validated Git policy
+/// directories, or a login account (the session process then drops to that account itself).
 pub(crate) async fn spawn(
     state: SessionState<ServerHostKey<'_>>,
     stream: TcpStream,
-    server: &Server,
+    session: &Path,
+    args: &[OsString],
 ) -> Result<Child, Error> {
     let tcp = stream.into_std()?;
 
     let (parent, child_sock) = UnixStream::pair()?;
-    let mut command = Command::new(&server.session);
+    let mut command = Command::new(session);
     command
-        .arg(server.policy.repo_root())
-        .arg(server.policy.git_dir())
+        .args(args)
         .env_clear()
         .stdin(Stdio::from(OwnedFd::from(child_sock)))
         .stdout(Stdio::null())
@@ -65,6 +89,7 @@ pub(crate) async fn spawn(
     }
 
     let child = command.spawn()?;
+    drop(command);
 
     // The `[u8]` encoding yields the `u32` length prefix followed by the state itself.
     let mut message = Zeroizing::new(vec![0; 4]);
@@ -112,6 +137,21 @@ pub(crate) async fn spawn(
 pub fn resume(
     provider: &'static dyn CryptoProvider,
     policy: GitPolicy,
+) -> Result<Session<TcpStream>, Error> {
+    resume_with(provider, Policy::Git(policy))
+}
+
+/// Resume an SSH session of login mode from the session state received over the Unix socket
+pub fn resume_login(
+    provider: &'static dyn CryptoProvider,
+    login: LoginSession,
+) -> Result<Session<TcpStream>, Error> {
+    resume_with(provider, Policy::Login(login))
+}
+
+fn resume_with(
+    provider: &'static dyn CryptoProvider,
+    policy: Policy,
 ) -> Result<Session<TcpStream>, Error> {
     let source = rustix::stdio::stdin();
     let mut length = None;

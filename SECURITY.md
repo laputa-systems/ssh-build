@@ -1,19 +1,19 @@
 # Security status
 
-**The OxiSH Git server is experimental.** It has had one independent code review and one
-author review. Do not expose it to the internet on the strength of this
-document. The OpenSSH client is upstream OpenSSH 10.6p1 built without libcrypto; its security
+**The OxiSH server is experimental.** Its Git mode has had one independent code review and one
+author review; login mode (below) has had neither. Do not expose it to the internet on the strength
+of this document. The OpenSSH client is upstream OpenSSH 10.6p1 built without libcrypto; its security
 posture is OpenSSH's.
 
 ## Scope of the server
 
-Public-key authentication for one configured account, then `git-upload-pack` and
+Git mode (the default). Public-key authentication for one configured account, then `git-upload-pack` and
 `git-receive-pack` on repositories under one configured root, executed from one configured
 trusted Git directory. Everything else (shell, PTY, subsystems, forwarding, agent, X11, password
 login, forced commands, `git-upload-archive`) is refused, and the code for it is deleted rather
 than switched off.
 
-## Trust boundary
+## Trust boundary of Git mode
 
 - The operator trusts: the Git binaries in `--git-dir`, the repositories under `--repo-root`
   (their config and hooks run as the server user), `authorized_keys`, and the host keys.
@@ -32,7 +32,51 @@ than switched off.
   command's own process never sees the key, but anyone who can run code as the server user can
   read the host key file.
 
+## Login mode
+
+`oxish-server --mode login` is a second, separate mode. It authenticates Ed25519 keys from a
+server-owned accounts file (account name and key per line; never `~/.ssh`) and gives the account its
+own login shell: `pty-req`, `shell`, `exec` (`shell -c COMMAND`, with or without a terminal),
+`window-change`, a fixed environment and exit status or signal. Forwarding, agent, X11, subsystems
+and any other request are refused. Git mode keeps every restriction above.
+
+- **Privilege model.** The listener may run as root, only to accept, key-exchange and authenticate.
+  It then starts `oxish-session` with an empty environment and the account's user, group and
+  supplementary group IDs (resolved from the flat `passwd` and `group` files) as arguments. The
+  session process becomes the account before the runtime has a second thread: `setgroups`, then
+  group, then user (all of real, effective and saved), then it checks the IDs and the group list and
+  that `setuid(0)` and `setgid(0)` now fail, sets `umask` 022 and marks itself non-dumpable. Only
+  then does it open the terminal and execute the shell. A failure at any step ends the session
+  before anything runs. A server that is not root can serve only the account it runs as. Accounts
+  with user ID 0 or in group 0 are refused at startup and again in the session unless
+  `--allow-root-login` is given; `nologin` and `false` shells are refused.
+- **What the account can reach.** The session process holds the host private key (it signs
+  re-exchanges) and runs as the account, next to the account's shell. The only barrier between them
+  is that the process is non-dumpable (a test fails if `/proc/$PPID/mem` or `environ` is readable by
+  the shell); any other local flaw that exposes a same-user process's memory exposes the host key. A
+  user can also kill their own session process, which ends only their own connection.
+- **Pre-authentication code runs as root** in the listener when it is started as root: key
+  exchange, packet parsing and authentication are not isolated from root. That is the main reason
+  to treat login mode as experimental; an unprivileged pre-authentication process is future work.
+- **Client-supplied commands.** An `exec` string reaches the account's own shell as `-c COMMAND`
+  with the account's rights, exactly as in OpenSSH; there is no forced command and no restriction.
+  The environment is `TERM` (with a terminal, plain terminfo characters only, at most 64),
+  `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH` from `--login-path`, and with `--accept-locale`
+  `LANG` and `LC_*` (at most 16, 64 plain characters each). Everything else a client sends is dropped.
+- **Terminals.** The terminal is opened after the drop, so its slave belongs to the account. The
+  shell starts through `oxish-session launch`, which makes it a session leader with the terminal as
+  its controlling terminal and then executes it; this avoids `unsafe` pre-exec hooks. Disconnection
+  hangs the terminal up and escalates through `SIGTERM` to `SIGKILL` on the process group.
+- **Limits.** Same connection limits as Git mode; 8 channels and 4 live commands per connection.
+  A connection with a running command is not cut off for silence (dead peers are found by TCP
+  keepalive and the 60 s write deadline); one without is closed after 5 minutes.
+- **Not done:** no `utmp`/`wtmp`/`lastlog`, no PAM, no NSS (only flat files), no resource limits, no
+  per-key options (`command=`, `from=`), no revocation without a restart, no `signal` requests.
+  Switching users is implemented for Linux only; it has not been run on the Asterinas kernel.
+
 ## Review record
+
+The table and passes below describe Git mode.
 
 An independent expert review (read-only, with live experiments against a running server) and the
 author's own pass covered: SSH transport parsing and packet limits, KEX and rekey transitions,
@@ -90,7 +134,8 @@ without a finding.
 - Key and policy files are read at startup; revoking a key needs a restart.
 - Pre-auth capacity is bounded per address and globally, not per network; a distributed attacker
   can still fill the 32 global slots for 15-45 s at a time.
-- Only the immediate directory of `authorized_keys` is permission-checked.
+- Only the immediate directory of `authorized_keys` (and of the accounts, `passwd` and `group`
+  files) is permission-checked.
 - A failed ECDSA P-256 host-key signature returns an empty signature (the client rejects it);
   Ed25519, the default host key type, cannot fail this way.
 - The server does not initiate rekeying; the per-key packet limit (2^32-1) ends the connection

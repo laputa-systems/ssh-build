@@ -348,7 +348,7 @@ index 229c3f1f1bc0c9184cb5682ab76e0d7c204d2fe7..32e172a4b42c8fbbea3399504bb5a7bd
  name = "utf8parse"
  version = "0.2.2"
 diff --git a/Cargo.toml b/Cargo.toml
-index 3c82432e458aee44ed5188f96164529a567d2243..9cc2eb467a4a5a778c5d5c49d0d600bfa87b16a0 100644
+index 3c82432e458aee44ed5188f96164529a567d2243..a654633dae411cba6d641f1bd7f5ce85364d326e 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -1,5 +1,5 @@
@@ -366,6 +366,15 @@ index 3c82432e458aee44ed5188f96164529a567d2243..9cc2eb467a4a5a778c5d5c49d0d600bf
  bitflags = "2"
  clap = { version = "4.5.24", features = ["derive"] }
  data-encoding = "2.10"
+@@ -24,7 +23,7 @@ tokio = { version = "1.42", features = ["io-util", "macros", "net", "process", "
+ toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+ tracing = "0.1.41"
+ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+-rustix = { version = "1", features = ["termios", "pty", "process", "fs", "net", "stdio"] }
++rustix = { version = "1", features = ["termios", "pty", "process", "fs", "net", "stdio", "thread"] }
+ zeroize = "1"
+ 
+ [workspace.lints.rust]
 @@ -47,7 +46,13 @@ undocumented_unsafe_blocks = "warn"
  upper_case_acronyms = "warn"
  use_self = "warn"

@@ -13,10 +13,13 @@ use std::{
 };
 
 use anyhow::Context as _;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 #[cfg(target_os = "linux")]
 use listenfd::ListenFd;
-use oxish::{Account, Config, DEFAULT_PROVIDER, GitPolicy, Server, Username, load_host_keys, require_supported_cpu};
+use oxish::{
+    Account, Config, DEFAULT_PROVIDER, GitPolicy, LoginAccounts, LoginPolicy, Server, Username, load_host_keys,
+    require_supported_cpu,
+};
 use proto::{
     OpenSshKeyV1, SshPrivateKey,
     named::{Named, PublicKeyAlgorithm},
@@ -73,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let host_keys = load_host_keys(&args.host_key_file, provider)?;
     info!(len = host_keys.len(), "loaded host keys");
 
-    let session_bin = match args.session_bin {
+    let session_bin = match args.session_bin.clone() {
         Some(path) => path,
         None => {
             let exe = env::current_exe()?;
@@ -84,6 +87,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let session_bin = fs::canonicalize(&session_bin)
+        .with_context(|| format!("session binary `{}` not found", session_bin.display()))?;
     if !session_bin.is_file() {
         anyhow::bail!("session binary `{}` not found", session_bin.display());
     }
@@ -115,27 +120,69 @@ async fn main() -> anyhow::Result<()> {
         None => Config::default(),
     };
 
-    let (Some(repo_root), Some(git_dir), Some(authorized_keys)) =
-        (&args.repo_root, &args.git_dir, &args.authorized_keys)
-    else {
-        anyhow::bail!("--repo-root, --git-dir and --authorized-keys are required");
+    let host_keys_loaded = host_keys;
+    let server = match args.mode {
+        Mode::Git => {
+            anyhow::ensure!(
+                args.login_options().is_empty(),
+                "not valid without --mode login: {}",
+                args.login_options().join(", ")
+            );
+            let (Some(repo_root), Some(git_dir), Some(authorized_keys)) =
+                (&args.repo_root, &args.git_dir, &args.authorized_keys)
+            else {
+                anyhow::bail!("--repo-root, --git-dir and --authorized-keys are required");
+            };
+            let policy = GitPolicy::new(repo_root, git_dir).context("unsafe git configuration")?;
+            let name = Username::try_from(args.user.clone()).context("invalid --user")?;
+            let account = Account::from_file(name, authorized_keys, provider)?;
+            Server::new(account, host_keys_loaded, session_bin, policy, provider)?
+        }
+        Mode::Login => {
+            anyhow::ensure!(
+                args.git_options().is_empty(),
+                "not valid with --mode login: {}",
+                args.git_options().join(", ")
+            );
+            let Some(accounts) = &args.accounts else {
+                anyhow::bail!("--accounts is required with --mode login");
+            };
+            let accounts = LoginAccounts::from_file(accounts, provider)?;
+            let mut policy = LoginPolicy::default();
+            if let Some(path) = &args.login_path {
+                policy.path = path.clone();
+            }
+            if let Some(path) = &args.passwd_file {
+                policy.passwd = path.clone();
+            }
+            if let Some(path) = &args.group_file {
+                policy.group = path.clone();
+            }
+            policy.accept_locale = args.accept_locale;
+            policy.allow_root = args.allow_root_login;
+            Server::login(accounts, host_keys_loaded, session_bin, policy, provider)?
+        }
     };
-    let policy = GitPolicy::new(repo_root, git_dir).context("unsafe git configuration")?;
-    let name = Username::try_from(args.user).context("invalid --user")?;
-    let account = Account::from_file(name, authorized_keys, provider)?;
 
-    info!(addr = %listener.local_addr()?, "listening for connections");
-    Arc::new(
-        Server::new(account, host_keys, session_bin, policy, provider)?
-            .with_config(config),
-    )
-    .run(listener)
-    .await
+    info!(addr = %listener.local_addr()?, mode = ?args.mode, "listening for connections");
+    Arc::new(server.with_config(config)).run(listener).await
+}
+
+/// What the server serves after authentication
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Mode {
+    /// `git-upload-pack` and `git-receive-pack` for one account
+    Git,
+    /// A shell or command for each configured account, run as that account
+    Login,
 }
 
 #[derive(Debug, Parser)]
-#[command(about = "Git-only SSH server: public-key authentication, git-upload-pack and git-receive-pack")]
+#[command(about = "SSH server with public-key authentication: Git-only by default, or login accounts with --mode login")]
 struct Args {
+    /// What to serve; login mode may run as root and drops each session to its account
+    #[clap(long, value_enum, default_value_t = Mode::Git)]
+    mode: Mode,
     /// TCP port to listen on (or set LISTEN_FDS for socket activation)
     #[clap(short, long)]
     port: Option<u16>,
@@ -157,18 +204,63 @@ struct Args {
     /// Path to the `oxish-session` binary (defaults to a sibling of this executable)
     #[clap(long)]
     session_bin: Option<PathBuf>,
-    /// Directory holding all Git repositories clients may name
-    #[clap(long, required_unless_present = "generate_host_key")]
+    /// Git mode: directory holding all Git repositories clients may name
+    #[clap(long)]
     repo_root: Option<PathBuf>,
-    /// Trusted directory with `git`, `git-upload-pack` and `git-receive-pack` (a git-build install)
-    #[clap(long, required_unless_present = "generate_host_key")]
+    /// Git mode: trusted directory with `git`, `git-upload-pack` and `git-receive-pack` (a git-build install)
+    #[clap(long)]
     git_dir: Option<PathBuf>,
-    /// authorized_keys-format file; every key needs `git-access="read"` or `git-access="write"`
-    #[clap(long, required_unless_present = "generate_host_key")]
+    /// Git mode: authorized_keys-format file; every key needs `git-access="read"` or `git-access="write"`
+    #[clap(long)]
     authorized_keys: Option<PathBuf>,
-    /// The one SSH user name clients must use
+    /// Git mode: the one SSH user name clients must use
     #[clap(long, default_value = "git")]
     user: String,
+    /// Login mode: accounts file with one `name ssh-ed25519 KEY` per line (never `~/.ssh`)
+    #[clap(long)]
+    accounts: Option<PathBuf>,
+    /// Login mode: passwd file the accounts are resolved from
+    #[clap(long)]
+    passwd_file: Option<PathBuf>,
+    /// Login mode: group file supplementary groups are read from
+    #[clap(long)]
+    group_file: Option<PathBuf>,
+    /// Login mode: the PATH every session gets
+    #[clap(long)]
+    login_path: Option<String>,
+    /// Login mode: pass the client's LANG and LC_* variables to sessions
+    #[clap(long)]
+    accept_locale: bool,
+    /// Login mode: allow accounts with user ID 0 or in group 0
+    #[clap(long)]
+    allow_root_login: bool,
+}
+
+impl Args {
+    fn login_options(&self) -> Vec<&'static str> {
+        [
+            (self.accounts.is_some(), "--accounts"),
+            (self.passwd_file.is_some(), "--passwd-file"),
+            (self.group_file.is_some(), "--group-file"),
+            (self.login_path.is_some(), "--login-path"),
+            (self.accept_locale, "--accept-locale"),
+            (self.allow_root_login, "--allow-root-login"),
+        ]
+        .into_iter()
+        .filter_map(|(set, name)| set.then_some(name))
+        .collect()
+    }
+
+    fn git_options(&self) -> Vec<&'static str> {
+        [
+            (self.repo_root.is_some(), "--repo-root"),
+            (self.git_dir.is_some(), "--git-dir"),
+            (self.authorized_keys.is_some(), "--authorized-keys"),
+        ]
+        .into_iter()
+        .filter_map(|(set, name)| set.then_some(name))
+        .collect()
+    }
 }
 
 fn host_key_type(name: &str) -> Result<PublicKeyAlgorithm<'static>, String> {

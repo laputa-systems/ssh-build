@@ -88,6 +88,21 @@ TARGET=aarch64-apple-darwin sh scripts/package-oxish.sh    # dist/release/oxish-
 SSH_BIN_DIR=dist/ssh/aarch64-apple-darwin/bin OXISH_BIN_DIR=dist/oxish/aarch64-apple-darwin/bin sh test/e2e-git.sh
 ```
 
+Login-mode tests (`login_`) drive the built OpenSSH client from `PATH` (or `OXISH_TEST_SSH`), so put
+`dist/ssh/<triple>/bin` first on `PATH`; the one ECDSA test of Git mode needs an ECDSA-capable client
+and `ssh-keygen`, which the OpenSSL-free build does not have. Run as an ordinary user, the privilege
+test is skipped and the non-root refusal test runs. The privilege-drop test needs root: build the test
+executable and `oxish-session`, copy them with the client to a world-readable directory, and run it
+in a container (`OXISH_TEST_SESSION_BIN` names the session binary):
+
+```sh
+EXE=$(cargo test --locked --manifest-path vendor/oxish/Cargo.toml -p oxish --lib --no-run 2>&1 | sed -n 's/.*lib.rs (\(.*\))/\1/p')
+mkdir -p /tmp/rt/bin && cp "$EXE" /tmp/rt/oxish-tests && cp vendor/oxish/target/debug/oxish-session /tmp/rt/ \
+    && cp dist/ssh/<triple>/bin/ssh /tmp/rt/bin/ && chmod -R a+rX /tmp/rt
+docker run --rm -v /tmp/rt:/rt:ro -e OXISH_TEST_SESSION_BIN=/rt/oxish-session -e PATH=/rt/bin:/usr/bin:/bin \
+    alpine:3.24 /rt/oxish-tests login_
+```
+
 `test/e2e-git.sh` uses only the client under test, the server under test and the pinned git-build
 binaries (`scripts/fetch-git-build.sh`, read-only, checksum-verified). It never falls back to the
 system `ssh` or `git`. `test/linux-e2e.Dockerfile` runs it on Linux bytes inside a BuildKit step,

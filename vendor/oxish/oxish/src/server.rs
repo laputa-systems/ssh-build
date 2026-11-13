@@ -1,7 +1,7 @@
 use core::{mem, net::{IpAddr, SocketAddr}, time::Duration};
 #[cfg(coverage)]
 use std::env;
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
+use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::{Arc, Mutex}};
 
 use anyhow::Context as _;
 use proto::{HostKeys, ReadState, WriteState, crypto::CryptoProvider};
@@ -14,18 +14,25 @@ use tokio::{
 use tracing::{debug, instrument, warn};
 
 use crate::{
-    Connection, Error, GitPolicy, SessionState, SideState,
-    authentication::{Account, Authenticated, authenticate},
+    Connection, Error, GitPolicy, LoginAccounts, LoginPolicy, LoginSession, SessionState, SideState,
+    authentication::{Account, Authenticated, Principals, authenticate},
     platform::spawn,
 };
+
+/// What the server serves after authentication
+enum Mode {
+    /// The one Git account, and the repositories and programs it may use
+    Git { account: Account, policy: GitPolicy },
+    /// Login accounts, each served by a session process that becomes that account
+    Login { accounts: LoginAccounts, policy: LoginPolicy },
+}
 
 /// State for an SSH server
 pub struct Server {
     pub(crate) provider: &'static dyn CryptoProvider,
     pub(crate) host_keys: HostKeys,
     pub(crate) session: PathBuf,
-    pub(crate) account: Account,
-    pub(crate) policy: GitPolicy,
+    mode: Mode,
     pub(crate) authenticating: Semaphore,
     sessions: Semaphore,
     pre_auth_by_ip: Arc<PerIp>,
@@ -49,18 +56,48 @@ impl Server {
             rustix::process::geteuid().as_raw() != 0,
             "refusing to run as root; use a dedicated unprivileged Git account"
         );
-        Ok(Self {
+        Ok(Self::with_mode(provider, host_keys, session, Mode::Git { account, policy }))
+    }
+
+    /// Create a login-mode server: authenticated users get a shell or command as their account
+    ///
+    /// The listener may run as root; each session is served by the `session` binary, which drops
+    /// to the account (groups, group, user) before it opens a terminal or runs anything. Every
+    /// account must resolve in the user database and be allowed to log in, or this fails.
+    pub fn login(
+        accounts: LoginAccounts,
+        host_keys: HostKeys,
+        session: PathBuf,
+        policy: LoginPolicy,
+        provider: &'static dyn CryptoProvider,
+    ) -> anyhow::Result<Self> {
+        policy.validate()?;
+        anyhow::ensure!(session.is_absolute(), "the session binary path must be absolute");
+        let database = policy.database();
+        for name in accounts.names() {
+            let user = database.lookup(name)?;
+            user.check(policy.allow_root)?;
+        }
+        Ok(Self::with_mode(provider, host_keys, session, Mode::Login { accounts, policy }))
+    }
+
+    fn with_mode(
+        provider: &'static dyn CryptoProvider,
+        host_keys: HostKeys,
+        session: PathBuf,
+        mode: Mode,
+    ) -> Self {
+        Self {
             provider,
             host_keys,
             session,
-            account,
-            policy,
+            mode,
             authenticating: Semaphore::new(MAX_UNAUTHENTICATED),
             sessions: Semaphore::new(Config::default().max_sessions),
             pre_auth_by_ip: Arc::new(PerIp::new(Config::default().max_unauthenticated_per_ip)),
             sessions_by_ip: Arc::new(PerIp::new(Config::default().max_sessions_per_ip)),
             config: Config::default(),
-        })
+        }
     }
 
     /// Set additional server configuration
@@ -135,10 +172,14 @@ impl Server {
             Err(_) => return Err(anyhow::anyhow!("key exchange timed out")),
         };
 
-        let Authenticated { options } = authenticate(
+        let principals = match &self.mode {
+            Mode::Git { account, .. } => Principals::Git(account),
+            Mode::Login { accounts, .. } => Principals::Login(accounts),
+        };
+        let Authenticated { options, user } = authenticate(
             &kx.session_id,
             &mut conn,
-            &self.account,
+            &principals,
             self.provider,
         )
         .await
@@ -196,7 +237,8 @@ impl Server {
             options,
         };
 
-        let mut child = spawn(state, stream, self)
+        let args = self.session_args(&user).await?;
+        let mut child = spawn(state, stream, &self.session, &args)
             .await
             .context("failed to spawn session process")?;
 
@@ -207,6 +249,27 @@ impl Server {
             }
             Ok(status) => Err(anyhow::anyhow!("session process exited with {status}")),
             Err(error) => Err(error).context("failed to wait for session process"),
+        }
+    }
+}
+
+impl Server {
+    /// The arguments that tell the session process what to serve
+    async fn session_args(&self, user: &str) -> anyhow::Result<Vec<OsString>> {
+        match &self.mode {
+            Mode::Git { policy, .. } => Ok(vec![
+                policy.repo_root().as_os_str().to_owned(),
+                policy.git_dir().as_os_str().to_owned(),
+            ]),
+            Mode::Login { policy, .. } => {
+                let (database, name) = (policy.database(), user.to_owned());
+                let entry = tokio::task::spawn_blocking(move || database.lookup(&name))
+                    .await
+                    .context("user lookup was interrupted")?
+                    .context("cannot resolve the account")?;
+                entry.check(policy.allow_root).context("account may not log in")?;
+                Ok(LoginSession::new(entry, policy, self.session.clone()).to_args())
+            }
         }
     }
 }

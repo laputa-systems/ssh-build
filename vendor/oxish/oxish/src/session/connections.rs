@@ -5,7 +5,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
-use std::{collections::BTreeMap, os::unix::process::ExitStatusExt as _, sync::Arc};
+use std::{collections::BTreeMap, ffi::OsString, os::unix::process::ExitStatusExt as _, sync::Arc};
 
 use proto::{
     IncomingPacket, MAX_PACKET_LEN, MessageType, ProtoError, WriteState,
@@ -14,7 +14,7 @@ use proto::{
         ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelOpen,
         ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest, ChannelRequestFailure,
         ChannelRequestSuccess, ChannelRequestType, ChannelWindowAdjust, EXTENDED_DATA_STDERR, Env,
-        Exec, ExitSignal,
+        Exec, ExitSignal, PtyReq, WindowChange,
     },
     named::ChannelType,
 };
@@ -25,8 +25,10 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    DEFAULT_PROVIDER, Error, GitPolicy, PolicyError, validate_protocol,
-    platform::{GitProcess, Output, STOP_LIMIT},
+    DEFAULT_PROVIDER, Error, GitPolicy, LoginSession, PolicyError,
+    login::valid_term,
+    platform::{Output, Process, STOP_LIMIT},
+    validate_protocol,
 };
 
 /// Open session channels of one connection
@@ -98,6 +100,8 @@ impl Channels {
             credit: 0,
             maximum_packet_size: open.maximum_packet_size,
             protocol: None,
+            terminal: None,
+            env: Vec::new(),
             run: Run::Idle,
             close_sent: false,
         };
@@ -146,7 +150,7 @@ impl Channels {
                     false
                 } else if let Ok(permit) = processes.try_acquire_owned() {
                     match grant.policy.authorize(exec.command, grant.options.git_access) {
-                        Ok(command) => match GitProcess::spawn(&command, channel.protocol, permit) {
+                        Ok(command) => match Process::spawn_git(&command, channel.protocol, permit) {
                             Ok(process) => {
                                 info!(service = ?command.service, "running git command");
                                 channel.run = Run::Active(Box::new(Active::new(Some(process))));
@@ -175,6 +179,66 @@ impl Channels {
                     false
                 }
             }
+            other => {
+                warn!(request_type = ?other, "rejecting unsupported channel request");
+                false
+            }
+        };
+
+        if request.want_reply {
+            match accepted {
+                true => write.encode(&ChannelRequestSuccess {
+                    recipient_channel: channel.remote_id,
+                })?,
+                false => write.encode(&ChannelRequestFailure {
+                    recipient_channel: channel.remote_id,
+                })?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle a channel request of login mode: terminal, locale, shell, command and window size
+    ///
+    /// Everything else (forwarding, agent, X11, subsystems, other variables) is refused.
+    pub(crate) fn request_login(
+        &mut self,
+        request: ChannelRequest<'_>,
+        write: &mut WriteState,
+        login: &LoginSession,
+    ) -> Result<(), Error> {
+        let processes = self.processes.clone();
+        let Some(channel) = self.channels.get_mut(&request.recipient_channel) else {
+            return Err(ProtoError::InvalidPacket("channel request for unknown channel ID").into());
+        };
+
+        let accepted = match request.r#type {
+            ChannelRequestType::PtyReq(req) => match (&channel.run, &channel.terminal) {
+                (Run::Idle, None) if valid_term(&req.term) => {
+                    channel.terminal = Some(req.into_owned());
+                    true
+                }
+                _ => {
+                    warn!("rejecting terminal request");
+                    false
+                }
+            },
+            ChannelRequestType::Env(env) => {
+                if matches!(channel.run, Run::Idle)
+                    && channel.env.len() < MAX_ENV
+                    && login.accepts_env(env.name, env.value)
+                {
+                    channel.env.retain(|(name, _)| name != env.name);
+                    channel.env.push((env.name.into(), env.value.into()));
+                    true
+                } else {
+                    debug!(name = env.name, "rejecting environment variable request");
+                    false
+                }
+            }
+            ChannelRequestType::Shell => channel.start_login(login, None, &processes),
+            ChannelRequestType::Exec(exec) => channel.start_login(login, Some(exec.command), &processes),
+            ChannelRequestType::WindowChange(size) => channel.change_window(&size),
             other => {
                 warn!(request_type = ?other, "rejecting unsupported channel request");
                 false
@@ -335,6 +399,10 @@ struct Channel {
     credit: u32,
     maximum_packet_size: u32,
     protocol: Option<&'static str>,
+    /// The terminal a `pty-req` asked for, applied when the shell or command starts (login mode)
+    terminal: Option<PtyReq<'static>>,
+    /// Locale variables the client may set (login mode)
+    env: Vec<(OsString, OsString)>,
     run: Run,
     close_sent: bool,
 }
@@ -348,7 +416,7 @@ enum Run {
 }
 
 struct Active {
-    process: Option<GitProcess>,
+    process: Option<Process>,
     /// Diagnostics owed to the client on stderr before anything else
     stderr_backlog: Vec<u8>,
     outcome: Option<Outcome>,
@@ -366,7 +434,7 @@ enum Outcome {
 }
 
 impl Active {
-    fn new(process: Option<GitProcess>) -> Self {
+    fn new(process: Option<Process>) -> Self {
         Self {
             process,
             stderr_backlog: Vec::new(),
@@ -380,6 +448,64 @@ impl Active {
 }
 
 impl Channel {
+    /// Start the account's shell (`command` is `None`) or run `command` through it
+    fn start_login(&mut self, login: &LoginSession, command: Option<&[u8]>, processes: &Arc<Semaphore>) -> bool {
+        if !matches!(self.run, Run::Idle) {
+            warn!("rejecting a second shell or command on a channel");
+            return false;
+        }
+        let Ok(permit) = processes.clone().try_acquire_owned() else {
+            warn!("rejecting request: too many live commands");
+            return false;
+        };
+
+        let mut spec = login.command(command);
+        if let Some(terminal) = &self.terminal {
+            if !terminal.term.is_empty() {
+                spec.env.push(("TERM".into(), terminal.term.as_ref().into()));
+            }
+        }
+        spec.env.extend(self.env.iter().cloned());
+        match Process::spawn_login(&spec, self.terminal.as_ref(), &login.launcher, permit) {
+            Ok(process) => {
+                info!(account = %login.user.name, command = command.is_some(), terminal = self.terminal.is_some(), "started login command");
+                self.run = Run::Active(Box::new(Active::new(Some(process))));
+                true
+            }
+            Err(error) => {
+                warn!(%error, "failed to start login command");
+                false
+            }
+        }
+    }
+
+    /// Apply a `window-change`; before the command starts it updates the requested size
+    fn change_window(&mut self, size: &WindowChange) -> bool {
+        match &mut self.run {
+            Run::Active(active) => match active.process.as_ref() {
+                Some(process) if process.has_terminal() => match process.resize(size) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(%error, "failed to resize the terminal");
+                        false
+                    }
+                },
+                _ => false,
+            },
+            Run::Idle => match self.terminal.as_mut() {
+                Some(terminal) => {
+                    terminal.cols = size.cols;
+                    terminal.rows = size.rows;
+                    terminal.width_px = size.width_px;
+                    terminal.height_px = size.height_px;
+                    true
+                }
+                None => false,
+            },
+            Run::Finished => false,
+        }
+    }
+
     /// Make progress; returns whether any message was written
     fn poll(&mut self, cx: &mut Context<'_>, write: &mut WriteState) -> Result<bool, Error> {
         let Run::Active(active) = &mut self.run else {
@@ -494,7 +620,7 @@ impl Channel {
         }
 
         let outputs_done = active.stderr_backlog.is_empty()
-            && active.process.as_ref().is_none_or(GitProcess::outputs_closed);
+            && active.process.as_ref().is_none_or(Process::outputs_closed);
 
         if outputs_done && !active.eof_sent && active.outcome.is_some() {
             write.encode(&ChannelEof {
@@ -536,7 +662,7 @@ impl Channel {
     /// Tell the client how much of its window the child has consumed
     fn return_credit(&mut self, write: &mut WriteState) -> Result<bool, Error> {
         let drained = match &self.run {
-            Run::Active(active) => active.process.as_ref().is_none_or(GitProcess::stdin_drained),
+            Run::Active(active) => active.process.as_ref().is_none_or(Process::stdin_drained),
             _ => true,
         };
 
@@ -567,6 +693,10 @@ fn signal_name(signal: Option<i32>) -> &'static str {
         Some(libc::SIGINT) => "INT",
         Some(libc::SIGQUIT) => "QUIT",
         Some(libc::SIGABRT) => "ABRT",
+        Some(libc::SIGILL) => "ILL",
+        Some(libc::SIGFPE) => "FPE",
+        Some(libc::SIGUSR1) => "USR1",
+        Some(libc::SIGUSR2) => "USR2",
         Some(libc::SIGKILL) => "KILL",
         Some(libc::SIGSEGV) => "SEGV",
         Some(libc::SIGPIPE) => "PIPE",
@@ -663,7 +793,9 @@ const READ_CHUNK: usize = 32 * 1024;
 const MAX_PACKETS_PER_POLL: usize = 16;
 /// Session channels one connection may hold open at once
 const MAX_CHANNELS: usize = 8;
-/// Git commands one connection may run at once
+/// Locale variables one channel may set
+const MAX_ENV: usize = 16;
+/// Git commands (or login commands) one connection may run at once
 const MAX_PROCESSES: usize = 4;
 /// How long shutdown waits beyond the stop sequence for commands to be reaped
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);

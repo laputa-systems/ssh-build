@@ -12,12 +12,18 @@ use tokio::{
 };
 use tracing::{debug, info, instrument, trace, warn};
 
-use crate::{Connection, Error, GitPolicy, receive};
+use crate::{Connection, Error, GitPolicy, LoginSession, receive};
 
 mod connections;
 pub(crate) use connections::Channels;
 pub use connections::fuzz_channel_state;
 use connections::{ChannelsFuture, Grant, IncomingChannelMessage};
+
+/// What an authenticated connection may do: serve Git, or log an account in
+pub(crate) enum Policy {
+    Git(GitPolicy),
+    Login(LoginSession),
+}
 
 /// A single SSH session's state
 ///
@@ -29,7 +35,7 @@ pub struct Session<T> {
     pub(crate) channels: Channels,
     pub(crate) post_quantum_kx: bool,
     pub(crate) options: KeyOptions,
-    pub(crate) policy: GitPolicy,
+    pub(crate) policy: Policy,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
@@ -56,9 +62,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
         tokio::pin!(idle);
         let mut last_activity = Instant::now();
         loop {
-            let allowed = match self.channels.busy() {
-                true => BUSY_TIMEOUT,
-                false => IDLE_TIMEOUT,
+            let allowed = match (self.channels.busy(), &self.policy) {
+                (true, Policy::Git(_)) => BUSY_TIMEOUT,
+                (true, Policy::Login(_)) => LOGIN_BUSY_TIMEOUT,
+                (false, _) => IDLE_TIMEOUT,
             };
             idle.as_mut().reset(last_activity + allowed);
             tokio::select! {
@@ -109,10 +116,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
                     debug!(message = %Pretty(&channel_message), "handling channel message");
                     match channel_message {
                         IncomingChannelMessage::Open(open) => self.channels.open(open, &mut self.conn.write),
-                        IncomingChannelMessage::Request(request) => {
-                            let grant = Grant { policy: &self.policy, options: &self.options };
-                            self.channels.request(request, &mut self.conn.write, &grant)
-                        }
+                        IncomingChannelMessage::Request(request) => match &self.policy {
+                            Policy::Git(policy) => {
+                                let grant = Grant { policy, options: &self.options };
+                                self.channels.request(request, &mut self.conn.write, &grant)
+                            }
+                            Policy::Login(login) => self.channels.request_login(request, &mut self.conn.write, login),
+                        },
                         IncomingChannelMessage::Data(data) => self.channels.data(&data).map_err(Into::into),
                         IncomingChannelMessage::WindowAdjust(adjust) => self.channels.adjust_window(&adjust).map_err(Into::into),
                         IncomingChannelMessage::Eof(eof) => self.channels.eof(&eof).map_err(Into::into),
@@ -139,5 +149,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Session<T> {
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long a connection with a running command may stay silent in both directions
 const BUSY_TIMEOUT: Duration = Duration::from_secs(3600);
+/// How long a login connection with a running command may stay silent in both directions
+///
+/// Dead peers are caught by TCP keepalive and the write deadline, so an idle shell is not cut off.
+const LOGIN_BUSY_TIMEOUT: Duration = Duration::from_secs(30 * 24 * 3600);
 /// How long buffered output may wait for a peer that is not reading
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);

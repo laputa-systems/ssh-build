@@ -1152,7 +1152,10 @@ static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
 /// binary here (a no-op when fresh). Unit tests run from `target/<profile>/deps/` (or
 /// `target/<profile>/build/<package>/<hash>/out/` with Cargo's newer build directory layout),
 /// while cargo places the binary in `target/<profile>/`.
-async fn build_session_binary() -> anyhow::Result<PathBuf> {
+pub(crate) async fn build_session_binary() -> anyhow::Result<PathBuf> {
+    if let Some(bin) = env::var_os("OXISH_TEST_SESSION_BIN") {
+        return Ok(PathBuf::from(bin));
+    }
     let exe = env::current_exe()?;
     // TODO: simplify for new build directory layout once MSRV hits 1.100
     let Some(profile_dir) = exe
@@ -1191,7 +1194,7 @@ async fn build_session_binary() -> anyhow::Result<PathBuf> {
     Ok(bin)
 }
 
-fn subscribe() {
+pub(crate) fn subscribe() {
     static INSTALL_TRACING_SUBSCRIBER: Once = Once::new();
     INSTALL_TRACING_SUBSCRIBER.call_once(|| {
         let subscriber = tracing_subscriber::FmtSubscriber::builder()

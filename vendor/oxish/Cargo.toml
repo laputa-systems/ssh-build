@@ -23,7 +23,7 @@ tokio = { version = "1.42", features = ["io-util", "macros", "net", "process", "
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-rustix = { version = "1", features = ["termios", "pty", "process", "fs", "net", "stdio"] }
+rustix = { version = "1", features = ["termios", "pty", "process", "fs", "net", "stdio", "thread"] }
 zeroize = "1"
 
 [workspace.lints.rust]

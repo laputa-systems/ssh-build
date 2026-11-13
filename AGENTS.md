@@ -1,7 +1,8 @@
 # ssh-build
 
 OpenSSH 10.6p1 client built `--without-openssl` (macOS arm64, static-musl Linux x86_64/aarch64) plus
-experimental Graviola-only OxiSH tools (Git server, `oxish-keygen`, the interactive client once built), shipped as separate `.tar.xz` archives. Users read `README.md`.
+Graviola-only OxiSH tools (a server with Git and login modes, the interactive `oxish` client and
+`oxish-keygen`), shipped as separate `.tar.xz` archives. Users read `README.md`.
 
 ## Commands
 
@@ -24,8 +25,10 @@ SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/e2e-git.sh                # server end
 - `scripts/oxish-bins.sh` owns the `oxish` archive's executable list and `OXISH_CLIENT_REQUIRED`.
 - `vendor/oxish` and `vendor/graviola` are reproducible: `sh scripts/vendor-oxish.sh verify` and
   `sh scripts/vendor-graviola.sh verify`. Edit `vendor/`, then run both `export` scripts.
-- The server never executes a client-supplied program, path or environment variable, and every
-  server crate forbids `unsafe`.
+- Git mode never executes a client-supplied program, path or environment variable. Login mode
+  runs a client-supplied command string only through the authenticated account's own shell
+  (`shell -c`) after the session process has dropped to that account, with the fixed environment
+  in `SECURITY.md`. Every server crate forbids `unsafe`.
 - Release qualification never uses the system `ssh` or `git`.
 - Do not change the pinned nightly in `rust-toolchain.toml` unless the owner asks.
 
