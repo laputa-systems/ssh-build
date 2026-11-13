@@ -19,13 +19,29 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::{Connection, Error, receive};
+use crate::{Connection, Error, login::LoginAccounts, receive};
 
-#[instrument(name = "authentication", skip(session_id, conn, account, provider), fields(addr = %conn.addr))]
+/// Who may authenticate: the one Git account, or the accounts of login mode
+pub(crate) enum Principals<'a> {
+    Git(&'a Account),
+    Login(&'a LoginAccounts),
+}
+
+impl Principals<'_> {
+    fn keys_for(&self, user: &str) -> &[AuthorizedKey] {
+        match self {
+            Self::Git(account) if user == &*account.name => &account.keys,
+            Self::Git(_) => &[],
+            Self::Login(accounts) => accounts.keys_for(user),
+        }
+    }
+}
+
+#[instrument(name = "authentication", skip(session_id, conn, principals, provider), fields(addr = %conn.addr))]
 pub(crate) async fn authenticate<T: AsyncRead + AsyncWrite + Unpin>(
     session_id: &Digest,
     conn: &mut Connection<T>,
-    account: &Account,
+    principals: &Principals<'_>,
     provider: &dyn CryptoProvider,
 ) -> anyhow::Result<Authenticated> {
     let mut state = AuthenticationState::default();
@@ -37,7 +53,7 @@ pub(crate) async fn authenticate<T: AsyncRead + AsyncWrite + Unpin>(
                     packet,
                     session_id,
                     &mut conn.write,
-                    account,
+                    principals,
                     provider,
                 )
                 .await;
@@ -108,7 +124,7 @@ impl AuthenticationState {
         packet: IncomingPacket<'_>,
         session_id: &Digest,
         write: &mut WriteState,
-        account: &Account,
+        principals: &Principals<'_>,
         provider: &dyn CryptoProvider,
     ) -> Result<Self, Error> {
         match (self, packet.message_type) {
@@ -164,15 +180,12 @@ impl AuthenticationState {
                     return Ok(Self::AwaitAuthRequest { attempts });
                 };
 
-                let requested_user_matches = user_auth_request.user_name == &*account.name;
-                if !requested_user_matches {
-                    warn!(requested = user_auth_request.user_name, "requested user is not the Git account");
+                let keys = principals.keys_for(user_auth_request.user_name);
+                if keys.is_empty() {
+                    warn!(requested = user_auth_request.user_name, "requested user has no authorized keys");
                 }
 
-                let authorized_key = match requested_user_matches {
-                    true => account.keys.iter().find(|key| key.matches(&public_key)),
-                    false => None,
-                };
+                let authorized_key = keys.iter().find(|key| key.matches(&public_key));
                 let (sig, authorized_key, genuine) = match (public_key.signature, authorized_key) {
                     // Signature, authorized key => verify signature
                     (Some(sig), Some(key)) if &sig.algorithm == key.algorithm() => {
@@ -236,12 +249,13 @@ impl AuthenticationState {
                 };
 
                 let options = authorized_key.options.clone();
+                let user = user_auth_request.user_name.to_owned();
                 match spawn_blocking(move || authorized_key.verify(message, signature)).await {
                     Ok(Ok(())) if genuine => {
-                        info!(user = %account.name, "authentication successful");
+                        info!(%user, "authentication successful");
 
                         write.encode(&MessageType::UserAuthSuccess)?;
-                        Ok(Self::Complete(Authenticated { options }))
+                        Ok(Self::Complete(Authenticated { options, user }))
                     }
                     _ => {
                         send_auth_failed(write)?;
@@ -314,41 +328,7 @@ impl Account {
         path: &Path,
         provider: &dyn CryptoProvider,
     ) -> anyhow::Result<Self> {
-        use std::{
-            fs::OpenOptions,
-            io::Read as _,
-            os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
-        };
-
-        let euid = rustix::process::geteuid().as_raw();
-        let check = |meta: &std::fs::Metadata, what: &Path| -> anyhow::Result<()> {
-            anyhow::ensure!(
-                meta.uid() == euid && meta.mode() & 0o022 == 0,
-                "{} must be owned by the server user and not writable by others",
-                what.display()
-            );
-            Ok(())
-        };
-
-        let parent = match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
-        check(&std::fs::metadata(parent).context("authorized keys directory")?, parent)?;
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-            .with_context(|| format!("failed to open authorized keys file `{}`", path.display()))?;
-        let meta = file.metadata()?;
-        anyhow::ensure!(meta.is_file(), "{} is not a regular file", path.display());
-        check(&meta, path)?;
-        anyhow::ensure!(meta.len() <= MAX_KEY_FILE_BYTES, "{} is too large", path.display());
-
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)
-            .with_context(|| format!("failed to read `{}`", path.display()))?;
+        let contents = read_trusted_file(path, "authorized keys", false)?;
 
         let mut keys = Vec::new();
         for (index, line) in contents.lines().enumerate() {
@@ -377,10 +357,94 @@ impl Account {
     }
 }
 
+/// Refuse a file or directory that someone else could have changed
+///
+/// It must belong to the server user (or, with `root_may_own`, to root) and not be writable by
+/// group or others.
+fn check_owner_and_mode(meta: &std::fs::Metadata, name: &Path, root_may_own: bool) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let euid = rustix::process::geteuid().as_raw();
+    let owned = meta.uid() == euid || (root_may_own && meta.uid() == 0);
+    anyhow::ensure!(
+        owned && meta.mode() & 0o022 == 0,
+        "{} must be owned by the server user and not writable by others",
+        name.display()
+    );
+    Ok(())
+}
+
+/// Read a small configuration file that must not be controllable by anyone else
+///
+/// The file and its directory must belong to the server user (or, with `root_may_own`, to root)
+/// and not be writable by group or others; the file must be a regular file and not a symlink.
+pub(crate) fn read_trusted_file(path: &Path, what: &str, root_may_own: bool) -> anyhow::Result<String> {
+    let contents = read_trusted_bytes(path, what, root_may_own)?;
+    String::from_utf8(contents).with_context(|| format!("{} is not valid UTF-8", path.display()))
+}
+
+/// [`read_trusted_file`] without requiring the contents to be text
+pub(crate) fn read_trusted_bytes(path: &Path, what: &str, root_may_own: bool) -> anyhow::Result<Vec<u8>> {
+    use std::{fs::OpenOptions, io::Read as _, os::unix::fs::OpenOptionsExt as _};
+
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    check_owner_and_mode(
+        &std::fs::metadata(parent).with_context(|| format!("{what} directory"))?,
+        parent,
+        root_may_own,
+    )?;
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .with_context(|| format!("failed to open {what} file `{}`", path.display()))?;
+    let meta = file.metadata()?;
+    anyhow::ensure!(meta.is_file(), "{} is not a regular file", path.display());
+    check_owner_and_mode(&meta, path, root_may_own)?;
+    anyhow::ensure!(meta.len() <= MAX_KEY_FILE_BYTES, "{} is too large", path.display());
+
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .with_context(|| format!("failed to read `{}`", path.display()))?;
+    Ok(contents)
+}
+
+/// Refuse to execute a program, as a privileged listener, that someone else could have replaced
+///
+/// The program must be a regular file (not a symlink) owned by the server user or root and not
+/// writable by group or others, and so must its directory. Only the immediate directory is
+/// checked, as for the other trusted files.
+pub(crate) fn check_trusted_executable(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    check_owner_and_mode(
+        &std::fs::metadata(parent).context("session binary directory")?,
+        parent,
+        true,
+    )?;
+    let meta = std::fs::symlink_metadata(path).with_context(|| format!("session binary `{}`", path.display()))?;
+    anyhow::ensure!(
+        meta.is_file() && meta.mode() & 0o111 != 0,
+        "{} is not an executable regular file",
+        path.display()
+    );
+    check_owner_and_mode(&meta, path, true)
+}
+
 /// A successfully authenticated connection, with the options on the key it authenticated with
 pub(crate) struct Authenticated {
     /// Options from the `authorized_keys` entry that matched
     pub(crate) options: KeyOptions,
+    /// The user name the client authenticated as
+    pub(crate) user: String,
 }
 
 /// A validated username

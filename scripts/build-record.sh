@@ -9,6 +9,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/sha256.sh"
+. "$script_dir/oxish-bins.sh"
 cd "$repo_root"
 
 fail() { echo "build-record: $*" >&2; exit 1; }
@@ -25,8 +26,8 @@ case $product in
         inputs="scripts/fetch-sources.sh scripts/lock.sh sources.lock.json Dockerfile Makefile scripts/build-macos.sh scripts/qualify-binaries.sh"
         ;;
     oxish)
-        bins="oxish-server oxish-session"
-        inputs="vendor/oxish vendor/graviola patches rust-toolchain.toml sources.lock.json Dockerfile.oxish Makefile scripts/build-oxish-macos.sh scripts/qualify-binaries.sh"
+        bins=$(oxish_bins "$bin_dir")
+        inputs="vendor/oxish vendor/graviola client/Cargo.toml client/Cargo.lock client/src patches rust-toolchain.toml sources.lock.json Dockerfile.oxish Makefile scripts/build-oxish-macos.sh scripts/qualify-binaries.sh scripts/oxish-bins.sh"
         ;;
     *) fail "unknown product $product" ;;
 esac
@@ -88,6 +89,9 @@ case $mode in
         if [ "$(field .dirty)" = true ] && [ "${ALLOW_DIRTY:-0}" != 1 ]; then
             fail "$bin_dir was built from an uncommitted tree; commit and rebuild, or set ALLOW_DIRTY=1 for a local package"
         fi
+        recorded=$(field '.executables | keys | join(" ")' | tr ' ' '\n' | sort | tr '\n' ' ')
+        wanted=$(printf '%s\n' $bins | sort | tr '\n' ' ')
+        [ "$recorded" = "$wanted" ] || fail "$bin_dir holds [$wanted] but its build record names [$recorded]"
         for b in $bins; do
             [ -x "$bin_dir/$b" ] || fail "$bin_dir/$b missing"
             want=$(field ".executables[\"$b\"]")

@@ -222,7 +222,8 @@ jobs:
           for arch in x86_64 aarch64; do
             triple=$arch-unknown-linux-musl
             EXPECT_ARCH=$arch sh scripts/qualify-binaries.sh "stage/ssh/$triple" linux
-            EXPECT_ARCH=$arch QUALIFY_BINS="oxish-server oxish-session" sh scripts/qualify-binaries.sh "stage/oxish/$triple/bin" linux
+            . scripts/oxish-bins.sh
+            EXPECT_ARCH=$arch QUALIFY_BINS="$(oxish_bins "stage/oxish/$triple/bin")" sh scripts/qualify-binaries.sh "stage/oxish/$triple/bin" linux
           done
 
       - name: Consolidate SHA256SUMS

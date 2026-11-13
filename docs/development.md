@@ -59,10 +59,27 @@ only after the target passes.
 `docker buildx build -f test/qualify-elf.Dockerfile --platform linux/arm64 .` checks that the
 Linux qualifier rejects an executable stack and a missing RELRO segment.
 
-## Server
+## Server and OxiSH client tools
+
+The `oxish` archive holds `bin/oxish-server`, `bin/oxish-session` (when the server build makes it),
+`bin/oxish-keygen` and, when `client/` builds it, `bin/oxish`. `scripts/oxish-bins.sh` is the one
+owner of that list: it names what a bin directory must hold, and every script, the Dockerfile and
+`release.yml` read it. While the client binary does not exist the archive simply omits it. To make
+a missing client fail the build record, packaging and the release job, set
+`OXISH_CLIENT_REQUIRED=1` in `scripts/oxish-bins.sh` (the only edit needed). Also re-measure the
+archive and update `release-budgets.json`; the client adds to every target.
+
+`Dockerfile.oxish` and `scripts/build-oxish-macos.sh` build `vendor/oxish` and `client/` with the
+same flags (static PIE on Linux, deployment floor 14.0 and ad-hoc signing on macOS) and qualify
+every executable. `client/Cargo.toml` carries the release profile (fat LTO, one codegen unit,
+stripped); the client keeps `panic = "unwind"` so terminal restoration can run in destructors.
+`build-record.json` names the exact executable set, so a binary dropped into the directory later is
+refused. The manifest lists the `executables`, and `make verify` checks they match the archive.
 
 ```sh
-sh scripts/check-crypto-graph.sh [--selftest]      # Graviola is the only provider (graph and Cargo.lock)
+cargo test --locked --manifest-path client/Cargo.toml --test keygen   # oxish-keygen vs OpenSSH's ssh-keygen
+SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/oxish-keygen.sh             # the same on the unpacked archives
+sh scripts/check-crypto-graph.sh [--selftest]      # Graviola is the only provider (server and client: graph and Cargo.lock)
 sh scripts/vendor-oxish.sh verify                  # vendor/oxish == pinned upstream + patches/oxish
 sh scripts/vendor-graviola.sh verify               # vendor/graviola == pinned crate + patches/graviola
 cargo test --locked --manifest-path vendor/oxish/Cargo.toml
@@ -71,10 +88,62 @@ TARGET=aarch64-apple-darwin sh scripts/package-oxish.sh    # dist/release/oxish-
 SSH_BIN_DIR=dist/ssh/aarch64-apple-darwin/bin OXISH_BIN_DIR=dist/oxish/aarch64-apple-darwin/bin sh test/e2e-git.sh
 ```
 
+Login-mode tests (`login_`) drive the built OpenSSH client from `PATH` (or `OXISH_TEST_SSH`), so put
+`dist/ssh/<triple>/bin` first on `PATH`; the one ECDSA test of Git mode needs an ECDSA-capable client
+and `ssh-keygen`, which the OpenSSL-free build does not have. Run as an ordinary user, the privilege
+test is skipped and the non-root refusal test runs. The privilege tests (including account in group 0
+and the session-binary owner check) need root: build the test executable and `oxish-session`, copy them
+with the client to a world-readable directory, and run it in a container (`OXISH_TEST_SESSION_BIN`
+names the session binary). The session binary must be root-owned there, so copy it inside the
+container and `chown` it; mounted host files belong to your user and are refused. The ptrace checks of
+`login_session_process_is_sealed_from_the_account` run when `python3` is on `PATH`:
+
+```sh
+EXE=$(cargo test --locked --manifest-path vendor/oxish/Cargo.toml -p oxish --lib --no-run 2>&1 | sed -n 's/.*lib.rs (\(.*\))/\1/p')
+mkdir -p /tmp/rt/bin && cp "$EXE" /tmp/rt/oxish-tests && cp vendor/oxish/target/debug/oxish-session /tmp/rt/ \
+    && cp dist/ssh/<triple>/bin/ssh /tmp/rt/bin/ && chmod -R a+rX /tmp/rt
+docker run --rm -v /tmp/rt:/rt:ro alpine:3.24 sh -c 'mkdir /opt/rt && cp -r /rt/. /opt/rt/ && chown -R 0:0 /opt/rt \
+    && chmod -R go-w /opt/rt && OXISH_TEST_SESSION_BIN=/opt/rt/oxish-session PATH=/opt/rt/bin:/usr/bin:/bin /opt/rt/oxish-tests login_'
+```
+
 `test/e2e-git.sh` uses only the client under test, the server under test and the pinned git-build
 binaries (`scripts/fetch-git-build.sh`, read-only, checksum-verified). It never falls back to the
 system `ssh` or `git`. `test/linux-e2e.Dockerfile` runs it on Linux bytes inside a BuildKit step,
 because `docker run` hangs on the macOS development machine; its header shows the build arguments.
+
+The keygen test runs the `ssh-keygen` in `SSH_BIN_DIR` when set (the repository's OpenSSH build)
+and otherwise the one on `PATH`; it fails rather than skips when none runs.
+
+### Interactive end-to-end test
+
+Linux only; it needs Docker (with buildx), `jaq`, and a network to fetch the pinned tmux sources and
+ish release on first use. It runs the real `oxish --attach` client, `oxish-server --mode login` (as
+root, with `oxish-session`) and `oxish-keygen` from the bin directory, against the pinned ish
+(`ish.lock.json`, through `scripts/fetch-ish.sh`) and a static tmux built from `tmux.lock.json`. No
+`ssh`, `git` or `tmux` of the host is used.
+
+```sh
+make binaries PRODUCT=oxish TARGET=x86_64-unknown-linux-musl
+OXISH_BIN_DIR=dist/oxish/x86_64-unknown-linux-musl/bin sh test/e2e-interactive.sh
+E2E_MODE=standin SSH_BIN_DIR=dist/ssh/x86_64-unknown-linux-musl/bin sh test/e2e-interactive.sh   # harness check with OpenSSH
+```
+
+`KEEP=1` leaves the server container and network after a failure; `DRIVER_ARGS` passes flags to
+`test/interactive-driver.py` (`--show-screen`, and `--inject '1;2c'`, a self-test that must make the
+run fail). `make verify` runs it on the unpacked archive of Linux targets. The scenario is in
+`docs/interactive.md` phase 4; the one place that spells out the binaries' command lines is
+`test/interactive-binaries.sh`.
+
+It proves, with the screen of a terminal emulator inside the driver and tmux's own view as ground
+truth: the client attaches tmux session `work` as the `work` account (ish login shell) over a
+host-key-pinned Ed25519 connection and owns raw mode; after the TCP path between the containers is
+cut for 8 s and restored, the same `oxish` process (same pid) reattaches the same tmux session on the
+same server, the marker is still on screen and a counter that kept running server-side has advanced;
+input typed during the outage is not replayed; no terminal-reply garbage is left at the prompt; typed
+input works; a window resize reaches `tput cols`; when the tmux session ends the client exits with
+the remote status 0 and the local terminal attributes are byte-identical to before the run. The
+stand-in mode shares the harness but restarts the OpenSSH client itself, so it does not exercise the
+reconnect assertions that are specific to `oxish --attach`.
 
 `Dockerfile.oxish` links Rust with Alpine's gcc and musl rather than Rust's bundled start files:
 the bundled ones crash static-PIE binaries at startup. Two clean builds of the Linux arm64 server

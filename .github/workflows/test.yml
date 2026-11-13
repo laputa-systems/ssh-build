@@ -47,3 +47,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/.work/target-oxish
         run: cargo test --locked --manifest-path vendor/oxish/Cargo.toml
+      - name: Key generator tests (OpenSSH interop)
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/.work/target-oxish-client
+        run: cargo test --locked --manifest-path client/Cargo.toml --test keygen

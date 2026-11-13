@@ -35,6 +35,8 @@ RUN rustup-init -y --no-modify-path --profile minimal --default-toolchain none \
 
 COPY vendor/oxish /src/vendor/oxish
 COPY vendor/graviola /src/vendor/graviola
+COPY client/Cargo.toml client/Cargo.lock /src/client/
+COPY client/src /src/client/src
 
 # Static-PIE needs the system musl start files (rcrt1.o), which Rust's bundled ones are not, so the
 # link uses Alpine's gcc and musl; libgcc_eh provides the _Unwind_* symbols Rust asks libunwind for.
@@ -43,14 +45,18 @@ RUN mkdir /opt/unwind-shim && ln -s "$(gcc -print-file-name=libgcc_eh.a)" /opt/u
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=pic -C link-self-contained=no -C link-arg=-static-pie -L /opt/unwind-shim"
 RUN triple="$(uname -m)-unknown-linux-musl" \
     && cargo build --locked --release --target "$triple" --manifest-path vendor/oxish/Cargo.toml -p oxish --bins \
+    && cargo build --locked --release --target "$triple" --manifest-path client/Cargo.toml --bins \
     && mkdir /out \
     && cp "vendor/oxish/target/$triple/release/oxish-server" "vendor/oxish/target/$triple/release/oxish-session" /out/ \
+    && cp "client/target/$triple/release/oxish-keygen" /out/ \
+    && if [ -f "client/target/$triple/release/oxish" ]; then cp "client/target/$triple/release/oxish" /out/; fi \
     && rustc -vV > /out/rustc-version.txt
 
-COPY scripts/qualify-binaries.sh /tmp/qualify-binaries.sh
+COPY scripts/qualify-binaries.sh scripts/oxish-bins.sh /tmp/
 
-RUN QUALIFY_BINS="oxish-server oxish-session" sh /tmp/qualify-binaries.sh /out \
-    && rm /tmp/qualify-binaries.sh
+RUN . /tmp/oxish-bins.sh \
+    && QUALIFY_BINS="$(oxish_bins /out)" sh /tmp/qualify-binaries.sh /out \
+    && rm /tmp/qualify-binaries.sh /tmp/oxish-bins.sh
 
 FROM scratch AS artifacts
 

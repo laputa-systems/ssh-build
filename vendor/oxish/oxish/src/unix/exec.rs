@@ -6,9 +6,11 @@ use core::{
 use std::{
     collections::VecDeque,
     io,
+    path::Path,
     process::{ExitStatus, Stdio},
 };
 
+use proto::channels::{PtyReq, WindowChange};
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -18,24 +20,70 @@ use tokio::{
 };
 use tracing::debug;
 
-use crate::GitCommand;
+use super::terminal::PtyMaster;
+use crate::{GitCommand, login::LoginCommand};
 
-/// A validated Git command running with piped stdio and no terminal
+/// A command running as a child process, with piped stdio or on a pseudo-terminal
 ///
 /// Everything here is non-blocking: inbound channel data is queued (the caller bounds the queue
 /// with the SSH window) and written to the child when its pipe accepts it, and the output pipes
-/// are read only when the caller has window to send. The child runs in its own process group so
-/// that it and anything it spawned can be killed together.
-pub(crate) struct GitProcess {
+/// are read only when the caller has window to send. The child runs in its own process group (or
+/// session, on a terminal) so that it and anything it spawned can be killed together.
+pub(crate) struct Process {
     child: Option<Child>,
     group: Option<Pid>,
-    stdin: Option<ChildStdin>,
+    stdin: Option<Stdin>,
     queue: VecDeque<u8>,
     stdin_closing: bool,
-    stdout: Option<ChildStdout>,
+    stdout: Option<Stdout>,
     stderr: Option<ChildStderr>,
+    terminal: Option<PtyMaster>,
     status: Option<ExitStatus>,
     permit: Option<OwnedSemaphorePermit>,
+}
+
+/// The writing end of a command: its stdin pipe, or the terminal
+enum Stdin {
+    Pipe(ChildStdin),
+    Terminal(PtyMaster),
+}
+
+impl AsyncWrite for Stdin {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Pipe(pipe) => Pin::new(pipe).poll_write(cx, buf),
+            Self::Terminal(master) => master.poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Pipe(pipe) => Pin::new(pipe).poll_flush(cx),
+            Self::Terminal(_) => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Pipe(pipe) => Pin::new(pipe).poll_shutdown(cx),
+            Self::Terminal(_) => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+/// The reading end of a command: its stdout pipe, or the terminal
+enum Stdout {
+    Pipe(ChildStdout),
+    Terminal(PtyMaster),
+}
+
+impl AsyncRead for Stdout {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Pipe(pipe) => Pin::new(pipe).poll_read(cx, buf),
+            Self::Terminal(master) => master.poll_read(cx, buf),
+        }
+    }
 }
 
 /// Which child output pipe to read
@@ -45,11 +93,11 @@ pub(crate) enum Output {
     Stderr,
 }
 
-impl GitProcess {
+impl Process {
     /// Spawn a validated command; `protocol` is an already validated `GIT_PROTOCOL` value
     ///
     /// The permit stays held until the child has been reaped, including while it is being stopped.
-    pub(crate) fn spawn(
+    pub(crate) fn spawn_git(
         command: &GitCommand,
         protocol: Option<&str>,
         permit: OwnedSemaphorePermit,
@@ -75,16 +123,102 @@ impl GitProcess {
             .and_then(Pid::from_raw);
         let missing = |name| io::Error::other(format!("spawned git has no {name}"));
         Ok(Self {
-            stdin: Some(child.stdin.take().ok_or_else(|| missing("stdin"))?),
-            stdout: Some(child.stdout.take().ok_or_else(|| missing("stdout"))?),
+            stdin: Some(Stdin::Pipe(child.stdin.take().ok_or_else(|| missing("stdin"))?)),
+            stdout: Some(Stdout::Pipe(child.stdout.take().ok_or_else(|| missing("stdout"))?)),
             stderr: Some(child.stderr.take().ok_or_else(|| missing("stderr"))?),
             child: Some(child),
             group,
             queue: VecDeque::new(),
             stdin_closing: false,
+            terminal: None,
             status: None,
             permit: Some(permit),
         })
+    }
+
+    /// Spawn a login shell or command, on a new terminal when a `pty-req` came first
+    ///
+    /// Without a terminal the shell runs in its own process group with piped stdio. With one, the
+    /// `launcher` (`oxish-session launch`) starts as the session leader on the terminal, takes it
+    /// as its controlling terminal and then executes the shell, so no `unsafe` pre-exec hook is
+    /// needed. The caller has already dropped to the account's identity.
+    pub(crate) fn spawn_login(
+        command: &LoginCommand,
+        terminal: Option<&PtyReq<'_>>,
+        launcher: &Path,
+        permit: OwnedSemaphorePermit,
+    ) -> io::Result<Self> {
+        let Some(request) = terminal else {
+            let mut cmd = Command::new(&command.program);
+            cmd.arg0(&command.argv0)
+                .args(&command.args)
+                .env_clear()
+                .envs(command.env.iter().map(|(key, value)| (key, value)))
+                .current_dir(&command.cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .kill_on_drop(true);
+            debug!(program = ?command.program, "spawning login command");
+            let mut child = cmd.spawn()?;
+            let group = child.id().and_then(|id| i32::try_from(id).ok()).and_then(Pid::from_raw);
+            let missing = |name| io::Error::other(format!("spawned command has no {name}"));
+            return Ok(Self {
+                stdin: Some(Stdin::Pipe(child.stdin.take().ok_or_else(|| missing("stdin"))?)),
+                stdout: Some(Stdout::Pipe(child.stdout.take().ok_or_else(|| missing("stdout"))?)),
+                stderr: Some(child.stderr.take().ok_or_else(|| missing("stderr"))?),
+                child: Some(child),
+                group,
+                queue: VecDeque::new(),
+                stdin_closing: false,
+                terminal: None,
+                status: None,
+                permit: Some(permit),
+            });
+        };
+
+        let (master, slave) = PtyMaster::open(request)?;
+        let mut cmd = Command::new(launcher);
+        cmd.arg("launch")
+            .arg(&command.program)
+            .arg(&command.argv0)
+            .args(&command.args)
+            .env_clear()
+            .envs(command.env.iter().map(|(key, value)| (key, value)))
+            .current_dir(&command.cwd)
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave))
+            .kill_on_drop(true);
+        debug!(program = ?command.program, "spawning login command on a terminal");
+        let child = cmd.spawn()?;
+        drop(cmd);
+        let group = child.id().and_then(|id| i32::try_from(id).ok()).and_then(Pid::from_raw);
+        Ok(Self {
+            stdin: Some(Stdin::Terminal(master.clone())),
+            stdout: Some(Stdout::Terminal(master.clone())),
+            stderr: None,
+            child: Some(child),
+            group,
+            queue: VecDeque::new(),
+            stdin_closing: false,
+            terminal: Some(master),
+            status: None,
+            permit: Some(permit),
+        })
+    }
+
+    /// Apply a `window-change` to the terminal; without one there is nothing to resize
+    pub(crate) fn resize(&self, size: &WindowChange) -> io::Result<()> {
+        match &self.terminal {
+            Some(master) => master.resize(size),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn has_terminal(&self) -> bool {
+        self.terminal.is_some()
     }
 
     /// Queue channel data for the child's stdin
@@ -234,6 +368,7 @@ impl GitProcess {
     pub(crate) fn terminate(&mut self) {
         self.stdin = None;
         self.queue.clear();
+        let on_terminal = self.terminal.take().is_some();
         if self.status.is_some() {
             return;
         }
@@ -243,6 +378,13 @@ impl GitProcess {
         };
         let group = self.group;
         let (stdout, stderr) = (self.stdout.take(), self.stderr.take());
+        let stdout = match on_terminal {
+            true => {
+                signal_group(group, Signal::HUP);
+                None
+            }
+            false => stdout,
+        };
         let permit = self.permit.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             signal_group(group, Signal::KILL);
@@ -266,7 +408,7 @@ pub(crate) const STOP_LIMIT: Duration = STDIN_EOF_GRACE.saturating_add(TERMINATE
 async fn stop(
     child: &mut Child,
     group: Option<Pid>,
-    stdout: Option<ChildStdout>,
+    stdout: Option<Stdout>,
     stderr: Option<ChildStderr>,
 ) {
     let drain = async move {
@@ -304,7 +446,7 @@ fn signal_group(group: Option<Pid>, signal: Signal) {
     }
 }
 
-impl Drop for GitProcess {
+impl Drop for Process {
     fn drop(&mut self) {
         self.terminate();
     }

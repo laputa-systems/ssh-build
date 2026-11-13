@@ -1,7 +1,7 @@
 #!/bin/sh
 # Check the packaged assets for one target and exercise the bytes they contain: SHA256SUMS, each
-# manifest, then test/runtime.sh and test/e2e-git.sh on the unpacked archives. The host must run
-# the target natively.
+# manifest, then test/runtime.sh and test/e2e-git.sh on the unpacked archives, and on Linux targets
+# test/e2e-interactive.sh (Docker). The host must run the target natively.
 # Usage: TARGET=<triple> sh scripts/verify-release.sh [out_dir]      (default: dist/release)
 set -eu
 
@@ -52,8 +52,21 @@ for product in ssh oxish; do
     fi
     mkdir -p "$unpack/$product"
     tar -xJf "$archive" -C "$unpack/$product"
+    if [ "$product" = oxish ]; then
+        listed=$(jaq -r '.executables[]' "$manifest" | sort)
+        present=$(cd "$unpack/oxish/bin" && ls | sort)
+        [ -n "$listed" ] && [ "$listed" = "$present" ] || fail "$manifest lists [$listed] but the archive holds [$present]"
+        for b in $listed; do
+            [ -x "$unpack/oxish/bin/$b" ] || fail "$name: bin/$b is not executable"
+        done
+    fi
 done
 
 cd "$repo_root"
 SSH_BIN_DIR=$unpack/ssh sh test/runtime.sh
+SSH_BIN_DIR=$unpack/ssh OXISH_BIN_DIR=$unpack/oxish/bin sh test/oxish-keygen.sh
 SSH_BIN_DIR=$unpack/ssh OXISH_BIN_DIR=$unpack/oxish/bin sh test/e2e-git.sh
+# The interactive scenario runs the Linux bytes in containers, so only Linux targets have it.
+case $triple in
+    *-unknown-linux-musl) TARGET=$triple OXISH_BIN_DIR=$unpack/oxish/bin sh test/e2e-interactive.sh ;;
+esac

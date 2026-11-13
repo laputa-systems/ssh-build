@@ -265,7 +265,7 @@ impl FromStr for OpenSshKeyV1 {
             return Err(ProtoError::InvalidHostKey("missing PEM header"));
         }
 
-        let mut base64 = Zeroizing::new(String::new());
+        let mut base64 = Zeroizing::new(String::with_capacity(input.len()));
         let mut footer = false;
         for line in lines {
             if line == "-----END OPENSSH PRIVATE KEY-----" {
@@ -280,11 +280,14 @@ impl FromStr for OpenSshKeyV1 {
             return Err(ProtoError::InvalidHostKey("missing PEM footer"));
         }
 
-        let Ok(blob) = data_encoding::BASE64.decode(base64.as_bytes()) else {
+        let Ok(size) = data_encoding::BASE64.decode_len(base64.len()) else {
             return Err(ProtoError::InvalidHostKey("invalid base64"));
         };
-
-        let blob = Zeroizing::new(blob);
+        let mut blob = Zeroizing::new(vec![0; size]);
+        let Ok(size) = data_encoding::BASE64.decode_mut(base64.as_bytes(), &mut blob) else {
+            return Err(ProtoError::InvalidHostKey("invalid base64"));
+        };
+        blob.truncate(size);
         let Some(next) = blob.strip_prefix(b"openssh-key-v1\0") else {
             return Err(ProtoError::InvalidHostKey("invalid magic"));
         };

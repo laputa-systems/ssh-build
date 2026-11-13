@@ -26,7 +26,7 @@ for b in $bins; do
     test -x "$f" || { echo "FAIL: $f missing or not executable" >&2; fails=$((fails + 1)); continue; }
 
     case $b in
-        oxish-*)
+        oxish|oxish-*)
             ! LC_ALL=C grep -aqiE 'aws-lc|aws_lc|openssl|boringssl|libressl' "$f"; chk $? "$b: no other crypto provider named in the bytes"
             ;;
         sftp|scp)

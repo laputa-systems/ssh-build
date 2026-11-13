@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "inputs": [
+    {
+      "name": "tmux",
+      "version": "3.8",
+      "url": "https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz",
+      "sha256": "e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e"
+    },
+    {
+      "name": "libevent",
+      "version": "2.1.13-stable",
+      "url": "https://github.com/libevent/libevent/releases/download/release-2.1.13-stable/libevent-2.1.13-stable.tar.gz",
+      "sha256": "f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c"
+    },
+    {
+      "name": "ncurses",
+      "version": "6.6",
+      "url": "https://ftp.gnu.org/gnu/ncurses/ncurses-6.6.tar.gz",
+      "sha256": "355b4cbbed880b0381a04c46617b7656e362585d52e9cf84a67e2009b749ff11"
+    }
+  ]
+}

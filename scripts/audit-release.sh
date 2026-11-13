@@ -105,6 +105,11 @@ grep -q 'make verify TARGET=' "$file" || { echo "audit 14: the packaged archives
 verify_script="$repo_root/scripts/verify-release.sh"
 grep -q "test/e2e-git.sh" "$verify_script" || { echo "audit 14: no end-to-end run on the packaged archives" >&2; exit 1; }
 grep -q "test/runtime.sh" "$verify_script" || { echo "audit 14: no client runtime run on the packaged archives" >&2; exit 1; }
+grep -q "test/oxish-keygen.sh" "$verify_script" || { echo "audit 14: oxish-keygen is not exercised on the packaged archive" >&2; exit 1; }
 check "14 packaged archives are exercised and Linux ELFs qualified before publication"
 
-echo "audited $workflow: 14/14 properties hold"
+grep -q "oxish_bins" "$file" || { echo "audit 15: the Linux qualification does not follow the archive's executable list" >&2; exit 1; }
+grep -q "OXISH_CLIENT_REQUIRED" "$repo_root/scripts/oxish-bins.sh" || { echo "audit 15: scripts/oxish-bins.sh lost OXISH_CLIENT_REQUIRED" >&2; exit 1; }
+check "15 the oxish executable list has one owner (scripts/oxish-bins.sh)"
+
+echo "audited $workflow: 15/15 properties hold"

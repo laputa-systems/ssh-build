@@ -143,7 +143,8 @@ pub struct KeySourceSide {
 }
 
 impl KeySourceSide {
-    pub(crate) fn client_to_server(
+    /// Derive the client-to-server direction from the exchange hash and session id.
+    pub fn client_to_server(
         derivation: &KeyDerivation,
         algorithm: EncryptionAlgorithm<'static>,
     ) -> Result<Self, CryptoError> {
@@ -162,7 +163,8 @@ impl KeySourceSide {
         })
     }
 
-    pub(crate) fn server_to_client(
+    /// Derive the server-to-client direction from the exchange hash and session id.
+    pub fn server_to_client(
         derivation: &KeyDerivation,
         algorithm: EncryptionAlgorithm<'static>,
     ) -> Result<Self, CryptoError> {
@@ -211,12 +213,16 @@ pub struct KeyLengths {
     pub iv_len: usize,
 }
 
-pub(crate) struct KeyDerivation {
-    pub(crate) hash: &'static dyn Hash,
+/// The inputs to the SSH key derivation function
+pub struct KeyDerivation {
+    /// Hash implementation selected by the key exchange algorithm
+    pub hash: &'static dyn Hash,
     /// The shared secret `K`, encoded exactly as fed into the exchange hash
-    pub(crate) shared_secret: SharedSecret,
-    pub(crate) exchange_hash: Digest,
-    pub(crate) session_id: Digest,
+    pub shared_secret: SharedSecret,
+    /// The exchange hash `H`
+    pub exchange_hash: Digest,
+    /// The session identifier, equal to the first exchange hash
+    pub session_id: Digest,
 }
 
 impl KeyDerivation {
