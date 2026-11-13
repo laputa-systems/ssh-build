@@ -14,12 +14,12 @@ use proto::{
         ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelOpen,
         ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest, ChannelRequestFailure,
         ChannelRequestSuccess, ChannelRequestType, ChannelWindowAdjust, EXTENDED_DATA_STDERR, Env,
-        Exec, ExitSignal, PtyReq, WindowChange,
+        Exec, ExitSignal, PtyReq, Subsystem, WindowChange,
     },
     named::ChannelType,
 };
 use tokio::{
-    sync::Semaphore,
+    sync::{OwnedSemaphorePermit, Semaphore},
     time::{Instant, Sleep, sleep},
 };
 use tracing::{debug, info, warn};
@@ -28,6 +28,7 @@ use crate::{
     DEFAULT_PROVIDER, Error, GitPolicy, LoginSession, PolicyError,
     login::valid_term,
     platform::{Output, Process, STOP_LIMIT},
+    sftp::Core,
     validate_protocol,
 };
 
@@ -59,11 +60,11 @@ pub(crate) struct Grant<'a> {
 }
 
 impl Channels {
-    /// Whether any channel has a running Git process
+    /// Whether any channel has a running command or an SFTP session
     pub(crate) fn busy(&self) -> bool {
         self.channels
             .values()
-            .any(|channel| matches!(channel.run, Run::Active(_)))
+            .any(|channel| matches!(channel.run, Run::Active(_) | Run::Sftp(_)))
     }
 
     pub(crate) fn open(
@@ -200,7 +201,8 @@ impl Channels {
 
     /// Handle a channel request of login mode: terminal, locale, shell, command and window size
     ///
-    /// Everything else (forwarding, agent, X11, subsystems, other variables) is refused.
+    /// The `sftp` subsystem is served in-process. Everything else (forwarding, agent, X11, other
+    /// subsystems, other variables) is refused.
     pub(crate) fn request_login(
         &mut self,
         request: ChannelRequest<'_>,
@@ -238,6 +240,7 @@ impl Channels {
             }
             ChannelRequestType::Shell => channel.start_login(login, None, &processes),
             ChannelRequestType::Exec(exec) => channel.start_login(login, Some(exec.command), &processes),
+            ChannelRequestType::Subsystem(subsystem) => channel.start_sftp(login, &subsystem, &processes),
             ChannelRequestType::WindowChange(size) => channel.change_window(&size),
             other => {
                 warn!(request_type = ?other, "rejecting unsupported channel request");
@@ -298,6 +301,15 @@ impl Channels {
                     channel.credit = channel.credit.saturating_add(len);
                 }
             }
+            Run::Sftp(sftp) => match sftp.failed {
+                true => channel.credit = channel.credit.saturating_add(len),
+                false => {
+                    if let Err(fatal) = sftp.core.push(&data.data) {
+                        warn!(%fatal, "closing the sftp session");
+                        sftp.failed = true;
+                    }
+                }
+            },
             Run::Idle | Run::Finished => channel.credit = channel.credit.saturating_add(len),
         }
         Ok(())
@@ -310,10 +322,14 @@ impl Channels {
             ));
         };
 
-        if let Run::Active(active) = &mut channel.run {
-            if let Some(process) = active.process.as_mut() {
-                process.close_stdin();
+        match &mut channel.run {
+            Run::Active(active) => {
+                if let Some(process) = active.process.as_mut() {
+                    process.close_stdin();
+                }
             }
+            Run::Sftp(sftp) => sftp.eof_received = true,
+            Run::Idle | Run::Finished => {}
         }
 
         debug!(channel_id = %eof.recipient_channel, "received channel eof from client");
@@ -377,10 +393,14 @@ impl Channels {
     /// closed earlier, has been reaped
     pub(crate) async fn shutdown(&mut self) {
         for channel in self.channels.values_mut() {
-            if let Run::Active(active) = &mut channel.run {
-                if let Some(mut process) = active.process.take() {
-                    process.terminate();
+            match &mut channel.run {
+                Run::Active(active) => {
+                    if let Some(mut process) = active.process.take() {
+                        process.terminate();
+                    }
                 }
+                Run::Sftp(_) => channel.run = Run::Finished,
+                Run::Idle | Run::Finished => {}
             }
         }
 
@@ -411,8 +431,16 @@ enum Run {
     /// No command requested yet
     Idle,
     Active(Box<Active>),
+    Sftp(Box<SftpRun>),
     /// The exit was reported and the channel close sent
     Finished,
+}
+
+struct SftpRun {
+    core: Core,
+    _permit: OwnedSemaphorePermit,
+    eof_received: bool,
+    failed: bool,
 }
 
 struct Active {
@@ -479,6 +507,33 @@ impl Channel {
         }
     }
 
+    fn start_sftp(&mut self, login: &LoginSession, subsystem: &Subsystem<'_>, processes: &Arc<Semaphore>) -> bool {
+        if subsystem.name != "sftp" || !matches!(self.run, Run::Idle) || self.terminal.is_some() {
+            warn!(name = subsystem.name, "rejecting subsystem request");
+            return false;
+        }
+        let Ok(permit) = processes.clone().try_acquire_owned() else {
+            warn!("rejecting request: too many live commands");
+            return false;
+        };
+        match login.sftp() {
+            Ok(engine) => {
+                info!(account = %login.user.name, "started sftp session");
+                self.run = Run::Sftp(Box::new(SftpRun {
+                    core: Core::new(engine),
+                    _permit: permit,
+                    eof_received: false,
+                    failed: false,
+                }));
+                true
+            }
+            Err(error) => {
+                warn!(%error, "failed to start sftp session");
+                false
+            }
+        }
+    }
+
     /// Apply a `window-change`; before the command starts it updates the requested size
     fn change_window(&mut self, size: &WindowChange) -> bool {
         match &mut self.run {
@@ -502,12 +557,86 @@ impl Channel {
                 }
                 None => false,
             },
-            Run::Finished => false,
+            Run::Sftp(_) | Run::Finished => false,
         }
+    }
+
+    fn poll_sftp(&mut self, write: &mut WriteState) -> Result<bool, Error> {
+        let mut wrote = false;
+        for _ in 0..MAX_PACKETS_PER_POLL {
+            let Run::Sftp(sftp) = &mut self.run else {
+                return Ok(wrote);
+            };
+            let mut progress = false;
+            if !sftp.failed {
+                match sftp.core.run() {
+                    Ok(0) => {}
+                    Ok(consumed) => {
+                        self.credit = self.credit.saturating_add(consumed as u32);
+                        progress = true;
+                    }
+                    Err(fatal) => {
+                        warn!(%fatal, "closing the sftp session");
+                        sftp.failed = true;
+                    }
+                }
+            }
+            if sftp.failed {
+                self.credit = self.credit.saturating_add(sftp.core.discard() as u32);
+            }
+
+            let limit = (self.send_window as usize)
+                .min(self.maximum_packet_size as usize)
+                .min(READ_CHUNK);
+            let chunk = sftp.core.output(limit);
+            if !chunk.is_empty() {
+                let sent = chunk.len();
+                write.encode(&ChannelData {
+                    recipient_channel: self.remote_id,
+                    data: chunk.into(),
+                })?;
+                sftp.core.sent(sent);
+                self.send_window -= sent as u32;
+                progress = true;
+                wrote = true;
+            }
+            if !progress {
+                break;
+            }
+        }
+
+        wrote |= self.return_credit(write)?;
+
+        let Run::Sftp(sftp) = &self.run else {
+            return Ok(wrote);
+        };
+        if (sftp.eof_received || sftp.failed) && !sftp.core.has_request() && !sftp.core.has_output() {
+            let status = u32::from(sftp.failed);
+            write.encode(&ChannelEof {
+                recipient_channel: self.remote_id,
+            })?;
+            write.encode(&ChannelRequest {
+                recipient_channel: self.remote_id,
+                r#type: ChannelRequestType::ExitStatus(status),
+                want_reply: false,
+            })?;
+            if !self.close_sent {
+                self.close_sent = true;
+                write.encode(&ChannelClose {
+                    recipient_channel: self.remote_id,
+                })?;
+            }
+            self.run = Run::Finished;
+            wrote = true;
+        }
+        Ok(wrote)
     }
 
     /// Make progress; returns whether any message was written
     fn poll(&mut self, cx: &mut Context<'_>, write: &mut WriteState) -> Result<bool, Error> {
+        if matches!(self.run, Run::Sftp(_)) {
+            return self.poll_sftp(write);
+        }
         let Run::Active(active) = &mut self.run else {
             return self.return_credit(write);
         };
@@ -663,6 +792,7 @@ impl Channel {
     fn return_credit(&mut self, write: &mut WriteState) -> Result<bool, Error> {
         let drained = match &self.run {
             Run::Active(active) => active.process.as_ref().is_none_or(Process::stdin_drained),
+            Run::Sftp(sftp) => !sftp.core.has_request(),
             _ => true,
         };
 
@@ -790,6 +920,7 @@ const INITIAL_WINDOW_SIZE: u32 = 16 * MAX_PACKET_LEN;
 /// Smallest maximum packet size a client may advertise; smaller channels are refused, never rounded up
 const MIN_PACKET_SIZE: u32 = 128;
 const READ_CHUNK: usize = 32 * 1024;
+const _: () = assert!(crate::sftp::MAX_BUFFERED_INPUT >= INITIAL_WINDOW_SIZE as usize);
 const MAX_PACKETS_PER_POLL: usize = 16;
 /// Session channels one connection may hold open at once
 const MAX_CHANNELS: usize = 8;

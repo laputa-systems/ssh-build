@@ -1,17 +1,17 @@
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+use oxish_client::cli::{Connect, ConnectArgs, split_target, value};
 use oxish_client::terminal::{EscapeInput, RawMode, discard_input, pty_request, terminal_size};
 use oxish_client::{
-    ClientConfig, Connection, Error, ExecStatus, FileSink, Fingerprint, HostTrust, Identity,
-    InputSource, Interrupt, Keepalive, KnownHosts, SessionEvents, SessionRequest, TerminalSize,
+    ClientConfig, Connection, Error, ExecStatus, FileSink, InputSource, Interrupt, Keepalive,
+    SessionEvents, SessionRequest, TerminalSize,
 };
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::termios::isatty;
@@ -162,20 +162,8 @@ enum Pty {
     Never,
 }
 
-enum Trust {
-    Pinned(String),
-    KnownHosts(PathBuf),
-}
-
-enum Credential {
-    Key(PathBuf),
-    Agent { socket: PathBuf, identity: String },
-}
-
 struct Options {
-    port: u16,
-    credential: Credential,
-    trust: Trust,
+    connect: Connect,
     pty: Pty,
     attach: Option<String>,
     keepalive: Keepalive,
@@ -207,17 +195,8 @@ fn seconds(args: &mut impl Iterator<Item = String>, option: &str) -> Result<Dura
     }
 }
 
-fn value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<String, String> {
-    args.next().ok_or_else(|| format!("{option} needs a value"))
-}
-
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
-    let mut port = 22u16;
-    let mut key = None;
-    let mut agent = None;
-    let mut agent_identity = None;
-    let mut host_key = None;
-    let mut known_hosts = None;
+    let mut connect = ConnectArgs::new("-p");
     let mut pty = Pty::Auto;
     let mut attach = None;
     let mut interval = None;
@@ -231,11 +210,6 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
             }
             "-t" => pty = Pty::Force,
             "-T" => pty = Pty::Never,
-            "-p" => {
-                port = value(&mut args, "-p")?
-                    .parse()
-                    .map_err(|_| "-p needs a port number".to_owned())?;
-            }
             "--attach" => {
                 let name = value(&mut args, "--attach")?;
                 attach_name(&name)?;
@@ -243,12 +217,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
             }
             "--keepalive-interval" => interval = Some(seconds(&mut args, "--keepalive-interval")?),
             "--keepalive-timeout" => timeout = Some(seconds(&mut args, "--keepalive-timeout")?),
-            "-i" => key = Some(PathBuf::from(value(&mut args, "-i")?)),
-            "--agent" => agent = Some(PathBuf::from(value(&mut args, "--agent")?)),
-            "--agent-identity" => agent_identity = Some(value(&mut args, "--agent-identity")?),
-            "--host-key" => host_key = Some(value(&mut args, "--host-key")?),
-            "--known-hosts" => known_hosts = Some(PathBuf::from(value(&mut args, "--known-hosts")?)),
             "-h" | "--help" => return Err(String::new()),
+            other if connect.accept(other, &mut args)? => {}
             other if other.starts_with('-') && other.len() > 1 => {
                 return Err(format!("unknown option {other}"));
             }
@@ -259,31 +229,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
         }
     }
     let target = target.ok_or_else(|| "missing user@host".to_owned())?;
-    let (user, host) = match target.rsplit_once('@') {
-        Some((user, host)) if !user.is_empty() && !host.is_empty() => {
-            (user.to_owned(), host.to_owned())
-        }
-        _ => return Err("the target must be user@host".to_owned()),
-    };
-    let credential = match (key, agent, agent_identity) {
-        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-            return Err("-i and --agent are exclusive".to_owned());
-        }
-        (None, Some(socket), Some(identity)) => Credential::Agent { socket, identity },
-        (None, Some(_), None) => return Err("--agent needs --agent-identity".to_owned()),
-        (None, None, Some(_)) => return Err("--agent-identity needs --agent".to_owned()),
-        (Some(key), None, None) => Credential::Key(key),
-        (None, None, None) => {
-            let home = std::env::var_os("HOME").ok_or_else(|| "no -i and HOME is unset".to_owned())?;
-            Credential::Key(PathBuf::from(home).join(".ssh/id_ed25519"))
-        }
-    };
-    let trust = match (host_key, known_hosts) {
-        (Some(pin), None) => Trust::Pinned(pin),
-        (None, Some(path)) => Trust::KnownHosts(path),
-        (None, None) => return Err("one of --host-key and --known-hosts is required".to_owned()),
-        (Some(_), Some(_)) => return Err("--host-key and --known-hosts are exclusive".to_owned()),
-    };
+    let (user, host) = split_target(&target)?;
+    let connect = connect.finish()?;
     let command: Vec<String> = args.collect();
     if attach.is_some() {
         if !command.is_empty() {
@@ -303,9 +250,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
         return Err("--keepalive-timeout must exceed --keepalive-interval".to_owned());
     }
     Ok(Options {
-        port,
-        credential,
-        trust,
+        connect,
         pty,
         attach,
         keepalive,
@@ -352,27 +297,9 @@ fn duplicate(fd: BorrowedFd<'_>) -> Result<File, String> {
 }
 
 fn config(options: &Options, interrupt: Interrupt) -> Result<ClientConfig, Error> {
-    let identity = match &options.credential {
-        Credential::Key(path) => Identity::KeyFile(path.clone()),
-        Credential::Agent { socket, identity } => Identity::Agent {
-            socket: socket.clone(),
-            fingerprint: Fingerprint::parse(identity)?,
-        },
-    };
-    let trust = match &options.trust {
-        Trust::Pinned(pin) => HostTrust::Pinned(Fingerprint::parse(pin)?),
-        Trust::KnownHosts(path) => HostTrust::KnownHosts(KnownHosts::from_file(path)?),
-    };
-    let mut config = ClientConfig::new(
-        options.host.clone(),
-        options.port,
-        options.user.clone(),
-        identity,
-        trust,
-        CONNECT_TIMEOUT,
-    );
-    config.interrupt = Some(interrupt);
-    Ok(config)
+    options
+        .connect
+        .config(&options.host, &options.user, CONNECT_TIMEOUT, Some(interrupt))
 }
 
 fn fail(message: impl std::fmt::Display) -> u8 {
@@ -695,7 +622,7 @@ mod tests {
             "-p 2222 -i key --host-key SHA256:x -T user@host ls -l --host-key",
         ))
         .expect("parses");
-        assert_eq!(options.port, 2222);
+        assert_eq!(options.connect.port, 2222);
         assert_eq!(options.user, "user");
         assert_eq!(options.host, "host");
         assert_eq!(options.command, ["ls", "-l", "--host-key"]);

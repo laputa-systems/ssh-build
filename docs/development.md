@@ -62,12 +62,14 @@ Linux qualifier rejects an executable stack and a missing RELRO segment.
 ## Server and OxiSH client tools
 
 The `oxish` archive holds `bin/oxish-server`, `bin/oxish-session` (when the server build makes it),
-`bin/oxish-keygen` and, when `client/` builds it, `bin/oxish`. `scripts/oxish-bins.sh` is the one
-owner of that list: it names what a bin directory must hold, and every script, the Dockerfile and
-`release.yml` read it. While the client binary does not exist the archive simply omits it. To make
-a missing client fail the build record, packaging and the release job, set
-`OXISH_CLIENT_REQUIRED=1` in `scripts/oxish-bins.sh` (the only edit needed). Also re-measure the
-archive and update `release-budgets.json`; the client adds to every target.
+`bin/oxish-keygen` and the client binaries `bin/oxish`, `bin/oxish-sftp` and `bin/oxish-scp`.
+`scripts/oxish-bins.sh` is the one owner of that list: it names what a bin directory must hold,
+and every script, the Dockerfile and `release.yml` read it. `OXISH_CLIENT_REQUIRED=1` there makes a
+missing client binary fail the build record, packaging and the release job; with 0 the archive
+omits the ones that do not exist. Adding a binary to `client/src/bin` means adding it to that
+list, to the `cp` lines of `Dockerfile.oxish` and `scripts/build-oxish-macos.sh`, and to the
+`test -x` lines of `binaries-oxish` in the `Makefile`, then re-measuring the archive against
+`release-budgets.json`.
 
 `Dockerfile.oxish` and `scripts/build-oxish-macos.sh` build `vendor/oxish` and `client/` with the
 same flags (static PIE on Linux, deployment floor 14.0 and ad-hoc signing on macOS) and qualify
@@ -78,6 +80,7 @@ refused. The manifest lists the `executables`, and `make verify` checks they mat
 
 ```sh
 cargo test --locked --manifest-path client/Cargo.toml --test keygen   # oxish-keygen vs OpenSSH's ssh-keygen
+client/fixture/ssh-fixture.sh exec cargo test --locked --manifest-path client/Cargo.toml   # client suite against OpenSSH sshd in Docker, incl. SFTP (--test sftp)
 SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/oxish-keygen.sh             # the same on the unpacked archives
 sh scripts/check-crypto-graph.sh [--selftest]      # Graviola is the only provider (server and client: graph and Cargo.lock)
 sh scripts/vendor-oxish.sh verify                  # vendor/oxish == pinned upstream + patches/oxish
@@ -96,12 +99,14 @@ and the session-binary owner check) need root: build the test executable and `ox
 with the client to a world-readable directory, and run it in a container (`OXISH_TEST_SESSION_BIN`
 names the session binary). The session binary must be root-owned there, so copy it inside the
 container and `chown` it; mounted host files belong to your user and are refused. The ptrace checks of
-`login_session_process_is_sealed_from_the_account` run when `python3` is on `PATH`:
+`login_session_process_is_sealed_from_the_account` run when `python3` is on `PATH`. The SFTP tests
+(`login_sftp_`, `login_scp_`) run the `sftp` and `scp` found next to the `ssh` they use, and `sha256sum`;
+the account-ownership one (`login_sftp_files_belong_to_the_account_…`) only runs as root:
 
 ```sh
 EXE=$(cargo test --locked --manifest-path vendor/oxish/Cargo.toml -p oxish --lib --no-run 2>&1 | sed -n 's/.*lib.rs (\(.*\))/\1/p')
 mkdir -p /tmp/rt/bin && cp "$EXE" /tmp/rt/oxish-tests && cp vendor/oxish/target/debug/oxish-session /tmp/rt/ \
-    && cp dist/ssh/<triple>/bin/ssh /tmp/rt/bin/ && chmod -R a+rX /tmp/rt
+    && cp dist/ssh/<triple>/bin/{ssh,sftp,scp} /tmp/rt/bin/ && chmod -R a+rX /tmp/rt
 docker run --rm -v /tmp/rt:/rt:ro alpine:3.24 sh -c 'mkdir /opt/rt && cp -r /rt/. /opt/rt/ && chown -R 0:0 /opt/rt \
     && chmod -R go-w /opt/rt && OXISH_TEST_SESSION_BIN=/opt/rt/oxish-session PATH=/opt/rt/bin:/usr/bin:/bin /opt/rt/oxish-tests login_'
 ```

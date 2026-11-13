@@ -1,13 +1,13 @@
 #!/bin/sh
-# Package the OxiSH server, client and key generator for one target as oxish-<version>-<triple>.tar.xz plus
+# Package the OxiSH server, clients and key generator for one target as oxish-<version>-<triple>.tar.xz plus
 # oxish-<version>-<triple>.manifest.json, enforce the size budget, then refresh and verify the
 # consolidated SHA256SUMS in <out_dir>.
 # Usage: TARGET=<triple> sh scripts/package-oxish.sh [out_dir]      (default: dist/release)
 # Input: dist/oxish/<triple>/bin, which needs the build-record.json its build wrote
 # (scripts/build-record.sh); stale, modified or foreign binaries are refused, and nothing in
 # <out_dir> changes unless the target passes.
-# The archive holds bin/oxish (the client, once it is built; see scripts/oxish-bins.sh),
-# bin/oxish-server, bin/oxish-session, bin/oxish-keygen, the upstream licenses, and a
+# The archive holds the executables scripts/oxish-bins.sh lists (bin/oxish, bin/oxish-sftp,
+# bin/oxish-scp, bin/oxish-server, bin/oxish-session, bin/oxish-keygen), the upstream licenses, and a
 # provenance.json naming the OxiSH revision, Graviola version, patch identity, toolchain, build
 # commit, target, and the SHA-256 of each executable. No Git binary is included.
 set -eu
@@ -100,7 +100,7 @@ cat > "$pkg/THIRD-PARTY.md" <<EOT
   LICENSE-MIT. Local patches: https://github.com/laputa-systems/ssh-build/tree/$build_commit/patches
 - Graviola $graviola_version (https://github.com/ctz/graviola): Apache-2.0 OR ISC OR MIT-0,
   patched to add the OpenSSH chacha20-poly1305 packet construction.
-- The OxiSH client and oxish-keygen (client/ in https://github.com/laputa-systems/ssh-build):
+- The OxiSH clients (oxish, oxish-sftp, oxish-scp) and oxish-keygen (client/ in https://github.com/laputa-systems/ssh-build):
   Apache-2.0 OR MIT.
 - Rust standard library and the crates in vendor/oxish/Cargo.lock and client/Cargo.lock under
   their own licenses (MIT or Apache-2.0).

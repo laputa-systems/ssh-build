@@ -830,6 +830,22 @@ async fn shell_and_pty_requests_are_refused() {
 }
 
 #[tokio::test]
+async fn subsystem_requests_are_refused() {
+    let world = script_world("echo RAN").await;
+    for name in ["sftp", "shell", "git"] {
+        let (mut client, _guard) = world
+            .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
+            .await
+            .unwrap();
+        client.cmd.arg("-s");
+        let run = client.run(Some(name), &[0, 0, 0, 5, 1, 0, 0, 0, 3]).await.unwrap();
+        assert!(!run.status.success(), "the subsystem {name} was accepted");
+        assert!(run.stdout.is_empty(), "{:?}", run.stdout);
+        assert!(run.stderr.contains("subsystem request failed"), "{}", run.stderr);
+    }
+}
+
+#[tokio::test]
 async fn only_validated_git_protocol_reaches_the_command() {
     let world = script_world(r#"echo "protocol=[$GIT_PROTOCOL] foo=[$FOO] path=[$PATH]""#).await;
     world.bare_repo("a.git").await.unwrap();

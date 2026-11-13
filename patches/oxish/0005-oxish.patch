@@ -1894,7 +1894,7 @@ index 0000000000000000000000000000000000000000..0dda74162fe1a89d34e0c5c039091f62
 +    }
 +}
 diff --git a/oxish/src/lib.rs b/oxish/src/lib.rs
-index 3f9d273c9bdde1628e75dce04442927ad082eede..cc7969cf736050e1d2529ab4c1e9f439bae05555 100644
+index 3f9d273c9bdde1628e75dce04442927ad082eede..78a4ee051c18c53b4e34fdba4b2613cf26b25a8d 100644
 --- a/oxish/src/lib.rs
 +++ b/oxish/src/lib.rs
 @@ -1,20 +1,13 @@
@@ -1920,7 +1920,7 @@ index 3f9d273c9bdde1628e75dce04442927ad082eede..cc7969cf736050e1d2529ab4c1e9f439
  pub use graviola::DEFAULT_PROVIDER;
  use proto::{
      Completion, Decode, Decoded, Encode, HostKeys, Identification, IdentificationError, Ignore,
-@@ -29,25 +22,31 @@ use proto::{
+@@ -29,25 +22,34 @@ use proto::{
  use thiserror::Error;
  use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
  use tracing::{debug, trace, warn};
@@ -1943,6 +1943,7 @@ index 3f9d273c9bdde1628e75dce04442927ad082eede..cc7969cf736050e1d2529ab4c1e9f439
 +mod login;
 +pub use login::{LoginAccounts, LoginPolicy, LoginSession, UserDatabase, UserEntry};
  mod session;
++mod sftp;
  pub use session::Session;
 +#[doc(hidden)]
 +pub use session::fuzz_channel_state;
@@ -1958,15 +1959,17 @@ index 3f9d273c9bdde1628e75dce04442927ad082eede..cc7969cf736050e1d2529ab4c1e9f439
  
 +#[cfg(all(test, target_os = "linux"))]
 +mod login_tests;
++#[cfg(all(test, target_os = "linux"))]
++mod sftp_tests;
  #[cfg(test)]
  mod tests;
  
 diff --git a/oxish/src/login.rs b/oxish/src/login.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0d6127c2b82baf2e5e9c48ad2f4c565b3b950b51
+index 0000000000000000000000000000000000000000..09b8673a495af4f1ea163c41dc522f1631a9ffcb
 --- /dev/null
 +++ b/oxish/src/login.rs
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,655 @@
 +//! Login mode: accounts, the user database and the policy for one login session
 +
 +use std::{
@@ -1983,7 +1986,10 @@ index 0000000000000000000000000000000000000000..0d6127c2b82baf2e5e9c48ad2f4c565b
 +    named::PublicKeyAlgorithm,
 +};
 +
-+use crate::authentication::{read_trusted_bytes, read_trusted_file};
++use crate::{
++    authentication::{read_trusted_bytes, read_trusted_file},
++    sftp::{Engine, Owner},
++};
 +
 +const MAX_ACCOUNT_KEYS: usize = 1024;
 +const MAX_NAME_LEN: usize = 64;
@@ -2327,6 +2333,11 @@ index 0000000000000000000000000000000000000000..0d6127c2b82baf2e5e9c48ad2f4c565b
 +        Ok(Self { user, path, accept_locale, allow_root, launcher })
 +    }
 +
++    /// An SFTP engine for this account, which starts in its home directory
++    pub(crate) fn sftp(&self) -> std::io::Result<Engine> {
++        Engine::new(&self.user.home, Owner { uid: self.user.uid, name: self.user.name.clone() })
++    }
++
 +    /// The fixed part of every session's environment
 +    pub(crate) fn environment(&self) -> Vec<(OsString, OsString)> {
 +        let name = OsString::from(&self.user.name);
@@ -2616,14 +2627,17 @@ index 0000000000000000000000000000000000000000..0d6127c2b82baf2e5e9c48ad2f4c565b
 +}
 diff --git a/oxish/src/login_tests.rs b/oxish/src/login_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0ce8d1e822
+index 0000000000000000000000000000000000000000..0e1c4ad0fd8d5d27c3fafb42f50cb229be71d5d7
 --- /dev/null
 +++ b/oxish/src/login_tests.rs
-@@ -0,0 +1,847 @@
+@@ -0,0 +1,1140 @@
 +use core::{net::Ipv4Addr, net::SocketAddr, time::Duration};
 +use std::{
 +    env, fs,
-+    os::{fd::OwnedFd, unix::fs::PermissionsExt as _},
++    os::{
++        fd::OwnedFd,
++        unix::fs::{MetadataExt as _, PermissionsExt as _, symlink},
++    },
 +    path::{Path, PathBuf},
 +    process::{ExitStatus, Stdio},
 +    sync::Arc,
@@ -2811,23 +2825,80 @@ index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0c
 +        .expect("no ssh client for the tests")
 +}
 +
++const CLIENT_OPTIONS: [&str; 14] = [
++    "-F", "/dev/null",
++    "-o", "StrictHostKeyChecking=no",
++    "-o", "UserKnownHostsFile=/dev/null",
++    "-o", "GlobalKnownHostsFile=/dev/null",
++    "-o", "IdentitiesOnly=yes",
++    "-o", "BatchMode=yes",
++    "-o", "LogLevel=ERROR",
++];
++
 +/// The test ssh client for one account, with `options` ahead of the destination
 +fn ssh_command(addr: SocketAddr, key: &Path, user: &str, options: &[&str]) -> Command {
 +    let mut command = Command::new(ssh_program());
 +    command.args(options);
-+    command.args([
-+        "-F", "/dev/null",
-+        "-o", "StrictHostKeyChecking=no",
-+        "-o", "UserKnownHostsFile=/dev/null",
-+        "-o", "GlobalKnownHostsFile=/dev/null",
-+        "-o", "IdentitiesOnly=yes",
-+        "-o", "BatchMode=yes",
-+        "-o", "LogLevel=ERROR",
-+    ]);
++    command.args(CLIENT_OPTIONS);
 +    command.args(["-p".to_owned(), addr.port().to_string(), "-i".to_owned(), key.display().to_string()]);
 +    command.arg(format!("{user}@127.0.0.1"));
 +    command.env_remove("SSH_AUTH_SOCK").kill_on_drop(true);
 +    command
++}
++
++/// `sftp` or `scp` from the directory of the test ssh client, which they run as their transport
++fn file_transfer_program(name: &str) -> PathBuf {
++    let sibling = ssh_program().with_file_name(name);
++    if sibling.is_file() {
++        return sibling;
++    }
++    env::split_paths(&env::var_os("PATH").unwrap_or_default())
++        .map(|dir| dir.join(name))
++        .find(|candidate| candidate.is_file())
++        .unwrap_or_else(|| panic!("no {name} client for the tests"))
++}
++
++fn transfer_command(program: &str, addr: SocketAddr, key: &Path) -> Command {
++    let mut command = Command::new(file_transfer_program(program));
++    command.args(CLIENT_OPTIONS);
++    command.args(["-S".to_owned(), ssh_program().display().to_string()]);
++    command.args(["-P".to_owned(), addr.port().to_string(), "-i".to_owned(), key.display().to_string()]);
++    command.env_remove("SSH_AUTH_SOCK").kill_on_drop(true);
++    command
++}
++
++/// Run `sftp -b` with these commands as `user`, in `local` on this side
++async fn sftp_batch(addr: SocketAddr, key: &Path, user: &str, local: &Path, commands: &[&str]) -> Run {
++    let batch = local.with_extension("batch");
++    fs::write(&batch, format!("lcd {}\n{}\n", local.display(), commands.join("\n"))).unwrap();
++    let mut command = transfer_command("sftp", addr, key);
++    command.arg("-b").arg(&batch).arg(format!("{user}@127.0.0.1"));
++    finish(command, b"").await
++}
++
++/// Run `scp -q` with these arguments (remote names are `alice@127.0.0.1:…`)
++async fn scp(addr: SocketAddr, key: &Path, args: &[&str]) -> Run {
++    let mut command = transfer_command("scp", addr, key);
++    command.arg("-q").args(args);
++    finish(command, b"").await
++}
++
++fn pattern(len: usize, seed: u64) -> Vec<u8> {
++    let mut state = seed | 1;
++    (0..len)
++        .map(|_| {
++            state ^= state << 13;
++            state ^= state >> 7;
++            state ^= state << 17;
++            (state >> 24) as u8
++        })
++        .collect()
++}
++
++async fn sha256(path: &Path) -> String {
++    let output = Command::new("sha256sum").arg(path).output().await.unwrap();
++    assert!(output.status.success(), "sha256sum {}: {}", path.display(), String::from_utf8_lossy(&output.stderr));
++    String::from_utf8(output.stdout).unwrap().split_whitespace().next().unwrap().to_owned()
 +}
 +
 +struct Run {
@@ -2991,7 +3062,7 @@ index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0c
 +}
 +
 +#[tokio::test]
-+async fn login_refuses_forwarding_and_subsystems() {
++async fn login_refuses_forwarding_and_other_subsystems() {
 +    let world = World::new(&["alice"]);
 +    let (addr, _guard) = world.serve().await;
 +    let key = &world.key("alice").path;
@@ -3000,9 +3071,11 @@ index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0c
 +    assert!(!run.status.success(), "stdio forwarding was accepted");
 +    assert!(run.stderr.contains("forwarding failed"), "{}", run.stderr);
 +
-+    let run = ssh(addr, key, "alice", &["-s"], "sftp", b"").await;
-+    assert!(!run.status.success(), "a subsystem was accepted");
-+    assert!(run.stdout.is_empty());
++    for name in ["shell", "netconf", "sftp-server", "SFTP", "sftp "] {
++        let run = ssh(addr, key, "alice", &["-s"], name, b"").await;
++        assert!(!run.status.success(), "the subsystem {name:?} was accepted");
++        assert!(run.stdout.is_empty());
++    }
 +}
 +
 +#[tokio::test]
@@ -3440,7 +3513,7 @@ index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0c
 +    mode(&dir, 0o755);
 +
 +    let link = dir.join("link");
-+    std::os::unix::fs::symlink(&program, &link).unwrap();
++    symlink(&program, &link).unwrap();
 +    world.session = Some(link);
 +    assert!(world.server().await.is_err(), "a symlinked session binary was accepted");
 +
@@ -3466,6 +3539,237 @@ index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0c
 +    let (addr, _guard) = world.serve().await;
 +    let run = ssh(addr, &world.key("alice").path, "alice", &[], "id -u; id -g", b"").await;
 +    assert_eq!(run.stdout(), format!("{}\n0\n", me.uid), "{}", run.stderr);
++}
++
++fn local_dir(world: &World) -> PathBuf {
++    let local = world.dir.path().join("local");
++    fs::create_dir_all(&local).unwrap();
++    local
++}
++
++#[tokio::test]
++async fn login_sftp_batch_commands_manage_files() {
++    let world = World::new(&["alice"]);
++    let (addr, _guard) = world.serve().await;
++    let key = &world.key("alice").path;
++    let local = local_dir(&world);
++    let home = world.home();
++    let small = pattern(70_000, 1);
++    fs::write(local.join("small.txt"), &small).unwrap();
++    let stamp = std::time::UNIX_EPOCH + Duration::from_secs(1_500_000_000);
++    fs::File::options().write(true).open(local.join("small.txt")).unwrap().set_modified(stamp).unwrap();
++
++    let run = sftp_batch(addr, key, "alice", &local, &[
++        "pwd",
++        "put small.txt up.txt",
++        "get up.txt got.txt",
++        "mkdir d1",
++        "rename up.txt d1/moved.txt",
++        "chmod 600 d1/moved.txt",
++        "ln d1/moved.txt hard.txt",
++        "ln -s d1/moved.txt soft.txt",
++        "put -p small.txt kept.txt",
++        "ls -l d1",
++        "df",
++        "mkdir gone",
++        "rmdir gone",
++        "rm soft.txt",
++    ]).await;
++    assert!(run.status.success(), "{}\n{}", run.stdout(), run.stderr);
++    let out = run.stdout();
++    assert!(out.contains(&format!("Remote working directory: {}", fs::canonicalize(&home).unwrap().display())), "{out}");
++    assert!(out.lines().any(|line| line.starts_with("-rw-------") && line.ends_with("moved.txt")), "{out}");
++    assert!(out.contains("Avail"), "{out}");
++
++    assert_eq!(fs::read(local.join("got.txt")).unwrap(), small);
++    assert_eq!(fs::read(home.join("d1/moved.txt")).unwrap(), small);
++    assert_eq!(fs::metadata(home.join("d1/moved.txt")).unwrap().permissions().mode() & 0o777, 0o600);
++    assert_eq!(fs::metadata(home.join("hard.txt")).unwrap().nlink(), 2);
++    assert!(!home.join("up.txt").exists());
++    assert!(!home.join("soft.txt").exists() && !home.join("gone").exists());
++    assert_eq!(fs::metadata(home.join("kept.txt")).unwrap().modified().unwrap(), stamp);
++
++    let run = sftp_batch(addr, key, "alice", &local, &[
++        "symlink d1/moved.txt via-link",
++        "get via-link via-link.txt",
++        "cd d1",
++        "pwd",
++        "ls",
++        "put small.txt ../dup.txt",
++        "-get missing.txt",
++        "get moved.txt copy.txt",
++    ]).await;
++    assert!(run.status.success(), "{}\n{}", run.stdout(), run.stderr);
++    assert_eq!(fs::read_link(home.join("via-link")).unwrap(), Path::new("d1/moved.txt"));
++    assert_eq!(fs::read(local.join("via-link.txt")).unwrap(), small);
++    assert_eq!(fs::read(home.join("dup.txt")).unwrap(), small);
++    assert_eq!(fs::read(local.join("copy.txt")).unwrap(), small);
++    assert!(run.stdout().contains("moved.txt"), "{}", run.stdout());
++
++    for (commands, message) in [
++        (&["get missing.txt"][..], "not found"),
++        (&["put small.txt nodir/up.txt"][..], "No such file"),
++        (&["mkdir d1"][..], "remote mkdir"),
++        (&["rmdir d1"][..], "remote rmdir"),
++        (&["rm d1"][..], "remote delete"),
++        (&["rename missing.txt other.txt"][..], "remote rename"),
++    ] {
++        let run = sftp_batch(addr, key, "alice", &local, commands).await;
++        assert!(!run.status.success(), "{commands:?} succeeded");
++        assert!(run.stderr.contains(message) || run.stdout().contains(message), "{commands:?}: {}", run.stderr);
++    }
++}
++
++#[tokio::test]
++async fn login_scp_copies_a_large_file_and_a_directory_tree_both_ways() {
++    let world = World::new(&["alice"]);
++    let (addr, _guard) = world.serve().await;
++    let key = &world.key("alice").path;
++    let local = local_dir(&world);
++    let home = world.home();
++
++    let big = local.join("big.bin");
++    fs::write(&big, pattern(10 * 1024 * 1024, 7)).unwrap();
++    let run = scp(addr, key, &[big.to_str().unwrap(), "alice@127.0.0.1:big.bin"]).await;
++    assert!(run.status.success(), "{}", run.stderr);
++    let back = local.join("back.bin");
++    let run = scp(addr, key, &["alice@127.0.0.1:big.bin", back.to_str().unwrap()]).await;
++    assert!(run.status.success(), "{}", run.stderr);
++
++    let original = sha256(&big).await;
++    assert_eq!(sha256(&home.join("big.bin")).await, original, "the uploaded file differs");
++    assert_eq!(sha256(&back).await, original, "the downloaded file differs");
++    let remote = ssh(addr, key, "alice", &[], "sha256sum big.bin", b"").await;
++    assert!(remote.stdout().starts_with(&original), "{}", remote.stdout());
++    assert_eq!(fs::metadata(&back).unwrap().len(), 10 * 1024 * 1024);
++
++    let tree = local.join("tree");
++    fs::create_dir_all(tree.join("sub/deep")).unwrap();
++    fs::write(tree.join("a.txt"), b"alpha\n").unwrap();
++    fs::write(tree.join("sub/b.txt"), pattern(5000, 2)).unwrap();
++    fs::write(tree.join("sub/deep/c.bin"), pattern(200_000, 3)).unwrap();
++    fs::write(tree.join("sub/empty"), b"").unwrap();
++    symlink("a.txt", tree.join("link-to-a")).unwrap();
++    fs::set_permissions(tree.join("a.txt"), fs::Permissions::from_mode(0o640)).unwrap();
++
++    let run = scp(addr, key, &["-r", tree.to_str().unwrap(), "alice@127.0.0.1:copy"]).await;
++    assert!(run.status.success(), "{}", run.stderr);
++    for name in ["a.txt", "sub/b.txt", "sub/deep/c.bin", "sub/empty"] {
++        assert_eq!(fs::read(home.join("copy").join(name)).unwrap(), fs::read(tree.join(name)).unwrap(), "{name}");
++    }
++    assert_eq!(fs::read(home.join("copy/link-to-a")).unwrap(), b"alpha\n");
++    assert_eq!(fs::metadata(home.join("copy/a.txt")).unwrap().permissions().mode() & 0o777, 0o640);
++
++    let out = local.join("out");
++    fs::create_dir_all(&out).unwrap();
++    let run = scp(addr, key, &["-r", "alice@127.0.0.1:copy", out.to_str().unwrap()]).await;
++    assert!(run.status.success(), "{}", run.stderr);
++    for name in ["a.txt", "sub/b.txt", "sub/deep/c.bin", "sub/empty"] {
++        assert_eq!(fs::read(out.join("copy").join(name)).unwrap(), fs::read(tree.join(name)).unwrap(), "{name}");
++    }
++
++    let run = scp(addr, key, &["alice@127.0.0.1:missing.bin", local.to_str().unwrap()]).await;
++    assert!(!run.status.success());
++    assert!(run.stderr.contains("No such file") || run.stderr.contains("not found"), "{}", run.stderr);
++}
++
++#[tokio::test]
++async fn login_sftp_speaks_only_the_subsystem_protocol() {
++    let world = World::new(&["alice"]);
++    let (addr, _guard) = world.serve().await;
++    let key = &world.key("alice").path;
++
++    let init = [&[0, 0, 0, 5, 1][..], &[0, 0, 0, 3]].concat();
++    let run = ssh(addr, key, "alice", &["-s"], "sftp", &init).await;
++    assert!(run.status.success(), "ending the stream ends the session: {}", run.stderr);
++    assert_eq!(&run.stdout[..9], [0, 0, 0, run.stdout[3], 2, 0, 0, 0, 3], "{:?}", run.stdout);
++    assert!(String::from_utf8_lossy(&run.stdout).contains("limits@openssh.com"));
++
++    for garbage in [
++        &[0xff, 0xff, 0xff, 0xff, 1][..],
++        &[0, 0, 0, 0][..],
++        &[0, 0, 0, 5, 3, 0, 0, 0, 1][..],
++        b"SSH-2.0-not-sftp\r\n",
++    ] {
++        let run = ssh(addr, key, "alice", &["-s"], "sftp", garbage).await;
++        assert_eq!(run.status.code(), Some(1), "{garbage:?}: {}", run.stderr);
++        assert!(run.stdout.is_empty(), "{garbage:?} got {:?}", run.stdout);
++    }
++
++    let run = ssh(addr, key, "alice", &["-tt", "-s"], "sftp", &init).await;
++    assert!(run.stdout.is_empty() || !run.stdout.windows(4).any(|window| window == [0, 0, 0, 3]), "a terminal was given to sftp");
++}
++
++#[tokio::test]
++async fn login_sftp_cannot_read_the_session_process_through_procfs() {
++    let world = World::new(&["alice"]);
++    let (addr, _guard) = world.serve().await;
++    let key = &world.key("alice").path;
++    let local = local_dir(&world);
++    for path in ["/proc/self/mem", "/proc/self/maps", "/proc/self/environ", "/proc/thread-self/maps"] {
++        let run = sftp_batch(addr, key, "alice", &local, &[&format!("get {path} stolen")]).await;
++        assert!(!run.status.success(), "{path} was readable through sftp: {}", run.stdout());
++        assert!(!local.join("stolen").exists() || fs::metadata(local.join("stolen")).unwrap().len() == 0, "{path}");
++    }
++}
++
++#[tokio::test]
++async fn login_sftp_files_belong_to_the_account_and_nothing_else_is_reachable() {
++    if !is_root() {
++        return;
++    }
++    let world = World::new(&["alice", "bob"]);
++    let (addr, _guard) = world.serve().await;
++    let (alice, bob) = (identity(0), identity(1));
++    let local = local_dir(&world);
++    let home = world.home();
++    fs::write(local.join("f.txt"), b"mine").unwrap();
++
++    let run = sftp_batch(addr, &world.key("alice").path, "alice", &local, &[
++        "put f.txt by-alice.txt",
++        "mkdir by-alice-dir",
++        "symlink by-alice.txt by-alice-link",
++        "ls -ln",
++    ]).await;
++    assert!(run.status.success(), "{}\n{}", run.stdout(), run.stderr);
++    for name in ["by-alice.txt", "by-alice-dir"] {
++        let meta = fs::metadata(home.join(name)).unwrap();
++        assert_eq!((meta.uid(), meta.gid()), (alice.uid, alice.gid), "{name}");
++    }
++    let meta = fs::symlink_metadata(home.join("by-alice-link")).unwrap();
++    assert_eq!((meta.uid(), meta.gid()), (alice.uid, alice.gid));
++    assert!(run.stdout().lines().any(|line| line.contains(&alice.uid.to_string()) || line.contains(" alice ")), "{}", run.stdout());
++
++    let run = scp(addr, &world.key("bob").path, &[local.join("f.txt").to_str().unwrap(), "bob@127.0.0.1:by-bob.txt"]).await;
++    assert!(run.status.success(), "{}", run.stderr);
++    let meta = fs::metadata(home.join("by-bob.txt")).unwrap();
++    assert_eq!((meta.uid(), meta.gid()), (bob.uid, bob.gid));
++
++    fs::write(home.join("secret"), b"secret").unwrap();
++    std::os::unix::fs::chown(home.join("secret"), Some(bob.uid), Some(bob.gid)).unwrap();
++    fs::set_permissions(home.join("secret"), fs::Permissions::from_mode(0o600)).unwrap();
++    let denied = [
++        "get secret stolen.txt",
++        "put f.txt secret",
++        "ls /root",
++        "put f.txt /etc/passwd",
++        "chmod 777 /etc/passwd",
++        "rm /etc/passwd",
++        "get /etc/shadow shadow.txt",
++        "chown 0 by-alice.txt",
++    ];
++    for command in denied {
++        let run = sftp_batch(addr, &world.key("alice").path, "alice", &local, &[command]).await;
++        assert!(!run.status.success(), "{command} succeeded as alice: {}", run.stdout());
++    }
++    assert_eq!(fs::read(home.join("secret")).unwrap(), b"secret");
++    assert!(!local.join("stolen.txt").exists());
++    assert_ne!(fs::read("/etc/passwd").unwrap(), b"mine");
++    assert!(!local.join("shadow.txt").exists());
++    assert_eq!(fs::metadata(home.join("by-alice.txt")).unwrap().uid(), alice.uid);
++
++    let run = sftp_batch(addr, &world.key("alice").path, "alice", &local, &["get secret stolen.txt"]).await;
++    assert!(run.stderr.contains("Permission denied") || run.stderr.contains("not found"), "{}", run.stderr);
 +}
 diff --git a/oxish/src/server.rs b/oxish/src/server.rs
 index 22f918accf1bad482547186e8bcb6c26fb5af238..7d4c017e64602d0f4d139033b1e254a441681026 100644
@@ -3906,10 +4210,10 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..7d4c017e64602d0f4d139033b1e254a4
 +    }
  }
 diff --git a/oxish/src/session/connections.rs b/oxish/src/session/connections.rs
-index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc021d0490 100644
+index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d53b814f2d 100644
 --- a/oxish/src/session/connections.rs
 +++ b/oxish/src/session/connections.rs
-@@ -1,38 +1,71 @@
+@@ -1,38 +1,72 @@
  use core::{
      fmt,
      future::Future,
@@ -3936,12 +4240,12 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +        ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelOpen,
 +        ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest, ChannelRequestFailure,
 +        ChannelRequestSuccess, ChannelRequestType, ChannelWindowAdjust, EXTENDED_DATA_STDERR, Env,
-+        Exec, ExitSignal, PtyReq, WindowChange,
++        Exec, ExitSignal, PtyReq, Subsystem, WindowChange,
      },
      named::ChannelType,
  };
 +use tokio::{
-+    sync::Semaphore,
++    sync::{OwnedSemaphorePermit, Semaphore},
 +    time::{Instant, Sleep, sleep},
 +};
  use tracing::{debug, info, warn};
@@ -3951,6 +4255,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +    DEFAULT_PROVIDER, Error, GitPolicy, LoginSession, PolicyError,
 +    login::valid_term,
 +    platform::{Output, Process, STOP_LIMIT},
++    sftp::Core,
 +    validate_protocol,
 +};
  
@@ -3983,17 +4288,17 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
  }
  
  impl Channels {
-+    /// Whether any channel has a running Git process
++    /// Whether any channel has a running command or an SFTP session
 +    pub(crate) fn busy(&self) -> bool {
 +        self.channels
 +            .values()
-+            .any(|channel| matches!(channel.run, Run::Active(_)))
++            .any(|channel| matches!(channel.run, Run::Active(_) | Run::Sftp(_)))
 +    }
 +
      pub(crate) fn open(
          &mut self,
          open: ChannelOpen<'_>,
-@@ -43,32 +76,43 @@ impl Channels {
+@@ -43,32 +77,43 @@ impl Channels {
              return Ok(());
          }
  
@@ -4051,7 +4356,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
          Ok(())
      }
  
-@@ -76,106 +120,141 @@ impl Channels {
+@@ -76,106 +121,143 @@ impl Channels {
          &mut self,
          request: ChannelRequest<'_>,
          write: &mut WriteState,
@@ -4208,7 +4513,8 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 -            return Ok(());
 +    /// Handle a channel request of login mode: terminal, locale, shell, command and window size
 +    ///
-+    /// Everything else (forwarding, agent, X11, subsystems, other variables) is refused.
++    /// The `sftp` subsystem is served in-process. Everything else (forwarding, agent, X11, other
++    /// subsystems, other variables) is refused.
 +    pub(crate) fn request_login(
 +        &mut self,
 +        request: ChannelRequest<'_>,
@@ -4248,6 +4554,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +            }
 +            ChannelRequestType::Shell => channel.start_login(login, None, &processes),
 +            ChannelRequestType::Exec(exec) => channel.start_login(login, Some(exec.command), &processes),
++            ChannelRequestType::Subsystem(subsystem) => channel.start_sftp(login, &subsystem, &processes),
 +            ChannelRequestType::WindowChange(size) => channel.change_window(&size),
 +            other => {
 +                warn!(request_type = ?other, "rejecting unsupported channel request");
@@ -4273,7 +4580,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
          Ok(())
      }
  
-@@ -186,26 +265,21 @@ impl Channels {
+@@ -186,26 +268,21 @@ impl Channels {
              ));
          };
  
@@ -4305,7 +4612,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
              Some(window) => channel.receive_window = window,
              None => {
                  return Err(ProtoError::InvalidPacket(
-@@ -214,30 +288,34 @@ impl Channels {
+@@ -214,30 +291,47 @@ impl Channels {
              }
          }
  
@@ -4327,6 +4634,15 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +                    channel.credit = channel.credit.saturating_add(len);
 +                }
 +            }
++            Run::Sftp(sftp) => match sftp.failed {
++                true => channel.credit = channel.credit.saturating_add(len),
++                false => {
++                    if let Err(fatal) = sftp.core.push(&data.data) {
++                        warn!(%fatal, "closing the sftp session");
++                        sftp.failed = true;
++                    }
++                }
++            },
 +            Run::Idle | Run::Finished => channel.credit = channel.credit.saturating_add(len),
          }
 -
@@ -4346,16 +4662,20 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
              ));
          };
  
-+        if let Run::Active(active) = &mut channel.run {
-+            if let Some(process) = active.process.as_mut() {
-+                process.close_stdin();
++        match &mut channel.run {
++            Run::Active(active) => {
++                if let Some(process) = active.process.as_mut() {
++                    process.close_stdin();
++                }
 +            }
++            Run::Sftp(sftp) => sftp.eof_received = true,
++            Run::Idle | Run::Finished => {}
 +        }
 +
          debug!(channel_id = %eof.recipient_channel, "received channel eof from client");
          Ok(())
      }
-@@ -252,7 +330,6 @@ impl Channels {
+@@ -252,7 +346,6 @@ impl Channels {
              return Ok(());
          };
  
@@ -4363,7 +4683,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
          if !channel.close_sent {
              channel.close_sent = true;
              write.encode(&ChannelClose {
-@@ -260,272 +337,403 @@ impl Channels {
+@@ -260,272 +353,517 @@ impl Channels {
              })?;
          }
  
@@ -4435,10 +4755,14 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +    /// closed earlier, has been reaped
 +    pub(crate) async fn shutdown(&mut self) {
 +        for channel in self.channels.values_mut() {
-+            if let Run::Active(active) = &mut channel.run {
-+                if let Some(mut process) = active.process.take() {
-+                    process.terminate();
++            match &mut channel.run {
++                Run::Active(active) => {
++                    if let Some(mut process) = active.process.take() {
++                        process.terminate();
++                    }
 +                }
++                Run::Sftp(_) => channel.run = Run::Finished,
++                Run::Idle | Run::Finished => {}
 +            }
 +        }
 +
@@ -4475,8 +4799,16 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +    /// No command requested yet
 +    Idle,
 +    Active(Box<Active>),
++    Sftp(Box<SftpRun>),
 +    /// The exit was reported and the channel close sent
 +    Finished,
++}
++
++struct SftpRun {
++    core: Core,
++    _permit: OwnedSemaphorePermit,
++    eof_received: bool,
++    failed: bool,
 +}
 +
 +struct Active {
@@ -4550,6 +4882,33 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +        }
 +    }
 +
++    fn start_sftp(&mut self, login: &LoginSession, subsystem: &Subsystem<'_>, processes: &Arc<Semaphore>) -> bool {
++        if subsystem.name != "sftp" || !matches!(self.run, Run::Idle) || self.terminal.is_some() {
++            warn!(name = subsystem.name, "rejecting subsystem request");
++            return false;
++        }
++        let Ok(permit) = processes.clone().try_acquire_owned() else {
++            warn!("rejecting request: too many live commands");
++            return false;
++        };
++        match login.sftp() {
++            Ok(engine) => {
++                info!(account = %login.user.name, "started sftp session");
++                self.run = Run::Sftp(Box::new(SftpRun {
++                    core: Core::new(engine),
++                    _permit: permit,
++                    eof_received: false,
++                    failed: false,
++                }));
++                true
++            }
++            Err(error) => {
++                warn!(%error, "failed to start sftp session");
++                false
++            }
++        }
++    }
++
 +    /// Apply a `window-change`; before the command starts it updates the requested size
 +    fn change_window(&mut self, size: &WindowChange) -> bool {
 +        match &mut self.run {
@@ -4573,12 +4932,86 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +                }
 +                None => false,
 +            },
-+            Run::Finished => false,
++            Run::Sftp(_) | Run::Finished => false,
 +        }
++    }
++
++    fn poll_sftp(&mut self, write: &mut WriteState) -> Result<bool, Error> {
++        let mut wrote = false;
++        for _ in 0..MAX_PACKETS_PER_POLL {
++            let Run::Sftp(sftp) = &mut self.run else {
++                return Ok(wrote);
++            };
++            let mut progress = false;
++            if !sftp.failed {
++                match sftp.core.run() {
++                    Ok(0) => {}
++                    Ok(consumed) => {
++                        self.credit = self.credit.saturating_add(consumed as u32);
++                        progress = true;
++                    }
++                    Err(fatal) => {
++                        warn!(%fatal, "closing the sftp session");
++                        sftp.failed = true;
++                    }
++                }
++            }
++            if sftp.failed {
++                self.credit = self.credit.saturating_add(sftp.core.discard() as u32);
++            }
++
++            let limit = (self.send_window as usize)
++                .min(self.maximum_packet_size as usize)
++                .min(READ_CHUNK);
++            let chunk = sftp.core.output(limit);
++            if !chunk.is_empty() {
++                let sent = chunk.len();
++                write.encode(&ChannelData {
++                    recipient_channel: self.remote_id,
++                    data: chunk.into(),
++                })?;
++                sftp.core.sent(sent);
++                self.send_window -= sent as u32;
++                progress = true;
++                wrote = true;
++            }
++            if !progress {
++                break;
++            }
++        }
++
++        wrote |= self.return_credit(write)?;
++
++        let Run::Sftp(sftp) = &self.run else {
++            return Ok(wrote);
++        };
++        if (sftp.eof_received || sftp.failed) && !sftp.core.has_request() && !sftp.core.has_output() {
++            let status = u32::from(sftp.failed);
++            write.encode(&ChannelEof {
++                recipient_channel: self.remote_id,
++            })?;
++            write.encode(&ChannelRequest {
++                recipient_channel: self.remote_id,
++                r#type: ChannelRequestType::ExitStatus(status),
++                want_reply: false,
++            })?;
++            if !self.close_sent {
++                self.close_sent = true;
++                write.encode(&ChannelClose {
++                    recipient_channel: self.remote_id,
++                })?;
++            }
++            self.run = Run::Finished;
++            wrote = true;
++        }
++        Ok(wrote)
 +    }
 +
 +    /// Make progress; returns whether any message was written
 +    fn poll(&mut self, cx: &mut Context<'_>, write: &mut WriteState) -> Result<bool, Error> {
++        if matches!(self.run, Run::Sftp(_)) {
++            return self.poll_sftp(write);
++        }
 +        let Run::Active(active) = &mut self.run else {
 +            return self.return_credit(write);
 +        };
@@ -4634,21 +5067,6 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 -                        Poll::Ready(Err(error)) => {
 -                            warn!(%error, "error waiting for shell to exit");
 -                            *state = TerminalState::Closing;
--                        }
--                        // No waker is registered for the deadline, so an expired
--                        // grace period is only noticed on the next poll (driven by
--                        // connection traffic).
--                        Poll::Pending if Instant::now() < *deadline => continue 'channels,
--                        Poll::Pending => {
--                            warn!(
--                                channel = local_id,
--                                "shell did not exit after PTY EOF; killing"
--                            );
--                            // Stay in `Exiting`: once the kill takes effect the shell
--                            // becomes reapable and the `Poll::Ready` arms above reap it
--                            // and forward its (signal) status.
--                            terminal.start_kill();
--                            continue 'channels;
 +            let mut sent = false;
 +            for output in [active.next_output, other(active.next_output)] {
 +                if !process.output_open(output) {
@@ -4670,6 +5088,21 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +                                data,
 +                            })?,
                          }
+-                        // No waker is registered for the deadline, so an expired
+-                        // grace period is only noticed on the next poll (driven by
+-                        // connection traffic).
+-                        Poll::Pending if Instant::now() < *deadline => continue 'channels,
+-                        Poll::Pending => {
+-                            warn!(
+-                                channel = local_id,
+-                                "shell did not exit after PTY EOF; killing"
+-                            );
+-                            // Stay in `Exiting`: once the kill takes effect the shell
+-                            // becomes reapable and the `Poll::Ready` arms above reap it
+-                            // and forward its (signal) status.
+-                            terminal.start_kill();
+-                            continue 'channels;
+-                        }
 -                    },
 -                    TerminalState::Exited(status) => {
 -                        let request = ChannelRequest {
@@ -4853,6 +5286,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +    fn return_credit(&mut self, write: &mut WriteState) -> Result<bool, Error> {
 +        let drained = match &self.run {
 +            Run::Active(active) => active.process.as_ref().is_none_or(Process::stdin_drained),
++            Run::Sftp(sftp) => !sftp.core.has_request(),
 +            _ => true,
 +        };
 +
@@ -4986,7 +5420,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
      }
  }
  
-@@ -577,17 +785,312 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
+@@ -577,17 +915,313 @@ impl<'a> TryFrom<IncomingPacket<'a>> for IncomingChannelMessage<'a> {
      }
  }
  
@@ -5008,6 +5442,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..2f97fdc67b177b668a2d7896eeaf02fc
 +/// Smallest maximum packet size a client may advertise; smaller channels are refused, never rounded up
 +const MIN_PACKET_SIZE: u32 = 128;
 +const READ_CHUNK: usize = 32 * 1024;
++const _: () = assert!(crate::sftp::MAX_BUFFERED_INPUT >= INITIAL_WINDOW_SIZE as usize);
 +const MAX_PACKETS_PER_POLL: usize = 16;
 +/// Session channels one connection may hold open at once
 +const MAX_CHANNELS: usize = 8;
@@ -5613,8 +6048,2032 @@ index 7e09ff4a235fd670d4978ebfbbd04884f62c54b1..5de67c0f93989951c690f99992af1612
 +const LOGIN_BUSY_TIMEOUT: Duration = Duration::from_secs(30 * 24 * 3600);
 +/// How long buffered output may wait for a peer that is not reading
 +const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+diff --git a/oxish/src/sftp.rs b/oxish/src/sftp.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7bf26b15f96c8eaf9c112f65e5fd7ba974b035aa
+--- /dev/null
++++ b/oxish/src/sftp.rs
+@@ -0,0 +1,1117 @@
++
++use core::fmt;
++use std::{
++    collections::BTreeMap,
++    ffi::OsStr,
++    fs::File,
++    io,
++    os::{
++        fd::{AsFd, OwnedFd},
++        unix::{ffi::OsStrExt as _, fs::FileExt as _},
++    },
++    path::{Path, PathBuf},
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++use rustix::{
++    fs::{AtFlags, Dir, Gid, Mode, OFlags, RawMode, Stat, StatVfsMountFlags, Timespec, Timestamps, Uid},
++    io::Errno,
++};
++
++pub(crate) const MAX_PACKET: usize = 256 * 1024;
++pub(crate) const MAX_DATA: usize = MAX_PACKET - 1024;
++pub(crate) const MAX_HANDLES: usize = 256;
++pub(crate) const MAX_PENDING: usize = 1024;
++pub(crate) const MAX_BUFFERED_INPUT: usize = 1 << 20;
++const MAX_BATCH: usize = 64;
++const OUTPUT_SOFT_LIMIT: usize = 512 * 1024;
++const MAX_NAMES: usize = 100;
++const MAX_PATH: usize = 4096;
++const MAX_EXTENSIONS: usize = 32;
++const MAX_LINKS: usize = 40;
++const VERSION: u32 = 3;
++
++const INIT: u8 = 1;
++const VERSION_REPLY: u8 = 2;
++const OPEN: u8 = 3;
++const CLOSE: u8 = 4;
++const READ: u8 = 5;
++const WRITE: u8 = 6;
++const LSTAT: u8 = 7;
++const FSTAT: u8 = 8;
++const SETSTAT: u8 = 9;
++const FSETSTAT: u8 = 10;
++const OPENDIR: u8 = 11;
++const READDIR: u8 = 12;
++const REMOVE: u8 = 13;
++const MKDIR: u8 = 14;
++const RMDIR: u8 = 15;
++const REALPATH: u8 = 16;
++const STAT: u8 = 17;
++const RENAME: u8 = 18;
++const READLINK: u8 = 19;
++const SYMLINK: u8 = 20;
++const STATUS: u8 = 101;
++const HANDLE: u8 = 102;
++const DATA: u8 = 103;
++const NAME: u8 = 104;
++const ATTRS: u8 = 105;
++const EXTENDED: u8 = 200;
++const EXTENDED_REPLY: u8 = 201;
++
++const OPEN_READ: u32 = 0x01;
++const OPEN_WRITE: u32 = 0x02;
++const OPEN_APPEND: u32 = 0x04;
++const OPEN_CREATE: u32 = 0x08;
++const OPEN_TRUNCATE: u32 = 0x10;
++const OPEN_EXCLUSIVE: u32 = 0x20;
++
++const ATTR_SIZE: u32 = 0x01;
++const ATTR_OWNER: u32 = 0x02;
++const ATTR_PERMISSIONS: u32 = 0x04;
++const ATTR_TIMES: u32 = 0x08;
++const ATTR_EXTENDED: u32 = 0x8000_0000;
++
++const S_IFMT: u32 = 0o170_000;
++const S_IFDIR: u32 = 0o040_000;
++const S_IFLNK: u32 = 0o120_000;
++const S_IFREG: u32 = 0o100_000;
++const S_IFCHR: u32 = 0o020_000;
++const S_IFBLK: u32 = 0o060_000;
++const S_IFIFO: u32 = 0o010_000;
++const S_IFSOCK: u32 = 0o140_000;
++
++const EXTENSIONS: [(&str, &str); 8] = [
++    ("posix-rename@openssh.com", "1"),
++    ("statvfs@openssh.com", "2"),
++    ("fstatvfs@openssh.com", "2"),
++    ("hardlink@openssh.com", "1"),
++    ("fsync@openssh.com", "1"),
++    ("lsetstat@openssh.com", "1"),
++    ("limits@openssh.com", "1"),
++    ("expand-path@openssh.com", "1"),
++];
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct Fatal(pub(crate) &'static str);
++
++impl fmt::Display for Fatal {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(self.0)
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct Status(pub(crate) u32);
++
++impl Status {
++    pub(crate) const OK: Self = Self(0);
++    pub(crate) const EOF: Self = Self(1);
++    pub(crate) const NO_SUCH_FILE: Self = Self(2);
++    pub(crate) const PERMISSION_DENIED: Self = Self(3);
++    pub(crate) const FAILURE: Self = Self(4);
++    pub(crate) const BAD_MESSAGE: Self = Self(5);
++    pub(crate) const OP_UNSUPPORTED: Self = Self(8);
++
++    fn message(self) -> &'static str {
++        match self.0 {
++            0 => "Success",
++            1 => "End of file",
++            2 => "No such file",
++            3 => "Permission denied",
++            5 => "Bad message",
++            6 => "No connection",
++            7 => "Connection lost",
++            8 => "Operation unsupported",
++            _ => "Failure",
++        }
++    }
++}
++
++impl From<Errno> for Status {
++    fn from(errno: Errno) -> Self {
++        match errno {
++            Errno::NOENT | Errno::NOTDIR | Errno::BADF | Errno::LOOP => Self::NO_SUCH_FILE,
++            Errno::PERM | Errno::ACCESS | Errno::FAULT => Self::PERMISSION_DENIED,
++            Errno::NAMETOOLONG | Errno::INVAL => Self::BAD_MESSAGE,
++            Errno::NOSYS | Errno::OPNOTSUPP => Self::OP_UNSUPPORTED,
++            _ => Self::FAILURE,
++        }
++    }
++}
++
++impl From<io::Error> for Status {
++    fn from(error: io::Error) -> Self {
++        Errno::from_io_error(&error).map_or(Self::FAILURE, Self::from)
++    }
++}
++
++enum Fail {
++    Status(Status),
++    Fatal(Fatal),
++}
++
++impl From<Status> for Fail {
++    fn from(status: Status) -> Self {
++        Self::Status(status)
++    }
++}
++
++impl From<Errno> for Fail {
++    fn from(errno: Errno) -> Self {
++        Self::Status(errno.into())
++    }
++}
++
++impl From<io::Error> for Fail {
++    fn from(error: io::Error) -> Self {
++        Self::Status(error.into())
++    }
++}
++
++impl From<Fatal> for Fail {
++    fn from(fatal: Fatal) -> Self {
++        Self::Fatal(fatal)
++    }
++}
++
++type Outcome = Result<(), Fail>;
++
++struct Reader<'a> {
++    rest: &'a [u8],
++}
++
++impl<'a> Reader<'a> {
++    fn take(&mut self, len: usize) -> Result<&'a [u8], Fatal> {
++        match self.rest.split_at_checked(len) {
++            Some((head, rest)) => {
++                self.rest = rest;
++                Ok(head)
++            }
++            None => Err(Fatal("truncated request")),
++        }
++    }
++
++    fn u8(&mut self) -> Result<u8, Fatal> {
++        Ok(self.take(1)?[0])
++    }
++
++    fn u32(&mut self) -> Result<u32, Fatal> {
++        let bytes = self.take(4)?;
++        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
++    }
++
++    fn u64(&mut self) -> Result<u64, Fatal> {
++        let bytes = self.take(8)?;
++        let mut array = [0; 8];
++        array.copy_from_slice(bytes);
++        Ok(u64::from_be_bytes(array))
++    }
++
++    fn bytes(&mut self) -> Result<&'a [u8], Fatal> {
++        let len = usize::try_from(self.u32()?).map_err(|_| Fatal("string too long"))?;
++        self.take(len)
++    }
++
++    fn path(&mut self) -> Result<&'a [u8], Fail> {
++        let bytes = self.bytes()?;
++        match bytes.len() > MAX_PATH {
++            true => Err(Errno::NAMETOOLONG.into()),
++            false => Ok(bytes),
++        }
++    }
++}
++
++fn put_u32(out: &mut Vec<u8>, value: u32) {
++    out.extend_from_slice(&value.to_be_bytes());
++}
++
++fn put_u64(out: &mut Vec<u8>, value: u64) {
++    out.extend_from_slice(&value.to_be_bytes());
++}
++
++fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
++    put_u32(out, u32::try_from(bytes.len()).unwrap_or(u32::MAX));
++    out.extend_from_slice(bytes);
++}
++
++fn begin(out: &mut Vec<u8>, kind: u8) -> usize {
++    let start = out.len();
++    put_u32(out, 0);
++    out.push(kind);
++    start
++}
++
++fn end(out: &mut [u8], start: usize) {
++    let len = u32::try_from(out.len() - start - 4).unwrap_or(u32::MAX);
++    out[start..start + 4].copy_from_slice(&len.to_be_bytes());
++}
++
++fn status(out: &mut Vec<u8>, id: u32, status: Status) {
++    let start = begin(out, STATUS);
++    put_u32(out, id);
++    put_u32(out, status.0);
++    put_bytes(out, status.message().as_bytes());
++    put_bytes(out, b"");
++    end(out, start);
++}
++
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub(crate) struct Attrs {
++    pub(crate) size: Option<u64>,
++    pub(crate) owner: Option<(u32, u32)>,
++    pub(crate) permissions: Option<u32>,
++    pub(crate) times: Option<(u32, u32)>,
++}
++
++impl Attrs {
++    fn parse(reader: &mut Reader<'_>) -> Result<Self, Fatal> {
++        let flags = reader.u32()?;
++        if flags & !(ATTR_SIZE | ATTR_OWNER | ATTR_PERMISSIONS | ATTR_TIMES | ATTR_EXTENDED) != 0 {
++            return Err(Fatal("unknown attribute flags"));
++        }
++        let mut attrs = Self::default();
++        if flags & ATTR_SIZE != 0 {
++            attrs.size = Some(reader.u64()?);
++        }
++        if flags & ATTR_OWNER != 0 {
++            attrs.owner = Some((reader.u32()?, reader.u32()?));
++        }
++        if flags & ATTR_PERMISSIONS != 0 {
++            attrs.permissions = Some(reader.u32()?);
++        }
++        if flags & ATTR_TIMES != 0 {
++            attrs.times = Some((reader.u32()?, reader.u32()?));
++        }
++        if flags & ATTR_EXTENDED != 0 {
++            let count = reader.u32()?;
++            if usize::try_from(count).map_or(true, |count| count > MAX_EXTENSIONS) {
++                return Err(Fatal("too many attribute extensions"));
++            }
++            for _ in 0..count {
++                reader.bytes()?;
++                reader.bytes()?;
++            }
++        }
++        Ok(attrs)
++    }
++
++    fn encode(&self, out: &mut Vec<u8>) {
++        let mut flags = 0;
++        if self.size.is_some() {
++            flags |= ATTR_SIZE;
++        }
++        if self.owner.is_some() {
++            flags |= ATTR_OWNER;
++        }
++        if self.permissions.is_some() {
++            flags |= ATTR_PERMISSIONS;
++        }
++        if self.times.is_some() {
++            flags |= ATTR_TIMES;
++        }
++        put_u32(out, flags);
++        if let Some(size) = self.size {
++            put_u64(out, size);
++        }
++        if let Some((uid, gid)) = self.owner {
++            put_u32(out, uid);
++            put_u32(out, gid);
++        }
++        if let Some(permissions) = self.permissions {
++            put_u32(out, permissions);
++        }
++        if let Some((atime, mtime)) = self.times {
++            put_u32(out, atime);
++            put_u32(out, mtime);
++        }
++    }
++
++    fn from_stat(stat: &Stat) -> Self {
++        let seconds = |value: i64| u32::try_from(value.max(0)).unwrap_or(u32::MAX);
++        Self {
++            size: Some(u64::try_from(stat.st_size).unwrap_or(0)),
++            owner: Some((stat.st_uid, stat.st_gid)),
++            permissions: Some(mode_bits(stat.st_mode)),
++            times: Some((seconds(stat.st_atime), seconds(stat.st_mtime))),
++        }
++    }
++}
++
++#[derive(Clone, Debug)]
++pub(crate) struct Owner {
++    pub(crate) uid: u32,
++    pub(crate) name: String,
++}
++
++enum Handle {
++    File(File),
++    Dir(Dir),
++}
++
++pub(crate) struct Engine {
++    root: OwnedFd,
++    home: PathBuf,
++    owner: Owner,
++    handles: BTreeMap<u64, Handle>,
++    next_handle: u64,
++    started: bool,
++}
++
++#[allow(clippy::useless_conversion)]
++fn mode_bits(mode: RawMode) -> u32 {
++    u32::from(mode)
++}
++
++fn mode_of(bits: u32) -> Mode {
++    Mode::from_raw_mode(RawMode::try_from(bits & 0o7777).unwrap_or(0))
++}
++
++fn follow(follow_links: bool) -> AtFlags {
++    match follow_links {
++        true => AtFlags::empty(),
++        false => AtFlags::SYMLINK_NOFOLLOW,
++    }
++}
++
++fn timestamps(times: (u32, u32)) -> Timestamps {
++    let stamp = |seconds: u32| Timespec { tv_sec: i64::from(seconds), tv_nsec: 0 };
++    Timestamps { last_access: stamp(times.0), last_modification: stamp(times.1) }
++}
++
++fn uid_gid(owner: (u32, u32)) -> Result<(Uid, Gid), Errno> {
++    match owner.0 == u32::MAX || owner.1 == u32::MAX {
++        true => Err(Errno::INVAL),
++        false => Ok((Uid::from_raw(owner.0), Gid::from_raw(owner.1))),
++    }
++}
++
++fn apply_fd(fd: impl AsFd, attrs: &Attrs, truncate: bool) -> Result<(), Errno> {
++    if let Some(size) = attrs.size {
++        if !truncate {
++            return Err(Errno::ISDIR);
++        }
++        rustix::fs::ftruncate(&fd, size)?;
++    }
++    if let Some(permissions) = attrs.permissions {
++        rustix::fs::fchmod(&fd, mode_of(permissions))?;
++    }
++    if let Some(owner) = attrs.owner {
++        let (uid, gid) = uid_gid(owner)?;
++        rustix::fs::fchown(&fd, Some(uid), Some(gid))?;
++    }
++    if let Some(times) = attrs.times {
++        rustix::fs::futimens(&fd, &timestamps(times))?;
++    }
++    Ok(())
++}
++
++// The session process holds the host key and is non-dumpable so that the account cannot read its
++// memory. This engine runs in that process, where `/proc/self/mem` and its siblings are readable, so
++// no file on a procfs is ever opened, whatever path or link names it.
++#[cfg(target_os = "linux")]
++fn refuse_procfs(fd: &OwnedFd) -> Result<(), Errno> {
++    match rustix::fs::fstatfs(fd)?.f_type == rustix::fs::PROC_SUPER_MAGIC {
++        true => Err(Errno::ACCESS),
++        false => Ok(()),
++    }
++}
++
++#[cfg(not(target_os = "linux"))]
++fn refuse_procfs(_fd: &OwnedFd) -> Result<(), Errno> {
++    Ok(())
++}
++
++fn open_directory(path: &Path) -> Result<OwnedFd, Errno> {
++    rustix::fs::open(path, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOCTTY, Mode::empty())
++}
++
++impl Engine {
++    pub(crate) fn new(home: &Path, owner: Owner) -> io::Result<Self> {
++        let (root, home) = match home.is_absolute().then(|| open_directory(home)) {
++            Some(Ok(root)) => (root, std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf())),
++            _ => (open_directory(Path::new("/"))?, PathBuf::from("/")),
++        };
++        Ok(Self { root, home, owner, handles: BTreeMap::new(), next_handle: 1, started: false })
++    }
++
++    pub(crate) fn handle(&mut self, packet: &[u8], out: &mut Vec<u8>) -> Result<(), Fatal> {
++        let mut reader = Reader { rest: packet };
++        let kind = reader.u8()?;
++        match (self.started, kind) {
++            (false, INIT) => return self.init(&mut reader, out),
++            (false, _) => return Err(Fatal("request before the version exchange")),
++            (true, INIT) => return Err(Fatal("second version exchange")),
++            (true, _) => {}
++        }
++        let id = reader.u32()?;
++        let start = out.len();
++        match self.request(kind, id, &mut reader, out) {
++            Ok(()) => Ok(()),
++            Err(Fail::Status(code)) => {
++                out.truncate(start);
++                status(out, id, code);
++                Ok(())
++            }
++            Err(Fail::Fatal(fatal)) => {
++                out.truncate(start);
++                Err(fatal)
++            }
++        }
++    }
++
++    fn init(&mut self, reader: &mut Reader<'_>, out: &mut Vec<u8>) -> Result<(), Fatal> {
++        reader.u32()?;
++        let mut extensions = 0;
++        while !reader.rest.is_empty() {
++            reader.bytes()?;
++            reader.bytes()?;
++            extensions += 1;
++            if extensions > MAX_EXTENSIONS {
++                return Err(Fatal("too many extensions"));
++            }
++        }
++        self.started = true;
++        let start = begin(out, VERSION_REPLY);
++        put_u32(out, VERSION);
++        for (name, version) in EXTENSIONS {
++            put_bytes(out, name.as_bytes());
++            put_bytes(out, version.as_bytes());
++        }
++        end(out, start);
++        Ok(())
++    }
++
++    fn request(&mut self, kind: u8, id: u32, reader: &mut Reader<'_>, out: &mut Vec<u8>) -> Outcome {
++        match kind {
++            OPEN => {
++                let path = reader.path()?;
++                let flags = reader.u32()?;
++                let attrs = Attrs::parse(reader)?;
++                let handle = self.open(path, flags, &attrs)?;
++                self.reply_handle(out, id, handle);
++            }
++            CLOSE => {
++                let key = self.key(reader.bytes()?)?;
++                self.handles.remove(&key);
++                done(out, id);
++            }
++            READ => {
++                let handle = reader.bytes()?;
++                let offset = reader.u64()?;
++                let len = usize::try_from(reader.u32()?).unwrap_or(MAX_DATA).min(MAX_DATA);
++                let key = self.key(handle)?;
++                self.read(key, offset, len, id, out)?;
++            }
++            WRITE => {
++                let handle = reader.bytes()?;
++                let offset = reader.u64()?;
++                let data = reader.bytes()?;
++                let key = self.key(handle)?;
++                match self.handles.get(&key) {
++                    Some(Handle::File(file)) => file.write_all_at(data, offset)?,
++                    _ => return Err(Status::FAILURE.into()),
++                }
++                done(out, id);
++            }
++            LSTAT | STAT => {
++                let path = reader.path()?;
++                let stat = rustix::fs::statat(&self.root, path, follow(kind == STAT))?;
++                reply_attrs(out, id, &Attrs::from_stat(&stat));
++            }
++            FSTAT => {
++                let key = self.key(reader.bytes()?)?;
++                let stat = match self.handles.get(&key) {
++                    Some(Handle::File(file)) => rustix::fs::fstat(file)?,
++                    Some(Handle::Dir(dir)) => dir.stat()?,
++                    None => return Err(Status::FAILURE.into()),
++                };
++                reply_attrs(out, id, &Attrs::from_stat(&stat));
++            }
++            SETSTAT => {
++                let path = reader.path()?;
++                let attrs = Attrs::parse(reader)?;
++                self.set_path(path, &attrs, true)?;
++                done(out, id);
++            }
++            FSETSTAT => {
++                let handle = reader.bytes()?;
++                let attrs = Attrs::parse(reader)?;
++                let key = self.key(handle)?;
++                match self.handles.get(&key) {
++                    Some(Handle::File(file)) => apply_fd(file, &attrs, true)?,
++                    Some(Handle::Dir(dir)) => apply_fd(dir.fd()?, &attrs, false)?,
++                    None => return Err(Status::FAILURE.into()),
++                }
++                done(out, id);
++            }
++            OPENDIR => {
++                let path = reader.path()?;
++                self.room()?;
++                let fd = rustix::fs::openat(
++                    &self.root,
++                    path,
++                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOCTTY,
++                    Mode::empty(),
++                )?;
++                let handle = self.insert(Handle::Dir(Dir::new(fd)?));
++                self.reply_handle(out, id, handle);
++            }
++            READDIR => {
++                let key = self.key(reader.bytes()?)?;
++                self.read_dir(key, id, out)?;
++            }
++            REMOVE => {
++                rustix::fs::unlinkat(&self.root, reader.path()?, AtFlags::empty())?;
++                done(out, id);
++            }
++            MKDIR => {
++                let path = reader.path()?;
++                let attrs = Attrs::parse(reader)?;
++                let mode = attrs.permissions.map_or(0o777, |permissions| permissions & 0o777);
++                rustix::fs::mkdirat(&self.root, path, mode_of(mode))?;
++                done(out, id);
++            }
++            RMDIR => {
++                rustix::fs::unlinkat(&self.root, reader.path()?, AtFlags::REMOVEDIR)?;
++                done(out, id);
++            }
++            REALPATH => {
++                let resolved = self.realpath(reader.path()?)?;
++                reply_name(out, id, &resolved, &Attrs::default());
++            }
++            RENAME => {
++                let (old, new) = (reader.path()?, reader.path()?);
++                self.rename(old, new)?;
++                done(out, id);
++            }
++            READLINK => {
++                let target = rustix::fs::readlinkat(&self.root, reader.path()?, Vec::new())?;
++                reply_name(out, id, target.to_bytes(), &Attrs::default());
++            }
++            SYMLINK => {
++                // OpenSSH sends the link's contents first and the new link's path second.
++                let (target, link) = (reader.path()?, reader.path()?);
++                rustix::fs::symlinkat(target, &self.root, link)?;
++                done(out, id);
++            }
++            EXTENDED => {
++                let name = reader.bytes()?;
++                self.extended(name, id, reader, out)?;
++            }
++            _ => return Err(Status::OP_UNSUPPORTED.into()),
++        }
++        Ok(())
++    }
++
++    fn extended(&mut self, name: &[u8], id: u32, reader: &mut Reader<'_>, out: &mut Vec<u8>) -> Outcome {
++        match name {
++            b"posix-rename@openssh.com" => {
++                let (old, new) = (reader.path()?, reader.path()?);
++                rustix::fs::renameat(&self.root, old, &self.root, new)?;
++                done(out, id);
++            }
++            b"hardlink@openssh.com" => {
++                let (old, new) = (reader.path()?, reader.path()?);
++                rustix::fs::linkat(&self.root, old, &self.root, new, AtFlags::empty())?;
++                done(out, id);
++            }
++            b"fsync@openssh.com" => {
++                let key = self.key(reader.bytes()?)?;
++                match self.handles.get(&key) {
++                    Some(Handle::File(file)) => rustix::fs::fsync(file)?,
++                    _ => return Err(Status::FAILURE.into()),
++                }
++                done(out, id);
++            }
++            b"lsetstat@openssh.com" => {
++                let path = reader.path()?;
++                let attrs = Attrs::parse(reader)?;
++                self.set_path(path, &attrs, false)?;
++                done(out, id);
++            }
++            b"statvfs@openssh.com" => {
++                let path = reader.path()?;
++                let absolute = match path.first() {
++                    Some(b'/') => PathBuf::from(OsStr::from_bytes(path)),
++                    _ => self.home.join(OsStr::from_bytes(path)),
++                };
++                reply_statvfs(out, id, &rustix::fs::statvfs(&absolute)?);
++            }
++            b"fstatvfs@openssh.com" => {
++                let key = self.key(reader.bytes()?)?;
++                let vfs = match self.handles.get(&key) {
++                    Some(Handle::File(file)) => rustix::fs::fstatvfs(file)?,
++                    Some(Handle::Dir(dir)) => dir.statvfs()?,
++                    None => return Err(Status::FAILURE.into()),
++                };
++                reply_statvfs(out, id, &vfs);
++            }
++            b"limits@openssh.com" => {
++                let start = begin(out, EXTENDED_REPLY);
++                put_u32(out, id);
++                put_u64(out, MAX_PACKET as u64);
++                put_u64(out, MAX_DATA as u64);
++                put_u64(out, MAX_DATA as u64);
++                put_u64(out, MAX_HANDLES as u64);
++                end(out, start);
++            }
++            b"expand-path@openssh.com" => {
++                let path = reader.path()?;
++                let tilde = match path.strip_prefix(b"/") {
++                    Some(rest) if rest.starts_with(b"~") => rest,
++                    _ => path,
++                };
++                let home = self.home.as_os_str().as_bytes();
++                let expanded = match tilde {
++                    b"~" => home.to_vec(),
++                    _ => match tilde.strip_prefix(b"~/") {
++                        Some(rest) if home == b"/" => [home, rest].concat(),
++                        Some(rest) => [home, b"/", rest].concat(),
++                        None => path.to_vec(),
++                    },
++                };
++                reply_name(out, id, &expanded, &Attrs::default());
++            }
++            _ => return Err(Status::OP_UNSUPPORTED.into()),
++        }
++        Ok(())
++    }
++
++    fn room(&self) -> Result<(), Status> {
++        match self.handles.len() >= MAX_HANDLES {
++            true => Err(Status::FAILURE),
++            false => Ok(()),
++        }
++    }
++
++    fn insert(&mut self, handle: Handle) -> u64 {
++        let key = self.next_handle;
++        self.next_handle += 1;
++        self.handles.insert(key, handle);
++        key
++    }
++
++    fn key(&self, raw: &[u8]) -> Result<u64, Status> {
++        let bytes: [u8; 8] = raw.try_into().map_err(|_| Status::FAILURE)?;
++        let key = u64::from_be_bytes(bytes);
++        match self.handles.contains_key(&key) {
++            true => Ok(key),
++            false => Err(Status::FAILURE),
++        }
++    }
++
++    fn reply_handle(&self, out: &mut Vec<u8>, id: u32, key: u64) {
++        let start = begin(out, HANDLE);
++        put_u32(out, id);
++        put_bytes(out, &key.to_be_bytes());
++        end(out, start);
++    }
++
++    fn open(&mut self, path: &[u8], pflags: u32, attrs: &Attrs) -> Result<u64, Fail> {
++        self.room()?;
++        let mut flags = match (pflags & OPEN_READ != 0, pflags & OPEN_WRITE != 0) {
++            (true, true) => OFlags::RDWR,
++            (false, true) => OFlags::WRONLY,
++            _ => OFlags::RDONLY,
++        };
++        // Non-blocking while opening, so a FIFO or device cannot hold the session; regular files
++        // are switched back to blocking below.
++        flags |= OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK;
++        for (bit, flag) in [
++            (OPEN_APPEND, OFlags::APPEND),
++            (OPEN_CREATE, OFlags::CREATE),
++            (OPEN_TRUNCATE, OFlags::TRUNC),
++            (OPEN_EXCLUSIVE, OFlags::EXCL),
++        ] {
++            if pflags & bit != 0 {
++                flags |= flag;
++            }
++        }
++        let mode = attrs.permissions.map_or(0o666, |permissions| permissions & 0o777);
++        let fd = rustix::fs::openat(&self.root, path, flags, mode_of(mode))?;
++        refuse_procfs(&fd)?;
++        match mode_bits(rustix::fs::fstat(&fd)?.st_mode) & S_IFMT {
++            S_IFDIR => return Err(Errno::ISDIR.into()),
++            S_IFREG => rustix::fs::fcntl_setfl(&fd, rustix::fs::fcntl_getfl(&fd)? - OFlags::NONBLOCK)?,
++            _ => {}
++        }
++        Ok(self.insert(Handle::File(File::from(fd))))
++    }
++
++    fn read(&mut self, key: u64, offset: u64, len: usize, id: u32, out: &mut Vec<u8>) -> Outcome {
++        let Some(Handle::File(file)) = self.handles.get(&key) else {
++            return Err(Status::FAILURE.into());
++        };
++        let start = begin(out, DATA);
++        put_u32(out, id);
++        let length_at = out.len();
++        put_u32(out, 0);
++        let data_at = out.len();
++        out.resize(data_at + len, 0);
++        let read = loop {
++            match file.read_at(&mut out[data_at..], offset) {
++                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
++                other => break other?,
++            }
++        };
++        if read == 0 && len > 0 {
++            return Err(Status::EOF.into());
++        }
++        out.truncate(data_at + read);
++        out[length_at..data_at].copy_from_slice(&u32::try_from(read).unwrap_or(0).to_be_bytes());
++        end(out, start);
++        Ok(())
++    }
++
++    fn read_dir(&mut self, key: u64, id: u32, out: &mut Vec<u8>) -> Outcome {
++        let Some(Handle::Dir(dir)) = self.handles.get_mut(&key) else {
++            return Err(Status::FAILURE.into());
++        };
++        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
++        let start = begin(out, NAME);
++        put_u32(out, id);
++        let count_at = out.len();
++        put_u32(out, 0);
++        let mut count = 0_u32;
++        while (count as usize) < MAX_NAMES {
++            let entry = match dir.read() {
++                None => break,
++                Some(Ok(entry)) => entry,
++                Some(Err(error)) if count == 0 => return Err(error.into()),
++                Some(Err(_)) => break,
++            };
++            let name = entry.file_name().to_bytes();
++            let Ok(stat) = rustix::fs::statat(dir.fd()?, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW) else {
++                continue;
++            };
++            let attrs = Attrs::from_stat(&stat);
++            put_bytes(out, name);
++            put_bytes(out, &long_name(&attrs, name, now, &self.owner));
++            attrs.encode(out);
++            count += 1;
++        }
++        if count == 0 {
++            return Err(Status::EOF.into());
++        }
++        out[count_at..count_at + 4].copy_from_slice(&count.to_be_bytes());
++        end(out, start);
++        Ok(())
++    }
++
++    fn set_path(&self, path: &[u8], attrs: &Attrs, follow_links: bool) -> Result<(), Errno> {
++        if let Some(size) = attrs.size {
++            if !follow_links {
++                return Err(Errno::OPNOTSUPP);
++            }
++            let fd = rustix::fs::openat(
++                &self.root,
++                path,
++                OFlags::WRONLY | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
++                Mode::empty(),
++            )?;
++            refuse_procfs(&fd)?;
++            rustix::fs::ftruncate(&fd, size)?;
++        }
++        if let Some(permissions) = attrs.permissions {
++            match follow_links {
++                true => rustix::fs::chmodat(&self.root, path, mode_of(permissions), AtFlags::empty())?,
++                false => self.chmod_link(path, permissions)?,
++            }
++        }
++        if let Some(owner) = attrs.owner {
++            let (uid, gid) = uid_gid(owner)?;
++            rustix::fs::chownat(&self.root, path, Some(uid), Some(gid), follow(follow_links))?;
++        }
++        if let Some(times) = attrs.times {
++            rustix::fs::utimensat(&self.root, path, &timestamps(times), follow(follow_links))?;
++        }
++        Ok(())
++    }
++
++    // Linux cannot change the mode of a link, and its `fchmodat` refuses AT_SYMLINK_NOFOLLOW even for
++    // other files. Like glibc, pin the object without following a link, refuse a link, and change the
++    // pinned object through its `/proc/self/fd` entry.
++    #[cfg(target_os = "linux")]
++    fn chmod_link(&self, path: &[u8], permissions: u32) -> Result<(), Errno> {
++        use std::os::fd::AsRawFd as _;
++
++        let pinned = rustix::fs::openat(
++            &self.root,
++            path,
++            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
++            Mode::empty(),
++        )?;
++        if mode_bits(rustix::fs::fstat(&pinned)?.st_mode) & S_IFMT == S_IFLNK {
++            return Err(Errno::OPNOTSUPP);
++        }
++        let proc = format!("/proc/self/fd/{}", pinned.as_raw_fd());
++        match rustix::fs::chmodat(rustix::fs::CWD, proc, mode_of(permissions), AtFlags::empty()) {
++            Err(Errno::NOENT) => Err(Errno::NOSYS),
++            other => other,
++        }
++    }
++
++    #[cfg(not(target_os = "linux"))]
++    fn chmod_link(&self, _path: &[u8], _permissions: u32) -> Result<(), Errno> {
++        Err(Errno::OPNOTSUPP)
++    }
++
++    // A rename never replaces an existing target (draft-ietf-secsh-filexfer-02); OpenSSH answers
++    // SSH_FX_FAILURE then. Where the file system lacks RENAME_NOREPLACE, a check precedes the rename.
++    fn rename(&self, old: &[u8], new: &[u8]) -> Result<(), Fail> {
++        #[cfg(target_os = "linux")]
++        match rustix::fs::renameat_with(&self.root, old, &self.root, new, rustix::fs::RenameFlags::NOREPLACE) {
++            Ok(()) => return Ok(()),
++            Err(Errno::EXIST) => return Err(Status::FAILURE.into()),
++            Err(Errno::INVAL | Errno::NOSYS | Errno::OPNOTSUPP) => {}
++            Err(error) => return Err(error.into()),
++        }
++        match rustix::fs::statat(&self.root, new, AtFlags::SYMLINK_NOFOLLOW) {
++            Ok(_) => Err(Status::FAILURE.into()),
++            Err(Errno::NOENT) => Ok(rustix::fs::renameat(&self.root, old, &self.root, new)?),
++            Err(error) => Err(error.into()),
++        }
++    }
++
++    fn realpath(&self, path: &[u8]) -> Result<Vec<u8>, Errno> {
++        fn push(pending: &mut Vec<Vec<u8>>, path: &[u8]) {
++            pending.extend(path.split(|byte| *byte == b'/').rev().map(<[u8]>::to_vec));
++        }
++
++        let mut pending: Vec<Vec<u8>> = Vec::new();
++        let mut resolved = PathBuf::from("/");
++        push(&mut pending, path);
++        if path.first() != Some(&b'/') {
++            push(&mut pending, self.home.as_os_str().as_bytes());
++        }
++        let mut links = 0;
++        while let Some(component) = pending.pop() {
++            match component.as_slice() {
++                b"" | b"." => {}
++                b".." => {
++                    resolved.pop();
++                }
++                name => {
++                    let candidate = resolved.join(OsStr::from_bytes(name));
++                    match std::fs::symlink_metadata(&candidate) {
++                        Ok(metadata) if metadata.file_type().is_symlink() => {
++                            links += 1;
++                            if links > MAX_LINKS {
++                                return Err(Errno::LOOP);
++                            }
++                            let target = std::fs::read_link(&candidate).map_err(|error| Errno::from_io_error(&error).unwrap_or(Errno::IO))?;
++                            if target.is_absolute() {
++                                resolved = PathBuf::from("/");
++                            }
++                            push(&mut pending, target.as_os_str().as_bytes());
++                        }
++                        Ok(_) => resolved = candidate,
++                        Err(error)
++                            if error.kind() == io::ErrorKind::NotFound
++                                && pending.iter().all(|rest| rest.is_empty() || rest == b".") =>
++                        {
++                            resolved = candidate;
++                        }
++                        Err(error) => return Err(Errno::from_io_error(&error).unwrap_or(Errno::IO)),
++                    }
++                }
++            }
++        }
++        Ok(resolved.as_os_str().as_bytes().to_vec())
++    }
++}
++
++fn done(out: &mut Vec<u8>, id: u32) {
++    status(out, id, Status::OK);
++}
++
++fn reply_attrs(out: &mut Vec<u8>, id: u32, attrs: &Attrs) {
++    let start = begin(out, ATTRS);
++    put_u32(out, id);
++    attrs.encode(out);
++    end(out, start);
++}
++
++fn reply_name(out: &mut Vec<u8>, id: u32, name: &[u8], attrs: &Attrs) {
++    let start = begin(out, NAME);
++    put_u32(out, id);
++    put_u32(out, 1);
++    put_bytes(out, name);
++    put_bytes(out, name);
++    attrs.encode(out);
++    end(out, start);
++}
++
++fn reply_statvfs(out: &mut Vec<u8>, id: u32, vfs: &rustix::fs::StatVfs) {
++    let mut flags = 0;
++    if vfs.f_flag.contains(StatVfsMountFlags::RDONLY) {
++        flags |= 1;
++    }
++    if vfs.f_flag.contains(StatVfsMountFlags::NOSUID) {
++        flags |= 2;
++    }
++    let start = begin(out, EXTENDED_REPLY);
++    put_u32(out, id);
++    for value in [
++        vfs.f_bsize, vfs.f_frsize, vfs.f_blocks, vfs.f_bfree, vfs.f_bavail, vfs.f_files, vfs.f_ffree,
++        vfs.f_favail, vfs.f_fsid, flags, vfs.f_namemax,
++    ] {
++        put_u64(out, value);
++    }
++    end(out, start);
++}
++
++pub(crate) fn long_name(attrs: &Attrs, name: &[u8], now: u64, owner: &Owner) -> Vec<u8> {
++    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
++    const SIX_MONTHS: u64 = 15_778_476;
++
++    let permissions = attrs.permissions.unwrap_or(0);
++    let mut mode = String::with_capacity(10);
++    mode.push(match permissions & S_IFMT {
++        S_IFDIR => 'd',
++        S_IFLNK => 'l',
++        S_IFCHR => 'c',
++        S_IFBLK => 'b',
++        S_IFIFO => 'p',
++        S_IFSOCK => 's',
++        S_IFREG => '-',
++        _ => '?',
++    });
++    for (shift, special, set, plain) in [(6, 0o4000, 's', 'S'), (3, 0o2000, 's', 'S'), (0, 0o1000, 't', 'T')] {
++        let bits = (permissions >> shift) & 7;
++        mode.push(if bits & 4 != 0 { 'r' } else { '-' });
++        mode.push(if bits & 2 != 0 { 'w' } else { '-' });
++        mode.push(match (bits & 1 != 0, permissions & special != 0) {
++            (true, true) => set,
++            (false, true) => plain,
++            (true, false) => 'x',
++            (false, false) => '-',
++        });
++    }
++    let (uid, gid) = attrs.owner.unwrap_or((0, 0));
++    let user = match uid == owner.uid {
++        true => owner.name.clone(),
++        false => uid.to_string(),
++    };
++    let mtime = u64::from(attrs.times.map_or(0, |(_, mtime)| mtime));
++    let days = i64::try_from(mtime / 86_400).unwrap_or(0);
++    let (year, month, day) = civil_from_days(days);
++    let seconds = mtime % 86_400;
++    let date = match now.abs_diff(mtime) < SIX_MONTHS {
++        true => format!("{} {day:>2} {:02}:{:02}", MONTHS[month - 1], seconds / 3600, seconds % 3600 / 60),
++        false => format!("{} {day:>2}  {year}", MONTHS[month - 1]),
++    };
++    let mut line = format!(
++        "{mode} {:>3} {user:<8.8} {gid:<8} {:>8} {date} ",
++        1,
++        attrs.size.unwrap_or(0)
++    )
++    .into_bytes();
++    line.extend_from_slice(name);
++    line
++}
++
++fn civil_from_days(days: i64) -> (i64, usize, i64) {
++    let shifted = days + 719_468;
++    let era = shifted.div_euclid(146_097);
++    let day_of_era = shifted.rem_euclid(146_097);
++    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
++    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
++    let mp = (5 * day_of_year + 2) / 153;
++    let day = day_of_year - (153 * mp + 2) / 5 + 1;
++    let month = if mp < 10 { mp + 3 } else { mp - 9 };
++    let year = year_of_era + era * 400 + i64::from(month <= 2);
++    (year, usize::try_from(month).unwrap_or(1), day)
++}
++
++pub(crate) struct Core {
++    engine: Engine,
++    input: Vec<u8>,
++    output: Vec<u8>,
++    sent: usize,
++}
++
++impl Core {
++    pub(crate) fn new(engine: Engine) -> Self {
++        Self { engine, input: Vec::new(), output: Vec::new(), sent: 0 }
++    }
++
++    pub(crate) fn push(&mut self, data: &[u8]) -> Result<(), Fatal> {
++        if self.input.len() + data.len() > MAX_BUFFERED_INPUT {
++            return Err(Fatal("too much unprocessed input"));
++        }
++        self.input.extend_from_slice(data);
++        let (mut at, mut count) = (0, 0);
++        while let Some(header) = self.input.get(at..at + 4) {
++            let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
++            if len == 0 || len > MAX_PACKET {
++                return Err(Fatal("invalid packet length"));
++            }
++            if self.input.len() < at + 4 + len {
++                break;
++            }
++            count += 1;
++            if count > MAX_PENDING {
++                return Err(Fatal("too many pending requests"));
++            }
++            at += 4 + len;
++        }
++        Ok(())
++    }
++
++    pub(crate) fn run(&mut self) -> Result<usize, Fatal> {
++        let (mut at, mut requests) = (0, 0);
++        let result = loop {
++            if requests >= MAX_BATCH || self.output.len() - self.sent >= OUTPUT_SOFT_LIMIT {
++                break Ok(());
++            }
++            let Some(header) = self.input.get(at..at + 4) else { break Ok(()) };
++            let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
++            if len == 0 || len > MAX_PACKET {
++                break Err(Fatal("invalid packet length"));
++            }
++            let Some(packet) = self.input.get(at + 4..at + 4 + len) else { break Ok(()) };
++            if let Err(fatal) = self.engine.handle(packet, &mut self.output) {
++                break Err(fatal);
++            }
++            at += 4 + len;
++            requests += 1;
++        };
++        self.input.drain(..at);
++        result.map(|()| at)
++    }
++
++    pub(crate) fn has_request(&self) -> bool {
++        self.input
++            .get(..4)
++            .map(|header| u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize)
++            .is_some_and(|len| self.input.len() >= 4 + len)
++    }
++
++    pub(crate) fn output(&self, limit: usize) -> &[u8] {
++        let waiting = &self.output[self.sent..];
++        &waiting[..waiting.len().min(limit)]
++    }
++
++    pub(crate) fn sent(&mut self, count: usize) {
++        self.sent = (self.sent + count).min(self.output.len());
++        if self.sent == self.output.len() {
++            self.output.clear();
++            self.sent = 0;
++        } else if self.sent >= OUTPUT_SOFT_LIMIT {
++            self.output.drain(..self.sent);
++            self.sent = 0;
++        }
++    }
++
++    pub(crate) fn discard(&mut self) -> usize {
++        let count = self.input.len();
++        self.input.clear();
++        count
++    }
++
++    pub(crate) fn has_output(&self) -> bool {
++        self.sent < self.output.len()
++    }
++}
+diff --git a/oxish/src/sftp_tests.rs b/oxish/src/sftp_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ecb3e8bf62fa79b0058ce52088bf81d82be8ce6
+--- /dev/null
++++ b/oxish/src/sftp_tests.rs
+@@ -0,0 +1,895 @@
++use std::{
++    fs,
++    os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink},
++    path::Path,
++};
++
++use tempfile::TempDir;
++
++use crate::sftp::{
++    Attrs, Core, Engine, Fatal, MAX_BUFFERED_INPUT, MAX_DATA, MAX_HANDLES, MAX_PACKET, MAX_PENDING, Owner, Status,
++    long_name,
++};
++
++const OK: u32 = 0;
++const EOF: u32 = 1;
++const NO_SUCH_FILE: u32 = 2;
++const PERMISSION_DENIED: u32 = 3;
++const FAILURE: u32 = 4;
++const BAD_MESSAGE: u32 = 5;
++const OP_UNSUPPORTED: u32 = 8;
++
++const READ: u32 = 1;
++const WRITE: u32 = 2;
++const APPEND: u32 = 4;
++const CREATE: u32 = 8;
++const TRUNCATE: u32 = 16;
++const EXCLUSIVE: u32 = 32;
++
++fn u32s(value: u32) -> Vec<u8> {
++    value.to_be_bytes().to_vec()
++}
++
++fn u64s(value: u64) -> Vec<u8> {
++    value.to_be_bytes().to_vec()
++}
++
++fn string(value: impl AsRef<[u8]>) -> Vec<u8> {
++    let value = value.as_ref();
++    [u32s(value.len() as u32), value.to_vec()].concat()
++}
++
++fn attrs(attrs: &Attrs) -> Vec<u8> {
++    let mut flags = 0;
++    let mut body = Vec::new();
++    if let Some(size) = attrs.size {
++        flags |= 1;
++        body.extend(u64s(size));
++    }
++    if let Some((uid, gid)) = attrs.owner {
++        flags |= 2;
++        body.extend([u32s(uid), u32s(gid)].concat());
++    }
++    if let Some(permissions) = attrs.permissions {
++        flags |= 4;
++        body.extend(u32s(permissions));
++    }
++    if let Some((atime, mtime)) = attrs.times {
++        flags |= 8;
++        body.extend([u32s(atime), u32s(mtime)].concat());
++    }
++    [u32s(flags), body].concat()
++}
++
++fn no_attrs() -> Vec<u8> {
++    u32s(0)
++}
++
++fn permissions(mode: u32) -> Vec<u8> {
++    attrs(&Attrs { permissions: Some(mode), ..Attrs::default() })
++}
++
++fn packet(kind: u8, body: &[u8]) -> Vec<u8> {
++    [u32s(body.len() as u32 + 1), vec![kind], body.to_vec()].concat()
++}
++
++struct Response {
++    kind: u8,
++    id: u32,
++    body: Vec<u8>,
++}
++
++struct Cursor<'a>(&'a [u8]);
++
++impl Cursor<'_> {
++    fn u32(&mut self) -> u32 {
++        let (head, rest) = self.0.split_at(4);
++        self.0 = rest;
++        u32::from_be_bytes(head.try_into().unwrap())
++    }
++
++    fn u64(&mut self) -> u64 {
++        let (head, rest) = self.0.split_at(8);
++        self.0 = rest;
++        u64::from_be_bytes(head.try_into().unwrap())
++    }
++
++    fn string(&mut self) -> Vec<u8> {
++        let len = self.u32() as usize;
++        let (head, rest) = self.0.split_at(len);
++        self.0 = rest;
++        head.to_vec()
++    }
++
++    fn attrs(&mut self) -> Attrs {
++        let flags = self.u32();
++        let mut attrs = Attrs::default();
++        if flags & 1 != 0 {
++            attrs.size = Some(self.u64());
++        }
++        if flags & 2 != 0 {
++            attrs.owner = Some((self.u32(), self.u32()));
++        }
++        if flags & 4 != 0 {
++            attrs.permissions = Some(self.u32());
++        }
++        if flags & 8 != 0 {
++            attrs.times = Some((self.u32(), self.u32()));
++        }
++        attrs
++    }
++}
++
++impl Response {
++    fn cursor(&self) -> Cursor<'_> {
++        Cursor(&self.body)
++    }
++
++    fn status(&self) -> u32 {
++        assert_eq!(self.kind, 101, "not a status reply: type {}", self.kind);
++        self.cursor().u32()
++    }
++
++    fn handle(&self) -> Vec<u8> {
++        assert_eq!(self.kind, 102, "not a handle: type {} status {}", self.kind, self.body.get(3).copied().unwrap_or(0));
++        self.cursor().string()
++    }
++
++    fn data(&self) -> Vec<u8> {
++        assert_eq!(self.kind, 103, "not data: type {} status {}", self.kind, self.body.get(3).copied().unwrap_or(0));
++        self.cursor().string()
++    }
++
++    fn attrs(&self) -> Attrs {
++        assert_eq!(self.kind, 105, "not attributes: type {}", self.kind);
++        self.cursor().attrs()
++    }
++
++    fn names(&self) -> Vec<(String, String, Attrs)> {
++        assert_eq!(self.kind, 104, "not names: type {}", self.kind);
++        let mut cursor = self.cursor();
++        (0..cursor.u32())
++            .map(|_| {
++                let name = String::from_utf8_lossy(&cursor.string()).into_owned();
++                let long = String::from_utf8_lossy(&cursor.string()).into_owned();
++                (name, long, cursor.attrs())
++            })
++            .collect()
++    }
++
++    fn name(&self) -> String {
++        let names = self.names();
++        assert_eq!(names.len(), 1);
++        names[0].0.clone()
++    }
++}
++
++struct Session {
++    dir: TempDir,
++    core: Core,
++    next: u32,
++}
++
++fn owner() -> Owner {
++    Owner { uid: rustix::process::geteuid().as_raw(), name: "alice".into() }
++}
++
++fn is_root() -> bool {
++    rustix::process::geteuid().is_root()
++}
++
++impl Session {
++    fn raw() -> Self {
++        let dir = TempDir::new().unwrap();
++        let home = fs::canonicalize(dir.path()).unwrap();
++        let core = Core::new(Engine::new(&home, owner()).unwrap());
++        Self { dir, core, next: 1 }
++    }
++
++    fn new() -> Self {
++        let mut session = Self::raw();
++        let init = session.exchange(&packet(1, &u32s(3))).remove(0);
++        assert_eq!(init.kind, 2);
++        session
++    }
++
++    fn path(&self, name: &str) -> String {
++        self.home().join(name).display().to_string()
++    }
++
++    fn home(&self) -> std::path::PathBuf {
++        fs::canonicalize(self.dir.path()).unwrap()
++    }
++
++    fn exchange(&mut self, bytes: &[u8]) -> Vec<Response> {
++        self.core.push(bytes).unwrap();
++        let mut out = Vec::new();
++        loop {
++            let consumed = self.core.run().unwrap();
++            let chunk = self.core.output(usize::MAX).to_vec();
++            self.core.sent(chunk.len());
++            out.extend(chunk);
++            if consumed == 0 && !self.core.has_output() {
++                break;
++            }
++        }
++        let mut responses = Vec::new();
++        let mut rest = out.as_slice();
++        while !rest.is_empty() {
++            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
++            let body = &rest[5..4 + len];
++            let kind = rest[4];
++            let (id, body) = match kind {
++                2 => (0, body.to_vec()),
++                _ => (u32::from_be_bytes(body[..4].try_into().unwrap()), body[4..].to_vec()),
++            };
++            responses.push(Response { kind, id, body });
++            rest = &rest[4 + len..];
++        }
++        responses
++    }
++
++    fn call(&mut self, kind: u8, body: &[u8]) -> Response {
++        let id = self.next;
++        self.next += 1;
++        let mut responses = self.exchange(&packet(kind, &[u32s(id), body.to_vec()].concat()));
++        assert_eq!(responses.len(), 1);
++        let response = responses.remove(0);
++        assert_eq!(response.id, id);
++        response
++    }
++
++    fn extended(&mut self, name: &str, body: &[u8]) -> Response {
++        self.call(200, &[string(name), body.to_vec()].concat())
++    }
++
++    fn open(&mut self, name: &str, flags: u32) -> Vec<u8> {
++        self.call(3, &[string(self.path(name)), u32s(flags), no_attrs()].concat()).handle()
++    }
++
++    fn close(&mut self, handle: &[u8]) {
++        assert_eq!(self.call(4, &string(handle)).status(), OK);
++    }
++
++    fn write(&mut self, handle: &[u8], offset: u64, data: &[u8]) -> u32 {
++        self.call(6, &[string(handle), u64s(offset), string(data)].concat()).status()
++    }
++
++    fn read(&mut self, handle: &[u8], offset: u64, len: u32) -> Response {
++        self.call(5, &[string(handle), u64s(offset), u32s(len)].concat())
++    }
++
++    fn put(&mut self, name: &str, contents: &[u8]) {
++        let handle = self.open(name, WRITE | CREATE | TRUNCATE);
++        assert_eq!(self.write(&handle, 0, contents), OK);
++        self.close(&handle);
++    }
++
++    fn status_of(&mut self, kind: u8, body: &[u8]) -> u32 {
++        self.call(kind, body).status()
++    }
++}
++
++#[test]
++fn the_version_exchange_lists_the_extensions() {
++    let mut session = Session::raw();
++    let mut extra = string("extra");
++    extra.extend(string("1"));
++    let hello = [u32s(6), extra].concat();
++    let reply = session.exchange(&packet(1, &hello)).remove(0);
++    assert_eq!(reply.kind, 2);
++    let mut cursor = reply.cursor();
++    assert_eq!(cursor.u32(), 3);
++    let mut names = Vec::new();
++    while !cursor.0.is_empty() {
++        names.push(String::from_utf8(cursor.string()).unwrap());
++        cursor.string();
++    }
++    for expected in [
++        "posix-rename@openssh.com",
++        "statvfs@openssh.com",
++        "fstatvfs@openssh.com",
++        "hardlink@openssh.com",
++        "fsync@openssh.com",
++        "lsetstat@openssh.com",
++        "limits@openssh.com",
++        "expand-path@openssh.com",
++    ] {
++        assert!(names.iter().any(|name| name == expected), "{expected} missing from {names:?}");
++    }
++}
++
++#[test]
++fn requests_before_the_version_exchange_and_a_second_one_are_refused() {
++    let mut session = Session::raw();
++    session.core.push(&packet(17, &[u32s(1), string(".")].concat())).unwrap();
++    assert_eq!(session.core.run(), Err(Fatal("request before the version exchange")));
++
++    let mut session = Session::new();
++    session.core.push(&packet(1, &u32s(3))).unwrap();
++    assert_eq!(session.core.run(), Err(Fatal("second version exchange")));
++}
++
++#[test]
++fn malformed_packets_are_fatal() {
++    for (kind, body) in [
++        (17, u32s(1)),
++        (17, [u32s(1), u32s(100), b"short".to_vec()].concat()),
++        (3, [u32s(1), string("x")].concat()),
++        (3, [u32s(1), string("x"), u32s(1), u32s(0x10)].concat()),
++        (9, [u32s(1), string("x"), u32s(3)].concat()),
++        (5, [u32s(1), string("12345678"), u64s(0)].concat()),
++        (6, [u32s(1), string("12345678"), u64s(0), u32s(1000)].concat()),
++        (200, [u32s(1), u32s(500)].concat()),
++        (4, Vec::new()),
++    ] {
++        let mut session = Session::new();
++        session.core.push(&packet(kind, &body)).unwrap();
++        assert!(session.core.run().is_err(), "type {kind} with {body:?} was accepted");
++    }
++}
++
++#[test]
++fn bad_length_prefixes_and_oversized_input_are_refused_when_they_arrive() {
++    let mut session = Session::new();
++    assert!(session.core.push(&u32s(0)).is_err());
++    let mut session = Session::new();
++    assert!(session.core.push(&u32s(MAX_PACKET as u32 + 1)).is_err());
++    let mut session = Session::new();
++    assert!(session.core.push(&u32s(MAX_PACKET as u32)).is_ok(), "the largest packet is accepted");
++
++    let mut session = Session::new();
++    let mut flood = Vec::new();
++    for _ in 0..=MAX_PENDING {
++        flood.extend(packet(17, &[u32s(1), string("x")].concat()));
++    }
++    assert!(session.core.push(&flood).is_err(), "too many queued requests");
++
++    let mut session = Session::new();
++    let whole = [u32s(MAX_PACKET as u32), vec![0; MAX_PACKET]].concat();
++    for _ in 0..3 {
++        assert!(session.core.push(&whole).is_ok());
++    }
++    let room = MAX_BUFFERED_INPUT - 3 * whole.len();
++    assert!(session.core.push(&[u32s(MAX_PACKET as u32), vec![0; room - 4]].concat()).is_ok());
++    assert!(session.core.push(&[0]).is_err(), "more unprocessed bytes than the window");
++}
++
++#[test]
++fn requests_are_executed_in_bounded_batches_and_output_is_bounded() {
++    let mut session = Session::new();
++    session.put("big", &vec![7; MAX_DATA]);
++    let handle = session.open("big", READ);
++    let mut flood = Vec::new();
++    for id in 0..200_u32 {
++        flood.extend(packet(5, &[u32s(id), string(&handle), u64s(0), u32s(MAX_DATA as u32)].concat()));
++    }
++    session.core.push(&flood).unwrap();
++    let consumed = session.core.run().unwrap();
++    assert!(consumed > 0 && consumed < flood.len(), "all {} requests ran at once ({consumed})", 200);
++    assert!(session.core.output(usize::MAX).len() <= 3 * MAX_PACKET, "output grew past its budget");
++    let first = session.core.output(usize::MAX).len();
++    session.core.sent(first);
++    assert!(session.core.run().unwrap() > 0, "sending output lets requests continue");
++}
++
++#[test]
++fn files_are_written_read_and_ended_with_eof() {
++    let mut session = Session::new();
++    let handle = session.open("a.txt", WRITE | CREATE | EXCLUSIVE);
++    assert_eq!(session.write(&handle, 0, b"hello "), OK);
++    assert_eq!(session.write(&handle, 6, b"world"), OK);
++    assert_eq!(session.read(&handle, 0, 5).status(), NO_SUCH_FILE, "reading a write-only handle");
++    session.close(&handle);
++    assert_eq!(fs::read(session.home().join("a.txt")).unwrap(), b"hello world");
++
++    let created = fs::metadata(session.home().join("a.txt")).unwrap().permissions().mode() & 0o777;
++    assert_eq!(created & 0o600, 0o600, "the default mode is 0666 less the umask");
++    assert_eq!(created & 0o111, 0);
++
++    let again = session.call(3, &[string(session.path("a.txt")), u32s(WRITE | CREATE | EXCLUSIVE), no_attrs()].concat());
++    assert_eq!(again.status(), FAILURE, "exclusive create of an existing file");
++
++    let handle = session.open("a.txt", READ);
++    assert_eq!(session.read(&handle, 0, 5).data(), b"hello");
++    assert_eq!(session.read(&handle, 6, 100).data(), b"world");
++    assert_eq!(session.read(&handle, 11, 10).status(), EOF);
++    assert_eq!(session.read(&handle, 1 << 40, 10).status(), EOF);
++    assert_eq!(session.write(&handle, 0, b"x"), NO_SUCH_FILE, "writing a read-only handle");
++    session.close(&handle);
++
++    let handle = session.open("a.txt", WRITE | TRUNCATE);
++    session.close(&handle);
++    assert_eq!(fs::metadata(session.home().join("a.txt")).unwrap().len(), 0);
++
++    let handle = session.open("a.txt", WRITE | APPEND);
++    assert_eq!(session.write(&handle, 0, b"one"), OK);
++    assert_eq!(session.write(&handle, 0, b"two"), OK);
++    session.close(&handle);
++    assert_eq!(fs::read(session.home().join("a.txt")).unwrap(), b"onetwo");
++
++    let handle = session.open("a.txt", READ | WRITE);
++    assert_eq!(session.write(&handle, 10, b"!"), OK);
++    session.close(&handle);
++    assert_eq!(fs::read(session.home().join("a.txt")).unwrap(), b"onetwo\0\0\0\0!");
++}
++
++#[test]
++fn created_files_take_the_requested_mode() {
++    let mut session = Session::new();
++    let path = session.path("m");
++    let handle = session
++        .call(3, &[string(path), u32s(WRITE | CREATE), permissions(0o600)].concat())
++        .handle();
++    session.close(&handle);
++    assert_eq!(fs::metadata(session.home().join("m")).unwrap().permissions().mode() & 0o777, 0o600);
++}
++
++#[test]
++fn reads_are_capped_and_large_transfers_round_trip() {
++    let mut session = Session::new();
++    let data: Vec<u8> = (0..MAX_DATA * 2 + 17).map(|index| (index % 251) as u8).collect();
++    let handle = session.open("large", WRITE | CREATE);
++    for (index, chunk) in data.chunks(MAX_DATA).enumerate() {
++        assert_eq!(session.write(&handle, (index * MAX_DATA) as u64, chunk), OK);
++    }
++    session.close(&handle);
++
++    let handle = session.open("large", READ);
++    let first = session.read(&handle, 0, u32::MAX).data();
++    assert_eq!(first.len(), MAX_DATA, "a read is capped at the advertised length");
++    let mut all = first;
++    while all.len() < data.len() {
++        let next = session.read(&handle, all.len() as u64, 65536);
++        all.extend(next.data());
++    }
++    assert_eq!(all, data);
++    assert_eq!(session.read(&handle, 0, 0).data().len(), 0);
++}
++
++#[test]
++fn stat_family_reports_attributes_and_follows_links_only_when_asked() {
++    let mut session = Session::new();
++    session.put("file", b"12345");
++    symlink("file", session.home().join("link")).unwrap();
++    fs::set_permissions(session.home().join("file"), fs::Permissions::from_mode(0o640)).unwrap();
++
++    let stat = session.call(17, &string(session.path("file"))).attrs();
++    assert_eq!(stat.size, Some(5));
++    assert_eq!(stat.permissions.unwrap() & 0o7777, 0o640);
++    assert_eq!(stat.permissions.unwrap() & 0o170_000, 0o100_000);
++    let meta = fs::metadata(session.home().join("file")).unwrap();
++    assert_eq!(stat.owner, Some((meta.uid(), meta.gid())));
++    assert_eq!(stat.times.unwrap().1 as i64, meta.mtime());
++
++    let through = session.call(17, &string(session.path("link"))).attrs();
++    assert_eq!(through.size, Some(5));
++    let link = session.call(7, &string(session.path("link"))).attrs();
++    assert_eq!(link.permissions.unwrap() & 0o170_000, 0o120_000, "lstat reports the link itself");
++    assert_ne!(link.size, Some(5));
++
++    assert_eq!(session.call(17, &string(session.path("missing"))).status(), NO_SUCH_FILE);
++    assert_eq!(session.call(7, &string(session.path("missing/deeper"))).status(), NO_SUCH_FILE);
++
++    let handle = session.open("file", READ);
++    assert_eq!(session.call(8, &string(&handle)).attrs().size, Some(5));
++    session.close(&handle);
++    assert_eq!(session.call(8, &string(&handle)).status(), FAILURE, "a closed handle");
++}
++
++#[test]
++fn setstat_changes_mode_size_times_and_owner() {
++    let mut session = Session::new();
++    session.put("f", b"0123456789");
++    let path = session.path("f");
++    let meta = fs::metadata(session.home().join("f")).unwrap();
++
++    let change = Attrs {
++        size: Some(4),
++        permissions: Some(0o600),
++        times: Some((1_000_000, 2_000_000)),
++        owner: Some((meta.uid(), meta.gid())),
++    };
++    assert_eq!(session.status_of(9, &[string(&path), attrs(&change)].concat()), OK);
++    let meta = fs::metadata(session.home().join("f")).unwrap();
++    assert_eq!((meta.len(), meta.permissions().mode() & 0o7777), (4, 0o600));
++    assert_eq!((meta.atime(), meta.mtime()), (1_000_000, 2_000_000));
++
++    let handle = session.open("f", READ | WRITE);
++    let change = Attrs { size: Some(2), permissions: Some(0o640), times: Some((3_000_000, 4_000_000)), owner: None };
++    assert_eq!(session.status_of(10, &[string(&handle), attrs(&change)].concat()), OK);
++    session.close(&handle);
++    let meta = fs::metadata(session.home().join("f")).unwrap();
++    assert_eq!((meta.len(), meta.permissions().mode() & 0o7777), (2, 0o640));
++    assert_eq!(meta.mtime(), 4_000_000);
++
++    assert_eq!(session.status_of(9, &[string(session.path("missing")), permissions(0o600)].concat()), NO_SUCH_FILE);
++    if !is_root() {
++        let other = Attrs { owner: Some((meta.uid() + 1, meta.gid())), ..Attrs::default() };
++        assert_eq!(session.status_of(9, &[string(&path), attrs(&other)].concat()), PERMISSION_DENIED);
++    }
++}
++
++#[cfg(target_os = "linux")]
++#[test]
++fn lsetstat_never_follows_a_link() {
++    let mut session = Session::new();
++    session.put("target", b"x");
++    fs::set_permissions(session.home().join("target"), fs::Permissions::from_mode(0o644)).unwrap();
++    symlink("target", session.home().join("link")).unwrap();
++    let link = session.path("link");
++
++    let times = Attrs { times: Some((5_000_000, 6_000_000)), ..Attrs::default() };
++    assert_eq!(session.extended("lsetstat@openssh.com", &[string(&link), attrs(&times)].concat()).status(), OK);
++    let target = fs::metadata(session.home().join("target")).unwrap();
++    assert_ne!(target.mtime(), 6_000_000, "the target of the link was changed");
++    assert_eq!(fs::symlink_metadata(session.home().join("link")).unwrap().mtime(), 6_000_000);
++
++    let size = Attrs { size: Some(0), ..Attrs::default() };
++    assert_eq!(
++        session.extended("lsetstat@openssh.com", &[string(&link), attrs(&size)].concat()).status(),
++        OP_UNSUPPORTED
++    );
++    assert_eq!(fs::metadata(session.home().join("target")).unwrap().len(), 1);
++
++    let mode = permissions(0o600);
++    let reply = session.extended("lsetstat@openssh.com", &[string(&link), mode.clone()].concat()).status();
++    assert_ne!(reply, OK, "a link's mode cannot change on Linux");
++    assert_eq!(fs::metadata(session.home().join("target")).unwrap().permissions().mode() & 0o777, 0o644);
++
++    session.put("plain", b"y");
++    assert_eq!(
++        session.extended("lsetstat@openssh.com", &[string(session.path("plain")), mode].concat()).status(),
++        OK
++    );
++    assert_eq!(fs::metadata(session.home().join("plain")).unwrap().permissions().mode() & 0o777, 0o600);
++}
++
++#[test]
++fn directories_are_listed_with_dots_long_names_and_an_end() {
++    let mut session = Session::new();
++    session.put("one", b"1");
++    fs::create_dir(session.home().join("sub")).unwrap();
++    symlink("one", session.home().join("ln")).unwrap();
++    let handle = session.call(11, &string(session.path(""))).handle();
++
++    let mut seen = Vec::new();
++    loop {
++        let reply = session.call(12, &string(&handle));
++        if reply.kind == 101 {
++            assert_eq!(reply.status(), EOF);
++            break;
++        }
++        seen.extend(reply.names());
++    }
++    let mut names: Vec<&str> = seen.iter().map(|(name, _, _)| name.as_str()).collect();
++    names.sort_unstable();
++    assert_eq!(names, [".", "..", "ln", "one", "sub"]);
++    let line = |name: &str| seen.iter().find(|entry| entry.0 == name).unwrap().1.clone();
++    assert!(line("one").starts_with("-rw"), "{}", line("one"));
++    assert!(line("one").contains(" alice "), "{}", line("one"));
++    assert!(line("one").ends_with(" one"));
++    assert!(line("sub").starts_with("drwx"), "{}", line("sub"));
++    assert!(line("ln").starts_with("lrwx"), "{}", line("ln"));
++    let attrs = &seen.iter().find(|entry| entry.0 == "one").unwrap().2;
++    assert_eq!(attrs.size, Some(1));
++    assert_eq!(session.call(12, &string(&handle)).status(), EOF, "the end stays the end");
++    session.close(&handle);
++
++    let file = session.open("one", READ);
++    assert_eq!(session.call(12, &string(&file)).status(), FAILURE, "readdir on a file handle");
++    assert_eq!(session.read(&handle, 0, 1).status(), FAILURE, "closed handle");
++    assert_eq!(session.call(11, &string(session.path("one"))).status(), NO_SUCH_FILE, "opendir on a file");
++    assert_eq!(session.call(3, &[string(session.path("sub")), u32s(READ), no_attrs()].concat()).status(), FAILURE);
++}
++
++#[test]
++fn large_directories_are_listed_in_several_replies() {
++    let mut session = Session::new();
++    fs::create_dir(session.home().join("many")).unwrap();
++    for index in 0..250 {
++        fs::write(session.home().join("many").join(format!("file-{index:03}")), b"").unwrap();
++    }
++    let handle = session.call(11, &string(session.path("many"))).handle();
++    let (mut replies, mut total) = (0, 0);
++    loop {
++        let reply = session.call(12, &string(&handle));
++        if reply.kind == 101 {
++            break;
++        }
++        replies += 1;
++        total += reply.names().len();
++    }
++    assert_eq!(total, 252);
++    assert!(replies >= 3, "{replies} replies");
++}
++
++#[test]
++fn files_and_directories_are_made_and_removed() {
++    let mut session = Session::new();
++    let dir = session.path("d");
++    assert_eq!(session.status_of(14, &[string(&dir), permissions(0o700)].concat()), OK);
++    assert_eq!(fs::metadata(session.home().join("d")).unwrap().permissions().mode() & 0o777, 0o700);
++    assert_eq!(session.status_of(14, &[string(&dir), no_attrs()].concat()), FAILURE, "mkdir over an existing one");
++    assert_eq!(session.status_of(14, &[string(session.path("x/y")), no_attrs()].concat()), NO_SUCH_FILE);
++
++    session.put("d/f", b"x");
++    assert_eq!(session.status_of(15, &string(&dir)), FAILURE, "rmdir of a directory with content");
++    assert_eq!(session.status_of(13, &string(&dir)), FAILURE, "remove of a directory");
++    assert_eq!(session.status_of(13, &string(session.path("d/f"))), OK);
++    assert_eq!(session.status_of(13, &string(session.path("d/f"))), NO_SUCH_FILE);
++    assert_eq!(session.status_of(15, &string(&dir)), OK);
++    assert!(!session.home().join("d").exists());
++    assert_eq!(session.status_of(15, &string(&dir)), NO_SUCH_FILE);
++
++    if !is_root() {
++        fs::create_dir(session.home().join("locked")).unwrap();
++        fs::write(session.home().join("locked/f"), b"").unwrap();
++        fs::set_permissions(session.home().join("locked"), fs::Permissions::from_mode(0o500)).unwrap();
++        assert_eq!(session.status_of(13, &string(session.path("locked/f"))), PERMISSION_DENIED);
++        let reply = session.call(3, &[string(session.path("locked/new")), u32s(WRITE | CREATE), no_attrs()].concat());
++        assert_eq!(reply.status(), PERMISSION_DENIED);
++        fs::set_permissions(session.home().join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
++    }
++}
++
++#[test]
++fn rename_refuses_to_replace_but_posix_rename_replaces() {
++    let mut session = Session::new();
++    session.put("a", b"A");
++    session.put("b", b"B");
++    let (a, b, c) = (session.path("a"), session.path("b"), session.path("c"));
++    assert_eq!(session.status_of(18, &[string(&a), string(&b)].concat()), FAILURE);
++    assert_eq!(fs::read(session.home().join("b")).unwrap(), b"B");
++    assert_eq!(session.status_of(18, &[string(&a), string(&c)].concat()), OK);
++    assert!(!session.home().join("a").exists());
++    assert_eq!(fs::read(session.home().join("c")).unwrap(), b"A");
++    assert_eq!(session.status_of(18, &[string(&a), string(&c)].concat()), NO_SUCH_FILE);
++
++    let reply = session.extended("posix-rename@openssh.com", &[string(&c), string(&b)].concat());
++    assert_eq!(reply.status(), OK);
++    assert_eq!(fs::read(session.home().join("b")).unwrap(), b"A");
++    assert!(!session.home().join("c").exists());
++
++    fs::create_dir(session.home().join("dir")).unwrap();
++    let dir = session.path("dir");
++    let moved = session.path("dir2");
++    assert_eq!(session.status_of(18, &[string(&dir), string(&moved)].concat()), OK);
++    assert!(session.home().join("dir2").is_dir());
++}
++
++#[test]
++fn links_are_made_and_read_in_openssh_argument_order() {
++    let mut session = Session::new();
++    session.put("real", b"data");
++    let link = session.path("l");
++    assert_eq!(session.status_of(20, &[string("real"), string(&link)].concat()), OK);
++    assert_eq!(fs::read_link(session.home().join("l")).unwrap(), Path::new("real"));
++    assert_eq!(session.call(19, &string(&link)).name(), "real");
++    assert_eq!(session.status_of(20, &[string("real"), string(&link)].concat()), FAILURE, "an existing link");
++    assert_eq!(session.call(19, &string(session.path("real"))).status(), BAD_MESSAGE, "readlink on a file");
++    assert_eq!(session.call(19, &string(session.path("nope"))).status(), NO_SUCH_FILE);
++
++    let dangling = session.path("dangling");
++    assert_eq!(session.status_of(20, &[string("/does/not/exist"), string(&dangling)].concat()), OK);
++    assert_eq!(session.call(19, &string(&dangling)).name(), "/does/not/exist");
++    assert_eq!(session.call(7, &string(&dangling)).attrs().permissions.unwrap() & 0o170_000, 0o120_000);
++    assert_eq!(session.call(17, &string(&dangling)).status(), NO_SUCH_FILE);
++
++    let hard = session.path("hard");
++    let reply = session.extended("hardlink@openssh.com", &[string(session.path("real")), string(&hard)].concat());
++    assert_eq!(reply.status(), OK);
++    assert_eq!(fs::metadata(session.home().join("hard")).unwrap().nlink(), 2);
++    let reply = session.extended("hardlink@openssh.com", &[string(session.path("real")), string(&hard)].concat());
++    assert_eq!(reply.status(), FAILURE);
++}
++
++#[test]
++fn paths_resolve_against_the_home_directory_and_are_not_confined() {
++    let mut session = Session::new();
++    let home = session.home();
++    fs::create_dir(home.join("sub")).unwrap();
++    symlink("sub", home.join("alias")).unwrap();
++
++    let real = |session: &mut Session, path: &str| session.call(16, &string(path)).name();
++    assert_eq!(real(&mut session, "."), home.display().to_string());
++    assert_eq!(real(&mut session, ""), home.display().to_string());
++    assert_eq!(real(&mut session, "sub/.."), home.display().to_string());
++    assert_eq!(real(&mut session, "alias"), home.join("sub").display().to_string());
++    assert_eq!(real(&mut session, "alias/../sub/./new"), home.join("sub/new").display().to_string());
++    assert_eq!(real(&mut session, "/"), "/");
++    assert_eq!(real(&mut session, "/../.."), "/");
++    assert_eq!(real(&mut session, "missing"), home.join("missing").display().to_string());
++    assert_eq!(session.call(16, &string("missing/deeper")).status(), NO_SUCH_FILE);
++    assert_eq!(session.call(16, &string("missing/..")).status(), NO_SUCH_FILE);
++
++    symlink("loop", home.join("loop")).unwrap();
++    assert_eq!(session.call(16, &string("loop/x")).status(), NO_SUCH_FILE);
++
++    session.put("sub/inside", b"in");
++    let handle = session.call(3, &[string("sub/inside"), u32s(READ), no_attrs()].concat()).handle();
++    assert_eq!(session.read(&handle, 0, 10).data(), b"in");
++    let outside = session.call(17, &string("/")).attrs();
++    assert_eq!(outside.permissions.unwrap() & 0o170_000, 0o040_000, "absolute paths are not confined to the home");
++    let up = session.call(17, &string("../")).attrs();
++    assert_eq!(up.permissions.unwrap() & 0o170_000, 0o040_000);
++
++    let expand = |session: &mut Session, path: &str| {
++        session.extended("expand-path@openssh.com", &string(path)).name()
++    };
++    let home = home.display().to_string();
++    assert_eq!(expand(&mut session, "~"), home);
++    assert_eq!(expand(&mut session, "/~"), home);
++    assert_eq!(expand(&mut session, "~/x/y"), format!("{home}/x/y"));
++    assert_eq!(expand(&mut session, "/~/x"), format!("{home}/x"));
++    assert_eq!(expand(&mut session, "plain/rel"), "plain/rel");
++    assert_eq!(expand(&mut session, "/abs"), "/abs");
++    assert_eq!(expand(&mut session, "~other/x"), "~other/x");
++}
++
++#[test]
++fn the_home_directory_falls_back_to_the_root_directory() {
++    let engine = Engine::new(Path::new("/definitely/not/a/directory"), owner()).unwrap();
++    let mut session = Session { dir: TempDir::new().unwrap(), core: Core::new(engine), next: 1 };
++    assert_eq!(session.exchange(&packet(1, &u32s(3))).remove(0).kind, 2);
++    assert_eq!(session.call(16, &string(".")).name(), "/");
++    assert_eq!(session.call(16, &string("etc/..")).name(), "/");
++}
++
++#[test]
++fn filesystem_and_limit_extensions_answer() {
++    let mut session = Session::new();
++    let reply = session.extended("statvfs@openssh.com", &string(session.path(""))).clone_body();
++    assert_eq!(reply.0, 201);
++    let mut cursor = Cursor(&reply.1);
++    let values: Vec<u64> = (0..11).map(|_| cursor.u64()).collect();
++    assert!(values[0] > 0 && values[1] > 0 && values[2] > 0, "{values:?}");
++    assert!(values[10] >= 100, "name maximum {values:?}");
++    assert!(cursor.0.is_empty());
++
++    session.put("f", b"x");
++    let handle = session.open("f", READ | WRITE);
++    let reply = session.extended("fstatvfs@openssh.com", &string(&handle));
++    assert_eq!(reply.kind, 201);
++    assert_eq!(reply.body.len(), 88);
++    assert_eq!(session.extended("fsync@openssh.com", &string(&handle)).status(), OK);
++    session.close(&handle);
++    assert_eq!(session.extended("fsync@openssh.com", &string(&handle)).status(), FAILURE);
++    assert_eq!(session.extended("statvfs@openssh.com", &string(session.path("missing"))).status(), NO_SUCH_FILE);
++
++    let limits = session.extended("limits@openssh.com", &[]);
++    assert_eq!(limits.kind, 201);
++    let mut cursor = limits.cursor();
++    let (packet_length, read, write, handles) = (cursor.u64(), cursor.u64(), cursor.u64(), cursor.u64());
++    assert_eq!(packet_length as usize, MAX_PACKET);
++    assert_eq!((read as usize, write as usize), (MAX_DATA, MAX_DATA));
++    assert!(read + 64 <= packet_length, "a full read reply must fit the packet limit");
++    assert_eq!(handles as usize, MAX_HANDLES);
++}
++
++impl Response {
++    fn clone_body(&self) -> (u8, Vec<u8>) {
++        (self.kind, self.body.clone())
++    }
++}
++
++#[test]
++fn unknown_requests_and_extensions_are_unsupported_not_fatal() {
++    let mut session = Session::new();
++    assert_eq!(session.call(99, &[]).status(), OP_UNSUPPORTED);
++    assert_eq!(session.call(150, b"junk").status(), OP_UNSUPPORTED);
++    assert_eq!(session.extended("nope@example.org", &[]).status(), OP_UNSUPPORTED);
++    assert_eq!(session.call(5, &[string("short"), u64s(0), u32s(1)].concat()).status(), FAILURE, "a foreign handle");
++    session.put("alive", b"");
++}
++
++#[cfg(target_os = "linux")]
++#[test]
++fn files_on_procfs_are_never_opened() {
++    let mut session = Session::new();
++    for path in [
++        "/proc/self/mem",
++        "/proc/self/maps",
++        "/proc/self/environ",
++        "/proc/thread-self/mem",
++        "/proc/cpuinfo",
++        "/dev/fd/0/../../proc/self/mem",
++    ] {
++        for flags in [READ, WRITE, READ | WRITE] {
++            let reply = session.call(3, &[string(path), u32s(flags), no_attrs()].concat());
++            assert_ne!(reply.kind, 102, "{path} was opened with {flags}");
++        }
++    }
++    let pid = std::process::id();
++    let reply = session.call(3, &[string(format!("/proc/{pid}/mem")), u32s(READ), no_attrs()].concat());
++    assert_eq!(reply.status(), PERMISSION_DENIED);
++    symlink("/proc/self/mem", session.home().join("mem-link")).unwrap();
++    let reply = session.call(3, &[string("mem-link"), u32s(READ), no_attrs()].concat());
++    assert_eq!(reply.status(), PERMISSION_DENIED);
++    let reply = session.call(9, &[string("/proc/self/mem"), attrs(&Attrs { size: Some(0), ..Attrs::default() })].concat());
++    assert_ne!(reply.status(), OK);
++    assert_eq!(session.call(17, &string("/proc/self/maps")).kind, 105, "stat is harmless");
++}
++
++#[test]
++fn the_number_of_open_handles_is_bounded() {
++    let mut session = Session::new();
++    session.put("f", b"");
++    let handles: Vec<Vec<u8>> = (0..MAX_HANDLES).map(|_| session.open("f", READ)).collect();
++    let extra = session.call(3, &[string(session.path("f")), u32s(READ), no_attrs()].concat());
++    assert_eq!(extra.status(), FAILURE);
++    let dir = session.call(11, &string(session.path("")));
++    assert_eq!(dir.status(), FAILURE);
++    session.close(&handles[0]);
++    let again = session.open("f", READ);
++    assert!(!handles.contains(&again), "handles must not be reused straight away");
++}
++
++#[cfg(target_os = "linux")]
++#[test]
++fn opening_a_fifo_cannot_block_the_session() {
++    let mut session = Session::new();
++    let path = session.home().join("fifo");
++    rustix::fs::mknodat(rustix::fs::CWD, &path, rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600), 0)
++        .unwrap();
++    let handle = session.open("fifo", READ);
++    assert_eq!(session.read(&handle, 0, 10).status(), FAILURE, "a read with no writer");
++    session.close(&handle);
++    let reply = session.call(3, &[string(session.path("fifo")), u32s(WRITE), no_attrs()].concat());
++    if reply.kind == 102 {
++        session.close(&reply.handle());
++    }
++}
++
++#[test]
++fn errno_values_map_to_status_codes_like_openssh() {
++    use rustix::io::Errno;
++    for (errno, status) in [
++        (Errno::NOENT, 2),
++        (Errno::NOTDIR, 2),
++        (Errno::BADF, 2),
++        (Errno::LOOP, 2),
++        (Errno::PERM, 3),
++        (Errno::ACCESS, 3),
++        (Errno::NAMETOOLONG, 5),
++        (Errno::INVAL, 5),
++        (Errno::NOSYS, 8),
++        (Errno::EXIST, 4),
++        (Errno::NOSPC, 4),
++        (Errno::ROFS, 4),
++        (Errno::ISDIR, 4),
++        (Errno::NOTEMPTY, 4),
++        (Errno::IO, 4),
++    ] {
++        assert_eq!(Status::from(errno), Status(status), "{errno}");
++    }
++    assert_eq!(Status::from(std::io::Error::other("custom")), Status::FAILURE);
++}
++
++#[test]
++fn long_names_look_like_ls_output() {
++    let owner = Owner { uid: 1000, name: "alice".into() };
++    let file = Attrs {
++        size: Some(1234),
++        owner: Some((1000, 100)),
++        permissions: Some(0o100_644),
++        times: Some((0, 951_782_400)),
++    };
++    // 2000-02-29 00:00:00 UTC, long before "now"
++    let line = String::from_utf8(long_name(&file, b"a b", 1_800_000_000, &owner)).unwrap();
++    assert_eq!(line, "-rw-r--r--   1 alice    100          1234 Feb 29  2000 a b");
++
++    let recent = Attrs { times: Some((0, 1_800_000_000 - 3600)), ..file.clone() };
++    let line = String::from_utf8(long_name(&recent, b"x", 1_800_000_000, &owner)).unwrap();
++    assert!(line.contains(" Jan 15 07:00 "), "{line}");
++
++    let special = Attrs { permissions: Some(0o104_755), owner: Some((7, 8)), ..file.clone() };
++    let line = String::from_utf8(long_name(&special, b"s", 1_800_000_000, &owner)).unwrap();
++    assert!(line.starts_with("-rwsr-xr-x   1 7        8 "), "{line}");
++    let sticky = Attrs { permissions: Some(0o041_777), ..file.clone() };
++    let line = String::from_utf8(long_name(&sticky, b"t", 1_800_000_000, &owner)).unwrap();
++    assert!(line.starts_with("drwxrwxrwt"), "{line}");
++    let setgid = Attrs { permissions: Some(0o102_640), ..file };
++    let line = String::from_utf8(long_name(&setgid, b"g", 1_800_000_000, &owner)).unwrap();
++    assert!(line.starts_with("-rw-r-S---"), "{line}");
++}
 diff --git a/oxish/src/tests.rs b/oxish/src/tests.rs
-index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875bf688ffe4 100644
+index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b1fa432ef 100644
 --- a/oxish/src/tests.rs
 +++ b/oxish/src/tests.rs
 @@ -2,20 +2,18 @@ use core::{
@@ -5987,7 +8446,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -135,392 +383,592 @@ async fn handshake_ed25519_graviola() {
+@@ -135,392 +383,608 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -6381,7 +8840,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +            break;
 +        }
 +        tokio::time::sleep(Duration::from_millis(100)).await;
-     }
++    }
 +    assert!(base.join("ready").exists(), "the command never started");
 +    child.kill().await.unwrap();
 +    for _ in 0..50 {
@@ -6389,7 +8848,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +            break;
 +        }
 +        tokio::time::sleep(Duration::from_millis(100)).await;
-+    }
+     }
 +    base
 +}
  
@@ -6662,15 +9121,15 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +    world.bare_repo("a.git").await.unwrap();
 +    let (client, _guard) = world
 +        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
+         .await
+         .unwrap();
 +    let run = client.run(Some("git-receive-pack 'a.git'"), b"").await.unwrap();
 +    assert!(run.status.success(), "{}", run.stderr);
 +    assert!(run.stdout().contains("RAN"));
 +    let (client, _guard) = world
 +        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
++        .await
++        .unwrap();
 +    let run = client.run(Some("git-receive-pack 'missing.git'"), b"").await.unwrap();
 +    assert_eq!(run.status.code(), Some(1));
 +    assert!(run.stderr.contains("not found"), "{}", run.stderr);
@@ -6712,6 +9171,29 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +}
 +
 +#[tokio::test]
++async fn subsystem_requests_are_refused() {
++    let world = script_world("echo RAN").await;
++    for name in ["sftp", "shell", "git"] {
++        let (mut client, _guard) = world
++            .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
+             .await
+-            .context("failed to run ssh-keygen")?;
+-        assert!(status.success(), "ssh-keygen failed");
+-        paths.push(path);
++            .unwrap();
++        client.cmd.arg("-s");
++        let run = client.run(Some(name), &[0, 0, 0, 5, 1, 0, 0, 0, 3]).await.unwrap();
++        assert!(!run.status.success(), "the subsystem {name} was accepted");
++        assert!(run.stdout.is_empty(), "{:?}", run.stdout);
++        assert!(run.stderr.contains("subsystem request failed"), "{}", run.stderr);
+     }
++}
+ 
+-    let host_keys = HostKeys::from_files(paths.iter(), provider)?;
+-    let mut algorithms = Vec::new();
+-    for algorithm in host_keys.algorithms() {
+-        algorithms.push(algorithm);
++#[tokio::test]
 +async fn only_validated_git_protocol_reaches_the_command() {
 +    let world = script_world(r#"echo "protocol=[$GIT_PROTOCOL] foo=[$FOO] path=[$PATH]""#).await;
 +    world.bare_repo("a.git").await.unwrap();
@@ -6722,10 +9204,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +    ] {
 +        let (client, _guard) = world
 +            .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-             .await
--            .context("failed to run ssh-keygen")?;
--        assert!(status.success(), "ssh-keygen failed");
--        paths.push(path);
++            .await
 +            .unwrap();
 +        let mut client = client;
 +        client.cmd.args(["-o", "SendEnv=GIT_PROTOCOL FOO"]);
@@ -6738,11 +9217,9 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
      }
 +}
  
--    let host_keys = HostKeys::from_files(paths.iter(), provider)?;
--    let mut algorithms = Vec::new();
--    for algorithm in host_keys.algorithms() {
--        algorithms.push(algorithm);
--    }
+-    assert_eq!(algorithms.len(), 2, "unexpected algorithms: {algorithms:?}");
+-    assert!(algorithms.contains(&PublicKeyAlgorithm::Ed25519));
+-    assert!(algorithms.contains(&PublicKeyAlgorithm::EcdsaSha2Nistp256));
 +fn commit_args(message: &str) -> Vec<&str> {
 +    vec![
 +        "-c",
@@ -6755,9 +9232,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +    ]
 +}
  
--    assert_eq!(algorithms.len(), 2, "unexpected algorithms: {algorithms:?}");
--    assert!(algorithms.contains(&PublicKeyAlgorithm::Ed25519));
--    assert!(algorithms.contains(&PublicKeyAlgorithm::EcdsaSha2Nistp256));
+-    Ok(())
 +async fn seeded_repo(world: &World, name: &str, extra_bytes: usize) -> (PathBuf, String) {
 +    let bare = world.bare_repo(name).await.unwrap();
 +    let work = world.base().join(format!("seed-{name}"));
@@ -6778,9 +9253,16 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +    git(&work, &["push", "-q", bare.to_str().unwrap(), "main", "v1"]).await.unwrap();
 +    let sha = git_output(&work, &["rev-parse", "HEAD"]).await.unwrap();
 +    (work, sha)
-+}
+ }
  
--    Ok(())
+-#[tokio::test]
+-async fn verify_keys() {
+-    let providers = [
+-        #[cfg(feature = "aws-lc")]
+-        aws_lc::DEFAULT_PROVIDER,
+-        #[cfg(feature = "graviola")]
+-        graviola::DEFAULT_PROVIDER,
+-    ];
 +async fn git_over_ssh(client: &CliClient, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
 +    let output = Command::new("git")
 +        .arg("-C")
@@ -6800,22 +9282,14 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +    );
 +    Ok(String::from_utf8_lossy(&output.stderr).into_owned()
 +        + &String::from_utf8_lossy(&output.stdout))
- }
++}
  
- #[tokio::test]
--async fn verify_keys() {
--    let providers = [
--        #[cfg(feature = "aws-lc")]
--        aws_lc::DEFAULT_PROVIDER,
--        #[cfg(feature = "graviola")]
--        graviola::DEFAULT_PROVIDER,
--    ];
--
 -    for signer in providers {
 -        for verifier in providers {
 -            let (signing_key, _) = signer
 -                .generate_signing_key(&PublicKeyAlgorithm::Ed25519)
 -                .expect("failed to generate signing key");
++#[tokio::test]
 +async fn exec_git_clone_fetch_and_push_round_trip() {
 +    subscribe();
 +    let world = World::new(Programs::System).await.unwrap();
@@ -6892,7 +9366,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
  }
  
  #[test]
-@@ -562,7 +1010,7 @@ fn session_state_round_trip() {
+@@ -562,7 +1026,7 @@ fn session_state_round_trip() {
          },
          read_buf: b"pipelined".to_vec(),
          options: KeyOptions {
@@ -6901,7 +9375,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
          },
      };
  
-@@ -582,69 +1030,120 @@ fn session_state_round_trip() {
+@@ -582,69 +1046,120 @@ fn session_state_round_trip() {
      assert_eq!(decoded.post_quantum_kx, state.post_quantum_kx);
      assert_eq!(decoded.session_id.as_ref(), state.session_id.as_ref());
      assert_eq!(decoded.read_buf, state.read_buf);
@@ -7015,14 +9489,18 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +        assert!(status.success(), "ssh-keygen failed");
 +        paths.push(path);
 +    }
- 
--    let key = AuthorizedKey::from_str(&authorized_key, provider)
--        .ok_or_else(|| anyhow::anyhow!("failed to parse generated public key"))?;
++
 +    let host_keys = HostKeys::from_files(paths.iter(), provider)?;
 +    let mut algorithms = Vec::new();
 +    for algorithm in host_keys.algorithms() {
 +        algorithms.push(algorithm);
 +    }
+ 
+-    let key = AuthorizedKey::from_str(&authorized_key, provider)
+-        .ok_or_else(|| anyhow::anyhow!("failed to parse generated public key"))?;
++    assert_eq!(algorithms.len(), 2, "unexpected algorithms: {algorithms:?}");
++    assert!(algorithms.contains(&PublicKeyAlgorithm::Ed25519));
++    assert!(algorithms.contains(&PublicKeyAlgorithm::EcdsaSha2Nistp256));
  
 -    let user = User {
 -        name: Username::try_from(USER.to_string())?,
@@ -7031,11 +9509,6 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 -        home_dir: PathBuf::from("/var/empty"),
 -        shell: PathBuf::from("/bin/sh"),
 -    };
-+    assert_eq!(algorithms.len(), 2, "unexpected algorithms: {algorithms:?}");
-+    assert!(algorithms.contains(&PublicKeyAlgorithm::Ed25519));
-+    assert!(algorithms.contains(&PublicKeyAlgorithm::EcdsaSha2Nistp256));
- 
--    Ok((dir, Box::new(SingleUser::with_keys(user, vec![key]))))
 +    Ok(())
 +}
 +
@@ -7060,7 +9533,8 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
 +            verifying_key
 +                .verify(message, &signature)
 +                .expect("valid signature should verify");
-+
+ 
+-    Ok((dir, Box::new(SingleUser::with_keys(user, vec![key]))))
 +            verifying_key
 +                .verify(b"the quick brown cat", &signature)
 +                .expect_err("signature over a different message must not verify");
@@ -7069,7 +9543,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
  }
  
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
-@@ -655,7 +1154,10 @@ static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
+@@ -655,7 +1170,10 @@ static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  /// binary here (a no-op when fresh). Unit tests run from `target/<profile>/deps/` (or
  /// `target/<profile>/build/<package>/<hash>/out/` with Cargo's newer build directory layout),
  /// while cargo places the binary in `target/<profile>/`.
@@ -7081,7 +9555,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
      let exe = env::current_exe()?;
      // TODO: simplify for new build directory layout once MSRV hits 1.100
      let Some(profile_dir) = exe
-@@ -694,7 +1196,7 @@ async fn build_session_binary() -> anyhow::Result<PathBuf> {
+@@ -694,7 +1212,7 @@ async fn build_session_binary() -> anyhow::Result<PathBuf> {
      Ok(bin)
  }
  
@@ -7090,7 +9564,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..f23e50dc663d4888cb5a9f888abf875b
      static INSTALL_TRACING_SUBSCRIBER: Once = Once::new();
      INSTALL_TRACING_SUBSCRIBER.call_once(|| {
          let subscriber = tracing_subscriber::FmtSubscriber::builder()
-@@ -705,8 +1207,3 @@ fn subscribe() {
+@@ -705,8 +1223,3 @@ fn subscribe() {
      });
  }
  

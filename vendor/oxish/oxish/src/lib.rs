@@ -34,6 +34,7 @@ pub use authentication::{Account, AuthError, Username};
 mod login;
 pub use login::{LoginAccounts, LoginPolicy, LoginSession, UserDatabase, UserEntry};
 mod session;
+mod sftp;
 pub use session::Session;
 #[doc(hidden)]
 pub use session::fuzz_channel_state;
@@ -47,6 +48,8 @@ use unix as platform;
 
 #[cfg(all(test, target_os = "linux"))]
 mod login_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod sftp_tests;
 #[cfg(test)]
 mod tests;
 

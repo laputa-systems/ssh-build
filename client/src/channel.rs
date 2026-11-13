@@ -213,6 +213,11 @@ impl Channel {
         self.start(connection, "exec", Some(command))
     }
 
+    /// Send a `subsystem` request and wait for its reply.
+    pub fn subsystem(&mut self, connection: &mut Connection, name: &str) -> Result<(), Error> {
+        self.start(connection, "subsystem", Some(name.as_bytes()))
+    }
+
     /// Send a `shell` request and wait for its reply.
     pub fn shell(&mut self, connection: &mut Connection) -> Result<(), Error> {
         self.start(connection, "shell", None)

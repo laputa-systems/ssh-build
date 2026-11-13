@@ -1,8 +1,8 @@
 # ssh-build
 
 OpenSSH 10.6p1 client built `--without-openssl` (macOS arm64, static-musl Linux x86_64/aarch64) plus
-Graviola-only OxiSH tools (a server with Git and login modes, the interactive `oxish` client and
-`oxish-keygen`), shipped as separate `.tar.xz` archives. Users read `README.md`.
+Graviola-only OxiSH tools (a server with Git and login modes, the interactive `oxish` client, the
+`oxish-sftp` and `oxish-scp` SFTP clients and `oxish-keygen`), shipped as separate `.tar.xz` archives. Users read `README.md`.
 
 ## Commands
 

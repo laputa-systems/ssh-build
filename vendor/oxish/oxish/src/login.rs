@@ -14,7 +14,10 @@ use proto::{
     named::PublicKeyAlgorithm,
 };
 
-use crate::authentication::{read_trusted_bytes, read_trusted_file};
+use crate::{
+    authentication::{read_trusted_bytes, read_trusted_file},
+    sftp::{Engine, Owner},
+};
 
 const MAX_ACCOUNT_KEYS: usize = 1024;
 const MAX_NAME_LEN: usize = 64;
@@ -356,6 +359,11 @@ impl LoginSession {
         anyhow::ensure!(launcher.is_absolute(), "the launcher path must be absolute");
         user.check(allow_root)?;
         Ok(Self { user, path, accept_locale, allow_root, launcher })
+    }
+
+    /// An SFTP engine for this account, which starts in its home directory
+    pub(crate) fn sftp(&self) -> std::io::Result<Engine> {
+        Engine::new(&self.user.home, Owner { uid: self.user.uid, name: self.user.name.clone() })
     }
 
     /// The fixed part of every session's environment

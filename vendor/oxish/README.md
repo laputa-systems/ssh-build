@@ -21,7 +21,7 @@ If any features you need are missing, please open an issue or submit a pull requ
 
 - Only supports Linux and macOS for now (looking for a Windows contributor)
 - Only supports public key authentication for now
-- No SFTP support yet
+- SFTP (version 3) only in login mode, served by the session process as the account
 - Requires clients with support for mlkem768x25519-sha256 key exchange (OpenSSH 9.9+)
 - No support for older cryptographic algorithms
 

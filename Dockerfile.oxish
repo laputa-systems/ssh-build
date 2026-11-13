@@ -48,8 +48,8 @@ RUN triple="$(uname -m)-unknown-linux-musl" \
     && cargo build --locked --release --target "$triple" --manifest-path client/Cargo.toml --bins \
     && mkdir /out \
     && cp "vendor/oxish/target/$triple/release/oxish-server" "vendor/oxish/target/$triple/release/oxish-session" /out/ \
-    && cp "client/target/$triple/release/oxish-keygen" /out/ \
-    && if [ -f "client/target/$triple/release/oxish" ]; then cp "client/target/$triple/release/oxish" /out/; fi \
+    && cp "client/target/$triple/release/oxish-keygen" "client/target/$triple/release/oxish" \
+        "client/target/$triple/release/oxish-sftp" "client/target/$triple/release/oxish-scp" /out/ \
     && rustc -vV > /out/rustc-version.txt
 
 COPY scripts/qualify-binaries.sh scripts/oxish-bins.sh /tmp/
