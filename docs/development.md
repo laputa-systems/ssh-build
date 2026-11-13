@@ -10,7 +10,6 @@ committed.
   version and checksum and the OxiSH revision from it through `scripts/lock.sh`. To upgrade
   OpenSSH, change the `openssh` input, then rebuild. The `oxish` input's `sha256` is that of the
   GitHub archive of `rev`; `scripts/vendor-oxish.sh` verifies the git revision itself.
-- `release-budgets.json` has `targets.<triple>.<product>.max_archive_bytes`.
 - Every fetch fails closed on a SHA-256 or git revision. `git-build.lock.json` pins the git-build
   prerelease the end-to-end test uses; `scripts/fetch-git-build.sh` downloads its
   `git-<git_version>-<triple>.tar.xz` asset and checks it against the pin and `SHA256SUMS`.
@@ -52,8 +51,7 @@ Every build writes `<bin_dir>/build-record.json` (`scripts/build-record.sh`): co
 the build inputs, toolchain and executable hashes. `scripts/package.sh` and
 `scripts/package-oxish.sh` refuse binaries without a record, with a changed executable, or built
 from different inputs than the current tree (`ALLOW_DIRTY=1` permits a local package from an
-uncommitted tree). They also refuse wrong-arch or non-static input and archives over
-`release-budgets.json`, and replace the target's `dist/release` assets and the shared `SHA256SUMS`
+uncommitted tree). They also refuse wrong-arch or non-static input, and replace the target's `dist/release` assets and the shared `SHA256SUMS`
 only after the target passes.
 
 `docker buildx build -f test/qualify-elf.Dockerfile --platform linux/arm64 .` checks that the
@@ -68,8 +66,7 @@ and every script, the Dockerfile and `release.yml` read it. `OXISH_CLIENT_REQUIR
 missing client binary fail the build record, packaging and the release job; with 0 the archive
 omits the ones that do not exist. Adding a binary to `client/src/bin` means adding it to that
 list, to the `cp` lines of `Dockerfile.oxish` and `scripts/build-oxish-macos.sh`, and to the
-`test -x` lines of `binaries-oxish` in the `Makefile`, then re-measuring the archive against
-`release-budgets.json`.
+`test -x` lines of `binaries-oxish` in the `Makefile`.
 
 `Dockerfile.oxish` and `scripts/build-oxish-macos.sh` build `vendor/oxish` and `client/` with the
 same flags (static PIE on Linux, deployment floor 14.0 and ad-hoc signing on macOS) and qualify

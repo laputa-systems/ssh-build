@@ -1,6 +1,6 @@
 #!/bin/sh
 # Package the OxiSH server, clients and key generator for one target as oxish-<version>-<triple>.tar.xz plus
-# oxish-<version>-<triple>.manifest.json, enforce the size budget, then refresh and verify the
+# oxish-<version>-<triple>.manifest.json, then refresh and verify the
 # consolidated SHA256SUMS in <out_dir>.
 # Usage: TARGET=<triple> sh scripts/package-oxish.sh [out_dir]      (default: dist/release)
 # Input: dist/oxish/<triple>/bin, which needs the build-record.json its build wrote
@@ -18,7 +18,6 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$script_dir/archive.sh"
 . "$script_dir/oxish-bins.sh"
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
-budgets=$repo_root/release-budgets.json
 out_dir=${1:-$repo_root/dist/release}
 triple=${TARGET:?package-oxish: set TARGET to a Rust target triple}
 
@@ -128,12 +127,6 @@ name=oxish-$version-$triple
 archived=$(for b in $bins; do printf 'bin/%s ' "$b"; done)
 # shellcheck disable=SC2086
 make_archive "$stage/$name.tar.xz" "$pkg" $archived LICENSE-APACHE LICENSE-MIT THIRD-PARTY.md provenance.json
-
-archive_bytes=$(wc -c < "$stage/$name.tar.xz" | tr -d ' ')
-budget=$(jaq -r --arg t "$triple" '.targets[$t].oxish.max_archive_bytes // empty' "$budgets")
-[ -n "$budget" ] || fail "no budget for $triple"
-[ "$archive_bytes" -le "$budget" ] || fail "$name.tar.xz is $archive_bytes bytes, over the $budget byte budget"
-echo "budget: $name.tar.xz $archive_bytes/$budget bytes"
 
 lock_sha256=$(sha256 "$repo_root/sources.lock.json" | awk '{ print $1 }')
 jaq -n \

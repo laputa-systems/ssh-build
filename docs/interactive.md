@@ -154,7 +154,7 @@ statuses and signals, and Git mode's existing tests unchanged.
 ### 5. Release (SSHB-6)
 
 Package the client, server, session helper and keygen in the `oxish` archive
-for all three targets, with manifests, budgets and `SHA256SUMS`, and qualify
+for all three targets, with manifests and `SHA256SUMS`, and qualify
 the client on macOS arm64 natively.
 
 ### 6. Laputa consumes ssh-build; Dropbear removed (SSHB-7)
