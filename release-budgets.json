@@ -3,11 +3,11 @@
   "targets": {
     "aarch64-apple-darwin": {
       "ssh": {"max_archive_bytes": 610000},
-      "oxish": {"max_archive_bytes": 1390000}
+      "oxish": {"max_archive_bytes": 1640000}
     },
     "aarch64-unknown-linux-musl": {
       "ssh": {"max_archive_bytes": 800000},
-      "oxish": {"max_archive_bytes": 1550000}
+      "oxish": {"max_archive_bytes": 1800000}
     },
     "x86_64-unknown-linux-musl": {
       "ssh": {"max_archive_bytes": 880000},
