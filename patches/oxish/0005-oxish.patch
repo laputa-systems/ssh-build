@@ -1894,7 +1894,7 @@ index 0000000000000000000000000000000000000000..0dda74162fe1a89d34e0c5c039091f62
 +    }
 +}
 diff --git a/oxish/src/lib.rs b/oxish/src/lib.rs
-index 3f9d273c9bdde1628e75dce04442927ad082eede..7eb0d85caf5e3c784437b8cb2c629d0332f09a07 100644
+index 3f9d273c9bdde1628e75dce04442927ad082eede..cc7969cf736050e1d2529ab4c1e9f439bae05555 100644
 --- a/oxish/src/lib.rs
 +++ b/oxish/src/lib.rs
 @@ -1,20 +1,13 @@
@@ -1956,7 +1956,7 @@ index 3f9d273c9bdde1628e75dce04442927ad082eede..7eb0d85caf5e3c784437b8cb2c629d03
  #[cfg(unix)]
  use unix as platform;
  
-+#[cfg(test)]
++#[cfg(all(test, target_os = "linux"))]
 +mod login_tests;
  #[cfg(test)]
  mod tests;
@@ -3468,7 +3468,7 @@ index 0000000000000000000000000000000000000000..07b270001e9b1b1bfa2f0bc6c8c7db0c
 +    assert_eq!(run.stdout(), format!("{}\n0\n", me.uid), "{}", run.stderr);
 +}
 diff --git a/oxish/src/server.rs b/oxish/src/server.rs
-index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c3d15f8fe 100644
+index 22f918accf1bad482547186e8bcb6c26fb5af238..2f625c191d9ecc676ac8012b72b9f16508798acc 100644
 --- a/oxish/src/server.rs
 +++ b/oxish/src/server.rs
 @@ -1,7 +1,7 @@
@@ -3481,7 +3481,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
  
  use anyhow::Context as _;
  use proto::{HostKeys, ReadState, WriteState, crypto::CryptoProvider};
-@@ -13,54 +13,121 @@ use tokio::{
+@@ -13,54 +13,122 @@ use tokio::{
  };
  use tracing::{debug, instrument, warn};
  
@@ -3555,6 +3555,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
          provider: &'static dyn CryptoProvider,
      ) -> anyhow::Result<Self> {
 -        Ok(Self {
++        anyhow::ensure!(cfg!(target_os = "linux"), "login mode is supported on Linux only");
 +        policy.validate()?;
 +        anyhow::ensure!(session.is_absolute(), "the session binary path must be absolute");
 +        check_trusted_executable(&session)?;
@@ -3617,7 +3618,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
      ///
      /// This function never returns: failures to accept a connection are logged and skipped.
      pub async fn run(self: &Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
-@@ -78,9 +145,7 @@ impl Server {
+@@ -78,9 +146,7 @@ impl Server {
                  }
              };
  
@@ -3628,7 +3629,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
  
              let server = self.clone();
              tokio::spawn(async move {
-@@ -88,6 +153,9 @@ impl Server {
+@@ -88,6 +154,9 @@ impl Server {
                  if let Err(err) = stream.set_nodelay(true) {
                      warn!(%addr, %err, "failed to set TCP_NODELAY on connection");
                  }
@@ -3638,7 +3639,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
  
                  let _ = server.accept(stream, addr).await;
              });
-@@ -96,6 +164,11 @@ impl Server {
+@@ -96,6 +165,11 @@ impl Server {
  
      #[instrument(name = "handshake", skip(self, stream, addr), fields(addr = %addr))]
      pub(crate) async fn accept(&self, stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
@@ -3650,7 +3651,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
          let authenticating = match self.authenticating.try_acquire() {
              Ok(permit) => permit,
              Err(TryAcquireError::NoPermits) => {
-@@ -116,27 +189,47 @@ impl Server {
+@@ -116,27 +190,47 @@ impl Server {
          };
  
          let future = conn.exchange_keys(&self.host_keys, self.provider);
@@ -3707,7 +3708,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
  
          let Connection {
              stream,
-@@ -178,7 +271,8 @@ impl Server {
+@@ -178,7 +272,8 @@ impl Server {
              options,
          };
  
@@ -3717,7 +3718,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
              .await
              .context("failed to spawn session process")?;
  
-@@ -193,6 +287,31 @@ impl Server {
+@@ -193,6 +288,31 @@ impl Server {
      }
  }
  
@@ -3749,7 +3750,7 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..c403cde73065b1cfeef9df7a4b293e0c
  /// Additional configuration for the SSH server
  ///
  /// Can be used with [`Server::with_config()`] to override the default configuration.
-@@ -200,30 +319,137 @@ impl Server {
+@@ -200,30 +320,137 @@ impl Server {
  #[derive(Debug, Deserialize)]
  #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
  pub struct Config {

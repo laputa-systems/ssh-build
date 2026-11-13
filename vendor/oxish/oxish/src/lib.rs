@@ -45,7 +45,7 @@ pub use platform::{detach_session, drop_privileges, launch, resume, resume_login
 #[cfg(unix)]
 use unix as platform;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod login_tests;
 #[cfg(test)]
 mod tests;

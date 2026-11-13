@@ -134,7 +134,8 @@ Run as root, the listener only accepts and authenticates. Each authenticated con
 `oxish-session`, which sets supplementary groups, group and user to the account, proves that root
 cannot be regained, and only then opens the terminal and runs the shell. Accounts with user ID 0 or
 in group 0 are refused unless `--allow-root-login` is given. Run unprivileged, the server can serve
-only the account it runs as. Login mode is Linux-only for switching users. The `oxish-session` binary
+only the account it runs as. Login mode runs on Linux only; elsewhere the server refuses to start in
+it. The `oxish-session` binary
 and its directory must be owned by the server user (root, when it runs as root) and not writable by
 others; the server refuses to start or to log in otherwise.
 

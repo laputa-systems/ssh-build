@@ -96,7 +96,7 @@ and any other request are refused. Git mode keeps every restriction above.
   keepalive and the 60 s write deadline); one without is closed after 5 minutes.
 - **Not done:** no `utmp`/`wtmp`/`lastlog`, no PAM, no NSS (only flat files), no resource limits, no
   per-key options (`command=`, `from=`), no revocation without a restart, no `signal` requests.
-  Switching users is implemented for Linux only; it has not been run on the Asterinas kernel.
+  Login mode runs on Linux only (the server refuses it elsewhere); it has not been run on the Asterinas kernel.
 
 ## Login-mode review record
 

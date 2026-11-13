@@ -75,6 +75,7 @@ impl Server {
         policy: LoginPolicy,
         provider: &'static dyn CryptoProvider,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(cfg!(target_os = "linux"), "login mode is supported on Linux only");
         policy.validate()?;
         anyhow::ensure!(session.is_absolute(), "the session binary path must be absolute");
         check_trusted_executable(&session)?;
