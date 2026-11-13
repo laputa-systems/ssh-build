@@ -12,7 +12,8 @@ use crate::error::Error;
 use crate::exec::{self, ExecOptions, ExecResult};
 use crate::host_key::{Fingerprint, HostTrust};
 use crate::kex::{self, Algorithms, Established};
-use crate::stream::{self, InputSource, StreamOptions};
+use crate::session::{SessionEvents, SessionRequest};
+use crate::stream::{self, InputSource, OutputSink, StreamOptions};
 use crate::wire::{Interrupt, Packet, SshReader, Transport, plain_text, put_string};
 
 /// When to start a new key exchange under the current keys.
@@ -208,6 +209,23 @@ impl Connection {
         stderr: &mut dyn std::io::Write,
     ) -> Result<ExecResult, Error> {
         stream::exec_stream_to_writers(self, command, options, stdin, stdout, stderr)
+    }
+
+    /// Run a shell or command, with or without a pseudo-terminal, on the calling thread.
+    ///
+    /// The loop reads `stdin` only while the server's window has room and holds output the sinks
+    /// have not taken, so memory stays bounded by the channel windows. A sink or source with a
+    /// descriptor is waited on without blocking the connection; `events` can report window-size
+    /// changes and wake the loop.
+    pub fn session(
+        &mut self,
+        request: &SessionRequest,
+        stdin: Option<&mut dyn InputSource>,
+        stdout: &mut dyn OutputSink,
+        stderr: &mut dyn OutputSink,
+        events: Option<&mut dyn SessionEvents>,
+    ) -> Result<ExecResult, Error> {
+        stream::session(self, request, stdin, stdout, stderr, events)
     }
 
     /// The host name the connection was made to.

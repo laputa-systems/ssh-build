@@ -384,7 +384,7 @@ impl Transport {
 
     /// Wait for read readiness, and write readiness when `write` is set.
     pub fn wait(&mut self, write: bool) -> Result<PollFlags, Error> {
-        self.wait_for(true, write, None, [None, None])
+        self.wait_for(true, write, None, [None, None], None)
     }
 
     /// Like [`Self::wait`], and also return once `input` can be read or one of `outputs` can be
@@ -394,8 +394,9 @@ impl Transport {
         write: bool,
         input: Option<BorrowedFd<'_>>,
         outputs: [Option<BorrowedFd<'_>>; 2],
+        wake: Option<BorrowedFd<'_>>,
     ) -> Result<PollFlags, Error> {
-        self.wait_for(true, write, input, outputs)
+        self.wait_for(true, write, input, outputs, wake)
     }
 
     fn wait_for(
@@ -404,6 +405,7 @@ impl Transport {
         write: bool,
         input: Option<BorrowedFd<'_>>,
         outputs: [Option<BorrowedFd<'_>>; 2],
+        wake: Option<BorrowedFd<'_>>,
     ) -> Result<PollFlags, Error> {
         loop {
             if let Some(error) = self.limit_error() {
@@ -437,6 +439,7 @@ impl Transport {
                 file_entry(&self.stream, input, PollFlags::IN),
                 file_entry(&self.stream, outputs[0], PollFlags::OUT),
                 file_entry(&self.stream, outputs[1], PollFlags::OUT),
+                file_entry(&self.stream, wake, PollFlags::IN),
                 match abort {
                     Some(descriptor) => PollFd::from_borrowed_fd(descriptor, PollFlags::IN),
                     None => PollFd::new(&self.stream, PollFlags::empty()),
@@ -449,7 +452,7 @@ impl Transport {
             match poll(&mut descriptors, Some(&timespec)) {
                 Ok(0) => continue,
                 Ok(_) => {
-                    if abort.is_some() && !descriptors[4].revents().is_empty() {
+                    if abort.is_some() && !descriptors[5].revents().is_empty() {
                         return Err(Error::Cancelled {
                             certainty: self.certainty,
                         });
@@ -758,7 +761,7 @@ impl Transport {
     pub fn flush(&mut self) -> Result<(), Error> {
         while !self.flush_nonblocking()? {
             let reading = self.read.buf.len() < READ_BUFFER_LIMIT;
-            let events = self.wait_for(reading, true, None, [None, None])?;
+            let events = self.wait_for(reading, true, None, [None, None], None)?;
             if reading && events.contains(PollFlags::IN) {
                 self.fill_nonblocking()?;
             }
@@ -769,7 +772,7 @@ impl Transport {
     /// Flush buffered packets without reading anything.
     pub fn drain(&mut self) -> Result<(), Error> {
         while !self.flush_nonblocking()? {
-            self.wait_for(false, true, None, [None, None])?;
+            self.wait_for(false, true, None, [None, None], None)?;
         }
         Ok(())
     }

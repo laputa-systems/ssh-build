@@ -3,6 +3,7 @@ use zeroize::Zeroizing;
 
 use crate::client::Connection;
 use crate::error::Error;
+use crate::session::{PtyRequest, TerminalSize};
 use crate::wire::{Packet, SshReader, Transport, plain_text, put_string};
 
 /// The local receive window advertised to the server.
@@ -142,13 +143,36 @@ impl Channel {
         name: &str,
         value: &str,
     ) -> Result<(), Error> {
+        let mut body = Vec::new();
+        put_string(&mut body, name.as_bytes());
+        put_string(&mut body, value.as_bytes());
+        self.request_with_reply(connection, "env", &body)
+    }
+
+    /// Ask the server to allocate a pseudo-terminal for the command and wait for its answer.
+    pub fn request_pty(&mut self, connection: &mut Connection, pty: &PtyRequest) -> Result<(), Error> {
+        let mut body = Vec::new();
+        put_string(&mut body, pty.term.as_bytes());
+        body.extend_from_slice(&pty.size.cols.to_be_bytes());
+        body.extend_from_slice(&pty.size.rows.to_be_bytes());
+        body.extend_from_slice(&pty.size.width_px.to_be_bytes());
+        body.extend_from_slice(&pty.size.height_px.to_be_bytes());
+        put_string(&mut body, &pty.modes);
+        self.request_with_reply(connection, "pty-req", &body)
+    }
+
+    fn request_with_reply(
+        &mut self,
+        connection: &mut Connection,
+        name: &'static str,
+        body: &[u8],
+    ) -> Result<(), Error> {
         let mut request = Vec::new();
         MessageType::ChannelRequest.encode(&mut request);
         request.extend_from_slice(&self.remote_id.to_be_bytes());
-        put_string(&mut request, b"env");
-        request.push(1);
         put_string(&mut request, name.as_bytes());
-        put_string(&mut request, value.as_bytes());
+        request.push(1);
+        request.extend_from_slice(body);
         connection.transport().send_raw(&request)?;
         loop {
             let packet = connection.next_packet()?;
@@ -156,24 +180,58 @@ impl Channel {
                 MessageType::ChannelSuccess => return self.expect_reply_for(&packet.payload),
                 MessageType::ChannelFailure => {
                     self.expect_reply_for(&packet.payload)?;
-                    return Err(Error::Rejected { request: "env" });
+                    return Err(Error::Rejected { request: name });
                 }
                 MessageType::ChannelWindowAdjust => self.window_adjust(&packet.payload)?,
                 other => {
-                    return Err(protocol_error(format!("unexpected env reply {other:?}")));
+                    return Err(protocol_error(format!("unexpected {name} reply {other:?}")));
                 }
             }
         }
     }
 
+    /// Tell the server the terminal changed size. The request wants no reply.
+    pub fn send_window_change(
+        &mut self,
+        transport: &mut Transport,
+        size: TerminalSize,
+    ) -> Result<(), Error> {
+        let mut packet = Vec::new();
+        MessageType::ChannelRequest.encode(&mut packet);
+        packet.extend_from_slice(&self.remote_id.to_be_bytes());
+        put_string(&mut packet, b"window-change");
+        packet.push(0);
+        packet.extend_from_slice(&size.cols.to_be_bytes());
+        packet.extend_from_slice(&size.rows.to_be_bytes());
+        packet.extend_from_slice(&size.width_px.to_be_bytes());
+        packet.extend_from_slice(&size.height_px.to_be_bytes());
+        transport.encode_raw(&packet)
+    }
+
     /// Send an `exec` request and wait for its reply.
     pub fn exec(&mut self, connection: &mut Connection, command: &[u8]) -> Result<(), Error> {
+        self.start(connection, "exec", Some(command))
+    }
+
+    /// Send a `shell` request and wait for its reply.
+    pub fn shell(&mut self, connection: &mut Connection) -> Result<(), Error> {
+        self.start(connection, "shell", None)
+    }
+
+    fn start(
+        &mut self,
+        connection: &mut Connection,
+        kind: &'static str,
+        command: Option<&[u8]>,
+    ) -> Result<(), Error> {
         let mut request = Vec::new();
         MessageType::ChannelRequest.encode(&mut request);
         request.extend_from_slice(&self.remote_id.to_be_bytes());
-        put_string(&mut request, b"exec");
+        put_string(&mut request, kind.as_bytes());
         request.push(1);
-        put_string(&mut request, command);
+        if let Some(command) = command {
+            put_string(&mut request, command);
+        }
         connection.transport().mark_submitted();
         connection.transport().send_raw(&request)?;
 
@@ -183,7 +241,7 @@ impl Channel {
             let packet = connection.next_packet()?;
             if early.len() >= MAX_EARLY_PACKETS {
                 return Err(protocol_error(
-                    "peer sent too many messages before the exec reply",
+                    "peer sent too many messages before the session reply",
                 ));
             }
             match packet.message_type {
@@ -194,14 +252,14 @@ impl Channel {
                 }
                 MessageType::ChannelFailure => {
                     self.expect_reply_for(&packet.payload)?;
-                    return Err(Error::Rejected { request: "exec" });
+                    return Err(Error::Rejected { request: kind });
                 }
                 MessageType::ChannelWindowAdjust => self.window_adjust(&packet.payload)?,
                 MessageType::ChannelData | MessageType::ChannelExtendedData => {
                     early_bytes += self.pre_reply_data_length(&packet)?;
                     if early_bytes > LOCAL_WINDOW as usize {
                         return Err(protocol_error(
-                            "peer sent more than the channel window before the exec reply",
+                            "peer sent more than the channel window before the session reply",
                         ));
                     }
                     early.push(packet);
@@ -215,7 +273,7 @@ impl Channel {
                     early.push(packet);
                 }
                 other => {
-                    return Err(protocol_error(format!("unexpected exec reply {other:?}")));
+                    return Err(protocol_error(format!("unexpected {kind} reply {other:?}")));
                 }
             }
         }

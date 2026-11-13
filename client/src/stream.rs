@@ -12,6 +12,7 @@ use crate::channel::{Channel, LOCAL_MAX_PACKET, LOCAL_WINDOW, validate_environme
 use crate::client::Connection;
 use crate::error::{Certainty, Error};
 use crate::exec::{ExecResult, ExecStatus};
+use crate::session::{PtyRequest, SessionEvents, SessionRequest};
 use crate::wire::{Interrupt, Packet, SshReader, plain_text};
 
 const OUTPUT_HIGH_WATER: usize = 256 * 1024;
@@ -53,16 +54,23 @@ impl InputSource for File {
 
 /// A destination for command output. While a sink with a descriptor is not writable the client
 /// holds its bytes and keeps serving the connection; a sink without one is written at once.
-pub(crate) trait OutputSink: Write {
+pub trait OutputSink: Write {
     /// A descriptor that polls writable when a write of up to `PIPE_BUF` bytes will not block, or
     /// `None` for a sink whose writes never block.
     fn descriptor(&self) -> Option<BorrowedFd<'_>>;
 }
 
-/// One end of a pipe that the connection writes into and the caller drains.
-struct PipeSink(File);
+/// An output sink backed by a file or descriptor the caller owns, such as a pipe or terminal.
+pub struct FileSink(File);
 
-impl Write for PipeSink {
+impl FileSink {
+    /// Write to `file`, holding output back while it does not poll writable.
+    pub fn new(file: File) -> Self {
+        Self(file)
+    }
+}
+
+impl Write for FileSink {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.0.write(data)
     }
@@ -72,7 +80,7 @@ impl Write for PipeSink {
     }
 }
 
-impl OutputSink for PipeSink {
+impl OutputSink for FileSink {
     fn descriptor(&self) -> Option<BorrowedFd<'_>> {
         Some(self.0.as_fd())
     }
@@ -543,6 +551,11 @@ impl<'a> Input<'a> {
                     return Ok(());
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.length = 0;
+                    self.position = 0;
+                    return Ok(());
+                }
                 Err(error) => {
                     return Err(Error::Submitted {
                         detail: format!("stdin read failed: {error}"),
@@ -581,12 +594,39 @@ pub(crate) fn exec_stream(
     stdout: &mut dyn OutputSink,
     stderr: &mut dyn OutputSink,
 ) -> Result<ExecResult, Error> {
+    let request = SessionRequest {
+        command: Some(command.to_owned()),
+        pty: None,
+        env: options.env.clone(),
+        timeout: options.timeout,
+        interrupt: options.interrupt.clone(),
+    };
+    session(connection, &request, stdin, stdout, stderr, None)
+}
+
+pub(crate) fn session(
+    connection: &mut Connection,
+    request: &SessionRequest,
+    stdin: Option<&mut dyn InputSource>,
+    stdout: &mut dyn OutputSink,
+    stderr: &mut dyn OutputSink,
+    events: Option<&mut dyn SessionEvents>,
+) -> Result<ExecResult, Error> {
     connection.require_usable()?;
-    validate_environment(&options.env)?;
+    validate_environment(&request.env)?;
     connection
         .transport()
-        .begin_operation(options.timeout, options.interrupt.clone());
-    let result = run(connection, command, &options.env, stdin, stdout, stderr);
+        .begin_operation(request.timeout, request.interrupt.clone());
+    let result = run(
+        connection,
+        request.command.as_deref(),
+        request.pty.as_ref(),
+        &request.env,
+        stdin,
+        stdout,
+        stderr,
+        events,
+    );
     connection.transport().end_operation();
     result.map_err(|error| {
         let error = if connection.transport().certainty() == Certainty::Submitted {
@@ -620,8 +660,8 @@ pub(crate) fn exec_stream_to_writers(
     nonblocking(&input_writer)?;
 
     let has_stdin = stdin.is_some();
-    let mut out_sink = PipeSink(out_writer);
-    let mut err_sink = PipeSink(err_writer);
+    let mut out_sink = FileSink(out_writer);
+    let mut err_sink = FileSink(err_writer);
     connection.transport().set_abort(abort_reader.into());
 
     type Joined = std::thread::Result<Result<ExecResult, Error>>;
@@ -681,25 +721,46 @@ pub(crate) fn exec_stream_to_writers(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     connection: &mut Connection,
-    command: &str,
+    command: Option<&str>,
+    pty: Option<&PtyRequest>,
     env: &[(String, String)],
     stdin: Option<&mut dyn InputSource>,
     stdout: &mut dyn OutputSink,
     stderr: &mut dyn OutputSink,
+    mut events: Option<&mut dyn SessionEvents>,
 ) -> Result<ExecResult, Error> {
     let mut channel = Channel::open(connection)?;
     for (name, value) in env {
         channel.set_environment(connection, name, value)?;
     }
-    channel.exec(connection, command.as_bytes())?;
+    if let Some(pty) = pty {
+        channel.request_pty(connection, pty)?;
+    }
+    match command {
+        Some(command) => channel.exec(connection, command.as_bytes())?,
+        None => channel.shell(connection)?,
+    }
     connection.transport().await_command();
+    if let Some(events) = events.as_deref_mut() {
+        events.started().map_err(|error| Error::Submitted {
+            detail: format!("cannot start the terminal session: {error}"),
+        })?;
+    }
 
     let mut input = Input::new(stdin);
     let mut completion = Completion::default();
     let mut outputs = [Drain::new(stdout, "stdout"), Drain::new(stderr, "stderr")];
-    let driven = drive(connection, &mut channel, &mut completion, &mut input, &mut outputs);
+    let driven = drive(
+        connection,
+        &mut channel,
+        &mut completion,
+        &mut input,
+        &mut outputs,
+        &mut events,
+    );
     match driven {
         Ok(()) => {}
         Err(_) if connection.transport().peer_closed() && completion.is_reported() => {
@@ -721,11 +782,19 @@ fn drive(
     completion: &mut Completion,
     input: &mut Input<'_>,
     outputs: &mut [Drain<'_>; 2],
+    events: &mut Option<&mut dyn SessionEvents>,
 ) -> Result<(), Error> {
     loop {
         connection.transport().check()?;
         while let Some(packet) = connection.try_next_packet()? {
             on_packet(connection, channel, completion, packet, outputs)?;
+        }
+        if let Some(events) = events.as_deref_mut()
+            && let Some(size) = events.window_change()
+            && !channel.eof_received
+            && !channel.close_received
+        {
+            channel.send_window_change(connection.transport(), size)?;
         }
         for output in outputs.iter_mut() {
             let written = output.pump()?;
@@ -754,10 +823,12 @@ fn drive(
             None
         };
         let [stdout, stderr] = &*outputs;
+        let wake = events.as_deref().and_then(|events| events.descriptor());
         let events = connection.transport().wait_with_files(
             !flushed,
             waiting_for,
             [stdout.descriptor(), stderr.descriptor()],
+            wake,
         )?;
         if events.contains(PollFlags::IN) || events.contains(PollFlags::HUP) {
             connection.transport().fill_nonblocking()?;
@@ -798,6 +869,9 @@ fn feed(
                 return Ok(Feed::WaitingForInput);
             }
             input.refill()?;
+            if input.drained() && !input.eof {
+                return Ok(Feed::WaitingForInput);
+            }
             continue;
         }
         if channel.remote_window == 0 {
