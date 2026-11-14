@@ -3,8 +3,8 @@
 Two optional downloads, built without OpenSSL:
 
 - **OpenSSH 10.6p1 client** (`ssh`, `ssh-keygen`, `ssh-agent`, `ssh-add`, `sftp`, `scp`) built
-  `--without-openssl`, as `ssh-<version>-<triple>.tar.xz`.
-- **OxiSH** (experimental), Graviola-only SSH tools, as `oxish-<version>-<triple>.tar.xz`:
+  `--without-openssl`, as `ssh-<version>-<triple>.zip`.
+- **OxiSH** (experimental), Graviola-only SSH tools, as `oxish-<version>-<triple>.zip`:
   `oxish-server`, which by default only serves `git-upload-pack` and `git-receive-pack` and with
   `--mode login` gives configured accounts a shell or command; its `oxish-session` helper; the
   interactive `oxish` client; the `oxish-sftp` and `oxish-scp` file-transfer clients; and
@@ -16,8 +16,8 @@ Targets (`<triple>`): `aarch64-apple-darwin`, `x86_64-unknown-linux-musl` and
 `<product>-<version>-<triple>.manifest.json` beside it (`product`, `version`, `target`,
 `source_revision`, `sources_lock_sha256`, and the pinned inputs). Release assets come with one
 `SHA256SUMS`; check it before unpacking (`sha256sum -c SHA256SUMS` or
-`shasum -a 256 -c SHA256SUMS`). The `dl` installer's `dl ssh` and `dl oxish` consume the
-`.tar.xz` assets and install them under `~/.local/share/{ssh,oxish}/releases/<tag>-<triple>`
+`shasum -a 256 -c SHA256SUMS`). The `dl` installer's `dl ssh` and `dl oxish` consume these
+archives and install them under `~/.local/share/{ssh,oxish}/releases/<tag>-<triple>`
 with a `current` link. `dl oxish` is opt-in and not in the default set.
 
 ## Client

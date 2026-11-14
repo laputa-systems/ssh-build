@@ -66,7 +66,7 @@ check "6 upload/download between jobs"
 grep -q "Inventory release assets" "$file" || { echo "audit 7: no inventory step" >&2; exit 1; }
 grep -q "missing, duplicate, or extra" "$file" || { echo "audit 7: inventory rejects nothing" >&2; exit 1; }
 # shellcheck disable=SC2016
-for asset in '"ssh-$ssh_version"' '"oxish-$oxish_version"' '%s-%s.tar.xz' '%s-%s.manifest.json'; do
+for asset in '"ssh-$ssh_version"' '"oxish-$oxish_version"' '%s-%s.zip' '%s-%s.manifest.json'; do
     grep -qF -- "$asset" "$file" || { echo "audit 7: inventory does not name $asset" >&2; exit 1; }
 done
 check "7 inventory rejects missing/duplicate/extra assets (both products, all targets)"

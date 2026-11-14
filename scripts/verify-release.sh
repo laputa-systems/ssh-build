@@ -22,7 +22,7 @@ case "$(uname -s):$(uname -m)" in
 esac
 [ "$host" = "$triple" ] || fail "this host runs $host, not $triple"
 
-for tool in tar xz jaq; do
+for tool in unzip jaq; do
     command -v "$tool" >/dev/null || fail "$tool is required"
 done
 
@@ -38,7 +38,7 @@ mkdir -p "$unpack"
 for product in ssh oxish; do
     version=$(lock_field "$(if [ "$product" = ssh ]; then echo openssh; else echo oxish; fi)" version)
     name=$product-$version-$triple
-    archive=$out_dir/$name.tar.xz
+    archive=$out_dir/$name.zip
     manifest=$out_dir/$name.manifest.json
     [ -f "$archive" ] || fail "$archive is missing"
     [ -f "$manifest" ] || fail "$manifest is missing"
@@ -51,7 +51,7 @@ for product in ssh oxish; do
         jaq -e '.build_dirty == false' "$manifest" >/dev/null || fail "$manifest was built from a dirty tree"
     fi
     mkdir -p "$unpack/$product"
-    tar -xJf "$archive" -C "$unpack/$product"
+    unzip -q "$archive" -d "$unpack/$product"
     if [ "$product" = oxish ]; then
         listed=$(jaq -r '.executables[]' "$manifest" | sort)
         present=$(cd "$unpack/oxish/bin" && ls | sort)

@@ -1,0 +1,15 @@
+[package]
+name = "make-archive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Deterministic zip archives for the release pipeline, built on rawzip"
+license = "Apache-2.0 OR MIT"
+
+[dependencies]
+rawzip = "0.5.2"
+flate2 = "1"
+
+[profile.release]
+opt-level = 3

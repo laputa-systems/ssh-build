@@ -9,7 +9,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 out_dir=${1:?usage: write-sums.sh <out_dir>}
 cd "$out_dir"
 assets=
-for asset in *.tar.xz *.manifest.json; do
+for asset in *.zip *.manifest.json; do
     [ -f "$asset" ] && assets="$assets $asset"
 done
 [ -n "$assets" ] || { echo "write-sums: no assets in $out_dir" >&2; exit 1; }

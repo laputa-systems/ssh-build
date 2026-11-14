@@ -20,7 +20,7 @@ acceptance check passes in this repository's verification.
 
 ## Product shape
 
-One archive per target, `oxish-<version>-<triple>.tar.xz`, with:
+One archive per target, `oxish-<version>-<triple>.zip`, with:
 
 - `oxish` — the interactive client and `ssh`-compatible command runner.
 - `oxish-server` — Git mode (today's behavior) and login mode, chosen by

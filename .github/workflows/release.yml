@@ -92,7 +92,7 @@ jobs:
         with:
           name: release-${{ matrix.target }}
           path: |
-            dist/release/*-${{ matrix.target }}.tar.xz
+            dist/release/*-${{ matrix.target }}.zip
             dist/release/*-${{ matrix.target }}.manifest.json
           if-no-files-found: error
 
@@ -152,7 +152,7 @@ jobs:
           expected=$(
             for target in aarch64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
               for product in "ssh-$ssh_version" "oxish-$oxish_version"; do
-                printf '%s-%s.tar.xz\n%s-%s.manifest.json\n' "$product" "$target" "$product" "$target"
+                printf '%s-%s.zip\n%s-%s.manifest.json\n' "$product" "$target" "$product" "$target"
               done
             done | LC_ALL=C sort
           )
@@ -175,13 +175,13 @@ jobs:
       - name: Stage Linux ELF artifacts
         run: |
           rm -rf stage
-          for archive in dist/ssh-*-linux-musl.tar.xz dist/oxish-*-linux-musl.tar.xz; do
+          for archive in dist/ssh-*-linux-musl.zip dist/oxish-*-linux-musl.zip; do
             file=${archive#dist/}
             product=${file%%-*}
-            triple=${file%.tar.xz}
+            triple=${file%.zip}
             triple=${triple#"$product"-*-}
             mkdir -p "stage/$product/$triple"
-            tar -xJf "$archive" -C "stage/$product/$triple"
+            unzip -q "$archive" -d "stage/$product/$triple"
           done
 
       - name: Verify Linux ELF artifacts are fully static
@@ -229,7 +229,7 @@ jobs:
       - name: Consolidate SHA256SUMS
         run: |
           cd dist
-          sha256sum -- *.tar.xz *.manifest.json | LC_ALL=C sort -k 2 > SHA256SUMS
+          sha256sum -- *.zip *.manifest.json | LC_ALL=C sort -k 2 > SHA256SUMS
           sha256sum -c SHA256SUMS
 
       - name: Create release tag at triggering SHA
@@ -288,4 +288,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: release-${{ github.sha }}
-        run: gh release create "$RELEASE_TAG" dist/*.tar.xz dist/*.manifest.json dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md" --title "$RELEASE_TAG"
+        run: gh release create "$RELEASE_TAG" dist/*.zip dist/*.manifest.json dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md" --title "$RELEASE_TAG"

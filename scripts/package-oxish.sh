@@ -1,5 +1,5 @@
 #!/bin/sh
-# Package the OxiSH server, clients and key generator for one target as oxish-<version>-<triple>.tar.xz plus
+# Package the OxiSH server, clients and key generator for one target as oxish-<version>-<triple>.zip plus
 # oxish-<version>-<triple>.manifest.json, then refresh and verify the
 # consolidated SHA256SUMS in <out_dir>.
 # Usage: TARGET=<triple> sh scripts/package-oxish.sh [out_dir]      (default: dist/release)
@@ -23,7 +23,7 @@ triple=${TARGET:?package-oxish: set TARGET to a Rust target triple}
 
 fail() { echo "package-oxish: $*" >&2; exit 1; }
 
-for tool in tar xz jaq file; do
+for tool in cargo jaq file; do
     command -v "$tool" >/dev/null || fail "$tool is required"
 done
 
@@ -126,7 +126,7 @@ jaq -n \
 name=oxish-$version-$triple
 archived=$(for b in $bins; do printf 'bin/%s ' "$b"; done)
 # shellcheck disable=SC2086
-make_archive "$stage/$name.tar.xz" "$pkg" $archived LICENSE-APACHE LICENSE-MIT THIRD-PARTY.md provenance.json
+make_archive "$stage/$name.zip" "$pkg" $archived LICENSE-APACHE LICENSE-MIT THIRD-PARTY.md provenance.json
 
 lock_sha256=$(sha256 "$repo_root/sources.lock.json" | awk '{ print $1 }')
 jaq -n \
@@ -141,7 +141,7 @@ jaq -n \
       graviola_crate_sha256: $graviola_sha256, patches_sha256: $patch_sha256,
       toolchain: $toolchain}' > "$stage/$name.manifest.json"
 
-rm -f "$out_dir/oxish-"*"-$triple.tar.xz" "$out_dir/oxish-"*"-$triple.manifest.json"
-mv "$stage/$name.tar.xz" "$stage/$name.manifest.json" "$out_dir"/
+rm -f "$out_dir/oxish-"*"-$triple.zip" "$out_dir/oxish-"*"-$triple.manifest.json"
+mv "$stage/$name.zip" "$stage/$name.manifest.json" "$out_dir"/
 sh "$script_dir/write-sums.sh" "$out_dir"
 echo "Packaged $triple (oxish) in $out_dir"

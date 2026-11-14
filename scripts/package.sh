@@ -1,5 +1,5 @@
 #!/bin/sh
-# Package the OpenSSH client for one target as ssh-<version>-<triple>.tar.xz plus
+# Package the OpenSSH client for one target as ssh-<version>-<triple>.zip plus
 # ssh-<version>-<triple>.manifest.json, then write and verify
 # <out_dir>/SHA256SUMS over all assets.
 # Usage: TARGET=<triple> sh scripts/package.sh [out_dir]      (default: dist/release)
@@ -18,7 +18,7 @@ triple=${TARGET:?package: set TARGET to a Rust target triple}
 
 fail() { echo "package: $*" >&2; exit 1; }
 
-for tool in tar xz jaq file; do
+for tool in cargo jaq file; do
     command -v "$tool" >/dev/null || fail "$tool is required"
 done
 
@@ -67,7 +67,7 @@ case $triple in
 esac
 
 name=ssh-$version-$triple
-make_archive "$stage/$name.tar.xz" "$bin_dir" ssh ssh-keygen ssh-agent ssh-add sftp scp
+make_archive "$stage/$name.zip" "$bin_dir" ssh ssh-keygen ssh-agent ssh-add sftp scp
 
 lock_sha256=$(sha256 "$repo_root/sources.lock.json" | awk '{ print $1 }')
 jaq -n \
@@ -78,8 +78,8 @@ jaq -n \
       source_revision: $commit, sources_lock_sha256: $lock_sha256, build_dirty: $dirty,
       upstream_sha256: $upstream_sha256, toolchain: $toolchain}' > "$stage/$name.manifest.json"
 
-rm -f "$out_dir/ssh-"*"-$triple.tar.xz" "$out_dir/ssh-"*"-$triple.manifest.json"
-mv "$stage/$name.tar.xz" "$stage/$name.manifest.json" "$out_dir"/
+rm -f "$out_dir/ssh-"*"-$triple.zip" "$out_dir/ssh-"*"-$triple.manifest.json"
+mv "$stage/$name.zip" "$stage/$name.manifest.json" "$out_dir"/
 sh "$script_dir/write-sums.sh" "$out_dir"
 
 echo "Packaged $triple (ssh) in $out_dir"

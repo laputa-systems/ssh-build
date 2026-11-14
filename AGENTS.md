@@ -2,7 +2,7 @@
 
 OpenSSH 10.6p1 client built `--without-openssl` (macOS arm64, static-musl Linux x86_64/aarch64) plus
 Graviola-only OxiSH tools (a server with Git and login modes, the interactive `oxish` client, the
-`oxish-sftp` and `oxish-scp` SFTP clients and `oxish-keygen`), shipped as separate `.tar.xz` archives. Users read `README.md`.
+`oxish-sftp` and `oxish-scp` SFTP clients and `oxish-keygen`), shipped as separate `.zip` archives. Users read `README.md`.
 
 ## Commands
 
@@ -18,8 +18,8 @@ SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/e2e-git.sh                # server end
 
 - One editable OpenSSH version: the `openssh` input in `sources.lock.json`.
 - Every fetch fails closed on a SHA-256 or git revision; pins live in `sources.lock.json` and
-  `git-build.lock.json`. `git-build.lock.json` pins a git-build release in its current ZIP layout
-  until git-build publishes `tar.xz` assets.
+  `git-build.lock.json`. `git-build.lock.json` pins a git-build release (tar.xz layout) fetched
+  for the Git end-to-end tests; ssh-build itself ships `.zip` archives.
 - Never commit `src/`, `dist/`, `.work/` or keys.
 - Graviola is the only crypto provider in the server and client: `sh scripts/check-crypto-graph.sh`.
 - `scripts/oxish-bins.sh` owns the `oxish` archive's executable list and `OXISH_CLIENT_REQUIRED`.

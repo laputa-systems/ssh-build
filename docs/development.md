@@ -41,7 +41,7 @@ Linux targets build in Docker for the target's platform; the macOS target builds
 make binaries PRODUCT=ssh TARGET=aarch64-apple-darwin   # dist/ssh/aarch64-apple-darwin/bin, deployment floor 14.0
 sh scripts/qualify-binaries.sh dist/ssh/aarch64-apple-darwin/bin   # linkage, PIE, signature, floor, no libcrypto
 SSH_BIN_DIR=dist/ssh/aarch64-apple-darwin/bin sh test/runtime.sh   # keygen, agent, config, sftp/scp, exec
-TARGET=aarch64-apple-darwin sh scripts/package.sh       # dist/release/ssh-<version>-<triple>.tar.xz + .manifest.json
+TARGET=aarch64-apple-darwin sh scripts/package.sh       # dist/release/ssh-<version>-<triple>.zip + .manifest.json
 ```
 
 The Linux gates (`readelf`, static, no `PT_INTERP`) run inside the Docker build, and bytes that
@@ -84,7 +84,7 @@ sh scripts/vendor-oxish.sh verify                  # vendor/oxish == pinned upst
 sh scripts/vendor-graviola.sh verify               # vendor/graviola == pinned crate + patches/graviola
 cargo test --locked --manifest-path vendor/oxish/Cargo.toml
 make binaries PRODUCT=oxish TARGET=aarch64-apple-darwin   # dist/oxish/aarch64-apple-darwin/bin
-TARGET=aarch64-apple-darwin sh scripts/package-oxish.sh    # dist/release/oxish-<version>-<triple>.tar.xz + .manifest.json
+TARGET=aarch64-apple-darwin sh scripts/package-oxish.sh    # dist/release/oxish-<version>-<triple>.zip + .manifest.json
 SSH_BIN_DIR=dist/ssh/aarch64-apple-darwin/bin OXISH_BIN_DIR=dist/oxish/aarch64-apple-darwin/bin sh test/e2e-git.sh
 ```
 
@@ -181,7 +181,7 @@ the hybrid post-quantum handshake when the runner's `ssh` cannot offer it; `test
 release job requires it.
 
 `release.yml` is a manual dispatch that refuses non-default branches. Each of three native jobs
-runs `make build TARGET=<triple>` (client and server, packaged as `.tar.xz` plus
+runs `make build TARGET=<triple>` (client and server, packaged as `.zip` plus
 `.manifest.json`) and `make verify TARGET=<triple>`, which unpacks the archives and runs
 `test/runtime.sh` and `test/e2e-git.sh` on those bytes. The release job then requires exactly the
 twelve expected assets, every manifest to name `GITHUB_SHA` and the `sources.lock.json` digest with
@@ -193,4 +193,4 @@ repomod's `actions.toml`; `scripts/install-jaq.sh` installs the pinned `jaq` the
 consumes the assets and has to follow their names.
 
 The workflows were checked with actionlint. The full workflow has not run on GitHub in the
-`.tar.xz` layout.
+`.zip` layout.
