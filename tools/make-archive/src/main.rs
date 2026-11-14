@@ -22,6 +22,12 @@ fn valid_entry_name(name: &str) -> bool {
         .any(|part| part.is_empty() || part == "." || part == "..")
 }
 
+// Regular archive members are files; symlink members hold the link target as their bytes.
+enum Prepared {
+    File { source: PathBuf, archive_mode: u32 },
+    Symlink { source: PathBuf },
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
@@ -51,7 +57,7 @@ fn run(output: &Path, base: &Path, entries: &[String]) -> Result<usize, String> 
     }
 
     let mut seen = std::collections::HashSet::new();
-    let mut prepared = Vec::with_capacity(entries.len());
+    let mut prepared: Vec<(String, Prepared)> = Vec::with_capacity(entries.len());
     for entry in entries {
         if !valid_entry_name(entry) {
             return Err(format!("unsafe archive name {entry}"));
@@ -63,14 +69,26 @@ fn run(output: &Path, base: &Path, entries: &[String]) -> Result<usize, String> 
         let metadata = fs::symlink_metadata(&source)
             .map_err(|error| format!("{}: {error}", source.display()))?;
         if metadata.file_type().is_symlink() {
-            return Err(format!("{entry} is a symlink; archives hold regular files only"));
+            let target = fs::read_link(&source)
+                .map_err(|error| format!("{}: {error}", source.display()))?;
+            let target = target
+                .to_str()
+                .ok_or_else(|| format!("{entry} links to a non-UTF-8 target"))?
+                .to_string();
+            if target.is_empty()
+                || target.len() > 255
+                || !target.bytes().all(|byte| (0x20..=0x7e).contains(&byte) && byte != 0x5c)
+            {
+                return Err(format!("{entry} links to an unsafe target {target}"));
+            }
+            prepared.push((entry.clone(), Prepared::Symlink { source }));
+        } else if metadata.is_file() {
+            let mode = metadata.permissions().mode();
+            let archive_mode = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+            prepared.push((entry.clone(), Prepared::File { source, archive_mode }));
+        } else {
+            return Err(format!("{entry} is neither a regular file nor a symlink"));
         }
-        if !metadata.is_file() {
-            return Err(format!("{entry} is not a regular file"));
-        }
-        let mode = metadata.permissions().mode();
-        let archive_mode = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
-        prepared.push((entry.clone(), source, archive_mode));
     }
 
     if let Some(parent) = output.parent() {
@@ -81,21 +99,34 @@ fn run(output: &Path, base: &Path, entries: &[String]) -> Result<usize, String> 
 
     let file = File::create(output).map_err(|error| format!("{}: {error}", output.display()))?;
     let mut archive = rawzip::ZipArchiveWriter::new(BufWriter::new(file));
-    for (entry, source, archive_mode) in &prepared {
+    for (entry, prepared_entry) in &prepared {
+        let (payload, archive_mode) = match prepared_entry {
+            Prepared::File { source, archive_mode } => (
+                fs::read(source).map_err(|error| format!("{}: {error}", source.display()))?,
+                *archive_mode,
+            ),
+            Prepared::Symlink { source } => (
+                fs::read_link(source)
+                    .map_err(|error| format!("{}: {error}", source.display()))?
+                    .to_str()
+                    .ok_or_else(|| format!("{entry} links to a non-UTF-8 target"))?
+                    .as_bytes()
+                    .to_vec(),
+                0o120777,
+            ),
+        };
         let builder = archive
             .new_file(entry.as_str())
             .compression_method(rawzip::CompressionMethod::DEFLATE)
             .last_modified(rawzip::time::UtcDateTime::from_unix(FIXED_MTIME))
-            .unix_permissions(*archive_mode);
+            .unix_permissions(archive_mode);
         let (mut entry_writer, config) = builder.start().map_err(|error| error.to_string())?;
         let encoder = flate2::write::DeflateEncoder::new(
             &mut entry_writer,
             flate2::Compression::default(),
         );
         let mut writer = config.wrap(encoder);
-        let mut input = File::open(source)
-            .map_err(|error| format!("{}: {error}", source.display()))?;
-        io::copy(&mut input, &mut writer).map_err(|error| format!("{entry}: {error}"))?;
+        io::copy(&mut payload.as_slice(), &mut writer).map_err(|error| format!("{entry}: {error}"))?;
         let (encoder, descriptor) = writer.finish().map_err(|error| error.to_string())?;
         encoder
             .finish()
