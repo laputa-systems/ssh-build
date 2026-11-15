@@ -91,6 +91,12 @@ impl Sha256Context {
     pub const OUTPUT_SZ: usize = 32;
 }
 
+impl Drop for Sha256Context {
+    fn drop(&mut self) {
+        crate::low::zeroise_value(self);
+    }
+}
+
 /// A context for incremental computation of SHA384.
 #[derive(Clone)]
 pub struct Sha384Context {
@@ -219,6 +225,12 @@ impl Sha512Context {
 
     /// The output size of SHA512.
     pub const OUTPUT_SZ: usize = 64;
+}
+
+impl Drop for Sha512Context {
+    fn drop(&mut self) {
+        crate::low::zeroise_value(self);
+    }
 }
 
 #[cfg(test)]
