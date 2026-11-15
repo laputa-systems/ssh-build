@@ -66,6 +66,19 @@ index c6564aeb91b0f15b6a245194d54b0f36300640e7..d37169c69e820cf95995b13938cc8d8c
      pub use super::mid::xchacha20poly1305::XChaCha20Poly1305;
  }
  
+diff --git a/src/low/generic/zeroise.rs b/src/low/generic/zeroise.rs
+index 68eea3919909703d6a8cb681ce47efb35a853288..fe7073ee76e2d4b2afb64f33a189c0c338e3cecb 100644
+--- a/src/low/generic/zeroise.rs
++++ b/src/low/generic/zeroise.rs
+@@ -21,6 +21,8 @@ pub(crate) trait Zeroable {}
+ impl Zeroable for u8 {}
+ impl Zeroable for u64 {}
+ impl Zeroable for usize {}
++impl Zeroable for crate::mid::sha2::Sha256Context {}
++impl Zeroable for crate::mid::sha2::Sha512Context {}
+ 
+ #[cfg(target_arch = "x86_64")]
+ impl Zeroable for core::arch::x86_64::__m128i {}
 diff --git a/src/mid/mod.rs b/src/mid/mod.rs
 index 7eb8dd8b3d6d2fd6893e2fbd6d3d642ddfbc64f5..07f91c9f5f260d632ee745df3d86f201b33f3f30 100644
 --- a/src/mid/mod.rs
@@ -78,6 +91,36 @@ index 7eb8dd8b3d6d2fd6893e2fbd6d3d642ddfbc64f5..07f91c9f5f260d632ee745df3d86f201
  pub mod sha2;
  pub mod sha3;
  pub(super) mod util;
+diff --git a/src/mid/sha2.rs b/src/mid/sha2.rs
+index 575c8cbe3578c299aa9060c7f934ee681838f205..c29addb9efd6b642150ef90cc0e8e7f8a73e94a5 100644
+--- a/src/mid/sha2.rs
++++ b/src/mid/sha2.rs
+@@ -91,6 +91,12 @@ impl Sha256Context {
+     pub const OUTPUT_SZ: usize = 32;
+ }
+ 
++impl Drop for Sha256Context {
++    fn drop(&mut self) {
++        crate::low::zeroise_value(self);
++    }
++}
++
+ /// A context for incremental computation of SHA384.
+ #[derive(Clone)]
+ pub struct Sha384Context {
+@@ -221,6 +227,12 @@ impl Sha512Context {
+     pub const OUTPUT_SZ: usize = 64;
+ }
+ 
++impl Drop for Sha512Context {
++    fn drop(&mut self) {
++        crate::low::zeroise_value(self);
++    }
++}
++
+ #[cfg(test)]
+ #[cfg_attr(coverage_nightly, coverage(off))]
+ mod tests {
 diff --git a/src/mid/ssh_chacha20poly1305.rs b/src/mid/ssh_chacha20poly1305.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..982cd1c003165f169f62cfd0f3927d77b64783a1
