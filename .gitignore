@@ -2,8 +2,6 @@
 dist/
 /src/
 out/
-zipcheck/
 stage/
 /vendor/oxish/target/
 /client/target/
-/tools/make-archive/target/
