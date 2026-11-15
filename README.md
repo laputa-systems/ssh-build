@@ -3,8 +3,8 @@
 Two optional downloads, built without OpenSSL:
 
 - **OpenSSH 10.6p1 client** (`ssh`, `ssh-keygen`, `ssh-agent`, `ssh-add`, `sftp`, `scp`) built
-  `--without-openssl`, as `ssh-<version>-<triple>.zip`.
-- **OxiSH** (experimental), Graviola-only SSH tools, as `oxish-<version>-<triple>.zip`:
+  `--without-openssl`, as `ssh-<version>-<triple>.tar.xz`.
+- **OxiSH** (experimental), Graviola-only SSH tools, as `oxish-<version>-<triple>.tar.xz`:
   `oxish-server`, which by default only serves `git-upload-pack` and `git-receive-pack` and with
   `--mode login` gives configured accounts a shell or command; its `oxish-session` helper; the
   interactive `oxish` client; the `oxish-sftp` and `oxish-scp` file-transfer clients; and

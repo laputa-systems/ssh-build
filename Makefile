@@ -105,8 +105,9 @@ lint:
 	@set -eu; \
 		for script in scripts/*.sh test/*.sh; do sh -n "$$script"; done; \
 		sh scripts/check-crypto-graph.sh --selftest; \
+		sh test/archive.sh; \
 		sh scripts/audit-release.sh
 
 clean:
-	rm -rf dist out stage zipcheck src .work
+	rm -rf dist out stage src .work
 	find . -path './.git' -prune -o -path './.work' -prune -o -name target -type d -prune -exec rm -rf {} +
