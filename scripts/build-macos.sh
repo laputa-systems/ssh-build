@@ -12,7 +12,10 @@ test -n "$OPENSSH_VERSION"
 
 export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}
 sh "$script_dir/fetch-sources.sh" >/dev/null
-src_dir=$root_dir/.work/sources/openssh-${OPENSSH_VERSION}
+src_dir=$root_dir/.work/openssh-patched
+rm -rf "$src_dir"
+cp -Rp "$root_dir/.work/sources/openssh-${OPENSSH_VERSION}" "$src_dir"
+(cd "$src_dir" && patch -p1 < "$root_dir/patches/openssh/0001-owned-help-footer.patch")
 build_dir=$root_dir/.work/build-macos
 dest_dir=$root_dir/dist/ssh/aarch64-apple-darwin/bin
 mkdir -p "$build_dir" "$dest_dir"
