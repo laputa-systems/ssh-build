@@ -31,6 +31,9 @@ ADD --checksum=sha256:${OPENSSH_SHA256} \
 
 WORKDIR /src/openssh-${OPENSSH_VERSION}
 
+COPY patches/openssh/0001-owned-help-footer.patch /tmp/owned-help-footer.patch
+RUN patch -p1 < /tmp/owned-help-footer.patch
+
 RUN set -eux; \
     ./configure --without-openssl --with-ldflags="-static" --disable-strip; \
     make -j"$(getconf _NPROCESSORS_ONLN)" SSH_PROGRAM=ssh ssh ssh-keygen ssh-agent ssh-add sftp scp; \

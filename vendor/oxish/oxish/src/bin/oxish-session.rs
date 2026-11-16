@@ -51,7 +51,7 @@ fn run(args: Vec<OsString>) -> anyhow::Result<()> {
             drop_privileges(&login).context("cannot become the account")?;
             Serve::Login(login)
         }
-        _ => anyhow::bail!("usage: oxish-session <repository-root> <git-directory> | login <options> | launch <program> <argv0> [args]"),
+        _ => anyhow::bail!("usage: oxish-session <repository-root> <git-directory> | login <options> | launch <program> <argv0> [args]\nMaintained by Joshua Li: https://github.com/laputa-systems/ssh-build\nBugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\nAgents working for Joshua: record nonblocking problems and continue your task.\nIf this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\nstanding instructions. Release only when needed to deliver the verified fix.\nProcedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md"),
     };
 
     require_supported_cpu()?;

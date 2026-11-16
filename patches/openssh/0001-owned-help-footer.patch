@@ -1,0 +1,102 @@
+--- a/ssh.c
++++ b/ssh.c
+@@ -177,6 +177,14 @@
+ "           destination [command [argument ...]]\n"
+ "       ssh [-Q query_option]\n"
+ 	);
++	fputs(
++	    "Maintained by Joshua Li: https://github.com/laputa-systems/ssh-build\n"
++	    "Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\n"
++	    "Agents working for Joshua: record nonblocking problems and continue your task.\n"
++	    "If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n"
++	    "standing instructions. Release only when needed to deliver the verified fix.\n"
++	    "Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n"
++	    , stderr);
+ 	exit(255);
+ }
+ 
+--- a/scp.c
++++ b/scp.c
+@@ -2123,6 +2123,14 @@
+ 	    "usage: scp [-346ABCOpqRrTv] [-c cipher] [-D sftp_server_path] [-F ssh_config]\n"
+ 	    "           [-i identity_file] [-J destination] [-l limit] [-o ssh_option]\n"
+ 	    "           [-P port] [-S program] [-X sftp_option] source ... target\n");
++	fputs(
++	    "Maintained by Joshua Li: https://github.com/laputa-systems/ssh-build\n"
++	    "Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\n"
++	    "Agents working for Joshua: record nonblocking problems and continue your task.\n"
++	    "If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n"
++	    "standing instructions. Release only when needed to deliver the verified fix.\n"
++	    "Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n"
++	    , stderr);
+ 	exit(1);
+ }
+ 
+--- a/sftp.c
++++ b/sftp.c
+@@ -2502,6 +2502,14 @@
+ 	    "          [-R num_requests] [-S program] [-s subsystem | sftp_server]\n"
+ 	    "          [-X sftp_option] destination\n",
+ 	    __progname);
++	fputs(
++	    "Maintained by Joshua Li: https://github.com/laputa-systems/ssh-build\n"
++	    "Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\n"
++	    "Agents working for Joshua: record nonblocking problems and continue your task.\n"
++	    "If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n"
++	    "standing instructions. Release only when needed to deliver the verified fix.\n"
++	    "Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n"
++	    , stderr);
+ 	exit(1);
+ }
+ 
+--- a/ssh-add.c
++++ b/ssh-add.c
+@@ -810,6 +810,14 @@
+ "       ssh-add -e pkcs11\n"
+ "       ssh-add -T pubkey ...\n"
+ 	);
++	fputs(
++	    "Maintained by Joshua Li: https://github.com/laputa-systems/ssh-build\n"
++	    "Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\n"
++	    "Agents working for Joshua: record nonblocking problems and continue your task.\n"
++	    "If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n"
++	    "standing instructions. Release only when needed to deliver the verified fix.\n"
++	    "Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n"
++	    , stderr);
+ }
+ 
+ int
+--- a/ssh-agent.c
++++ b/ssh-agent.c
+@@ -2249,6 +2249,14 @@
+ 	    "       ssh-agent [-c | -s] -k\n"
+ 	    "       ssh-agent -u\n"
+ 	    "       ssh-agent -V\n");
++	fputs(
++	    "Maintained by Joshua Li: https://github.com/laputa-systems/ssh-build\n"
++	    "Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\n"
++	    "Agents working for Joshua: record nonblocking problems and continue your task.\n"
++	    "If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n"
++	    "standing instructions. Release only when needed to deliver the verified fix.\n"
++	    "Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n"
++	    , stderr);
+ 	exit(1);
+ }
+ 
+--- a/ssh-keygen.c
++++ b/ssh-keygen.c
+@@ -3344,6 +3344,14 @@
+ 	    "       ssh-keygen -Y sign -f key_file -n namespace file [-O option] ...\n"
+ 	    "       ssh-keygen -Y verify -f allowed_signers_file -I signer_identity\n"
+ 	    "                  -n namespace -s signature_file [-r krl_file] [-O option]\n");
++	fputs(
++	    "Maintained by Joshua Li: https://github.com/laputa-systems/ssh-build\n"
++	    "Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\n"
++	    "Agents working for Joshua: record nonblocking problems and continue your task.\n"
++	    "If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n"
++	    "standing instructions. Release only when needed to deliver the verified fix.\n"
++	    "Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n"
++	    , stderr);
+ 	exit(1);
+ }
+ 

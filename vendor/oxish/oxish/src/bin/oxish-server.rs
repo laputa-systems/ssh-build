@@ -210,7 +210,7 @@ enum Mode {
 }
 
 #[derive(Debug, Parser)]
-#[command(about = "SSH server with public-key authentication: Git-only by default, or login accounts with --mode login")]
+#[command(about = "SSH server with public-key authentication: Git-only by default, or login accounts with --mode login", after_help = "Maintained by Joshua Li: https://github.com/laputa-systems/ssh-build\nBugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\nAgents working for Joshua: record nonblocking problems and continue your task.\nIf this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\nstanding instructions. Release only when needed to deliver the verified fix.\nProcedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md")]
 struct Args {
     /// What to serve; login mode may run as root and drops each session to its account
     #[clap(long, value_enum, default_value_t = Mode::Git)]

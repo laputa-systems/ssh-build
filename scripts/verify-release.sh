@@ -63,6 +63,7 @@ for product in ssh oxish; do
 done
 
 cd "$repo_root"
+SSH_BIN_DIR=$unpack/ssh OXISH_BIN_DIR=$unpack/oxish/bin sh test/owned-help.sh
 SSH_BIN_DIR=$unpack/ssh sh test/runtime.sh
 SSH_BIN_DIR=$unpack/ssh OXISH_BIN_DIR=$unpack/oxish/bin sh test/oxish-keygen.sh
 SSH_BIN_DIR=$unpack/ssh OXISH_BIN_DIR=$unpack/oxish/bin sh test/e2e-git.sh
