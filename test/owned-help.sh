@@ -2,8 +2,9 @@
 # Built binaries only: SSH_BIN_DIR and OXISH_BIN_DIR identify the products to test.
 set -eu
 : "${SSH_BIN_DIR:?set SSH_BIN_DIR}" "${OXISH_BIN_DIR:?set OXISH_BIN_DIR}"
-TMPDIR=${TMPDIR:-/tmp}
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+TMPDIR=${TMPDIR:-$root/.work/tmp}
+mkdir -p "$TMPDIR"
 script_dir=$root/scripts
 . "$script_dir/lock.sh"
 version=$(lock_field openssh version)
