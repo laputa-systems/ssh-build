@@ -33,8 +33,8 @@ fn connections_that_fail_or_close_release_their_descriptors() {
                 "again",
                 &StreamOptions::default(),
                 None,
-                &mut std::io::sink(),
-                &mut std::io::sink(),
+                std::io::sink(),
+                std::io::sink(),
             );
         }
         drop(connection);

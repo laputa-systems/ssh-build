@@ -199,15 +199,17 @@ impl Connection {
     ///
     /// Each writer is reached through a bounded pipe, so a writer that blocks stops neither the
     /// connection nor the server's requests from being answered. A writer that never returns
-    /// still keeps this call from returning.
-    pub fn exec_stream(
+    /// leaves its thread blocked until the write returns, but the deadline or interrupt returns
+    /// the call.
+    /// On success, returns the result and both owned writers.
+    pub fn exec_stream<O: std::io::Write + Send + 'static, E: std::io::Write + Send + 'static>(
         &mut self,
         command: &str,
         options: &StreamOptions,
         stdin: Option<&mut dyn InputSource>,
-        stdout: &mut dyn std::io::Write,
-        stderr: &mut dyn std::io::Write,
-    ) -> Result<ExecResult, Error> {
+        stdout: O,
+        stderr: E,
+    ) -> Result<(ExecResult, O, E), Error> {
         stream::exec_stream_to_writers(self, command, options, stdin, stdout, stderr)
     }
 

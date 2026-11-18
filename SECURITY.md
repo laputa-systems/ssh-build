@@ -204,6 +204,9 @@ without a finding.
 
 ## Known limitations and accepted risks
 
+- A writer supplied to `Connection::exec_stream` that never returns does not prevent the call
+  from returning on timeout or interruption; its detached writer thread stays blocked until the write returns.
+
 - Key and policy files are read at startup; revoking a key needs a restart.
 - Pre-auth capacity is bounded per address and globally, not per network; a distributed attacker
   can still fill the 32 global slots for 15-45 s at a time.

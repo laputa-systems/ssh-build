@@ -117,26 +117,24 @@ const COPY_BUFFER: usize = 16 * 1024;
 const INPUT_BUFFER: usize = 64 * 1024;
 const INPUT_IDLE_POLL: Duration = Duration::from_millis(10);
 
-/// The calling thread's side of a streamed exec: it feeds stdin into a bounded pipe and drains
-/// the output pipes into the caller's writers, so a writer that blocks stops neither the
-/// connection thread nor its service of the server.
-struct CallerIo<'i, 'o, 'e> {
+/// The calling thread feeds stdin and watches writer completion, the deadline and the interrupt.
+/// Separate writer threads own the output writers and drain their bounded pipes.
+struct CallerIo<'i> {
     stdin: Option<&'i mut dyn InputSource>,
     input: Option<File>,
-    out_pipe: File,
-    err_pipe: File,
-    out: &'o mut dyn Write,
-    err: &'e mut dyn Write,
+    out_done_pipe: File,
+    err_done_pipe: File,
     input_buffer: Zeroizing<Vec<u8>>,
-    copy_buffer: Zeroizing<Vec<u8>>,
     pending: std::ops::Range<usize>,
     input_idle: bool,
     input_eof: bool,
     out_done: bool,
     err_done: bool,
+    deadline: Option<Instant>,
+    interrupt: Option<Interrupt>,
 }
 
-impl CallerIo<'_, '_, '_> {
+impl CallerIo<'_> {
     fn run(&mut self) -> Result<(), Error> {
         if self.stdin.is_none() {
             self.end_input();
@@ -146,22 +144,22 @@ impl CallerIo<'_, '_, '_> {
                 self.end_input();
                 return Ok(());
             }
-            let polled = self.poll_once()?;
-            if !self.out_done && reports(polled[0]) {
-                self.out_done = read_output(
-                    &mut self.out_pipe,
-                    &mut self.copy_buffer,
-                    &mut *self.out,
-                    "stdout",
-                )?;
+            if self.interrupt.as_ref().is_some_and(|interrupt| interrupt()) {
+                return Err(Error::Cancelled {
+                    certainty: Certainty::NotSubmitted,
+                });
             }
-            if !self.err_done && reports(polled[1]) {
-                self.err_done = read_output(
-                    &mut self.err_pipe,
-                    &mut self.copy_buffer,
-                    &mut *self.err,
-                    "stderr",
-                )?;
+            if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(Error::Timeout {
+                    certainty: Certainty::NotSubmitted,
+                });
+            }
+            let polled = self.poll_once()?;
+            if reports(polled[0]) {
+                self.out_done = true;
+            }
+            if reports(polled[1]) {
+                self.err_done = true;
             }
             if self.stdin.is_some()
                 && self.input.is_some()
@@ -197,17 +195,21 @@ impl CallerIo<'_, '_, '_> {
         } else {
             self.input.as_ref().map(AsFd::as_fd)
         };
-        let dummy = if self.out_done { &self.err_pipe } else { &self.out_pipe };
+        let dummy = if self.out_done {
+            &self.err_done_pipe
+        } else {
+            &self.out_done_pipe
+        };
         let mut polled = [
             if self.out_done {
                 PollFd::new(dummy, PollFlags::empty())
             } else {
-                PollFd::new(&self.out_pipe, PollFlags::IN)
+                PollFd::new(&self.out_done_pipe, PollFlags::IN)
             },
             if self.err_done {
                 PollFd::new(dummy, PollFlags::empty())
             } else {
-                PollFd::new(&self.err_pipe, PollFlags::IN)
+                PollFd::new(&self.err_done_pipe, PollFlags::IN)
             },
             stdin_fd.map_or_else(
                 || PollFd::new(dummy, PollFlags::empty()),
@@ -226,20 +228,16 @@ impl CallerIo<'_, '_, '_> {
                 .stdin
                 .as_ref()
                 .is_some_and(|stdin| stdin.descriptor().is_none());
-        let timeout = if immediate {
-            let wait = if self.input_idle {
-                INPUT_IDLE_POLL
-            } else {
-                Duration::ZERO
-            };
-            Some(Timespec {
-                tv_sec: wait.as_secs() as _,
-                tv_nsec: wait.subsec_nanos() as _,
-            })
+        let wait = if immediate && !self.input_idle {
+            Duration::ZERO
         } else {
-            None
+            INPUT_IDLE_POLL
         };
-        match poll(&mut polled, timeout.as_ref()) {
+        let timeout = Timespec {
+            tv_sec: wait.as_secs() as _,
+            tv_nsec: wait.subsec_nanos() as _,
+        };
+        match poll(&mut polled, Some(&timeout)) {
             Ok(0) => Ok([PollFlags::empty(); 4]),
             Ok(_) => Ok([
                 polled[0].revents(),
@@ -320,33 +318,6 @@ impl CallerIo<'_, '_, '_> {
     fn end_input(&mut self) {
         self.input = None;
         self.pending = 0..0;
-    }
-}
-
-fn read_output(
-    pipe: &mut File,
-    buffer: &mut [u8],
-    sink: &mut dyn Write,
-    stream: &'static str,
-) -> Result<bool, Error> {
-    match pipe.read(buffer) {
-        Ok(0) => Ok(true),
-        Ok(read) => {
-            sink.write_all(&buffer[..read])
-                .map_err(|error| sink_error(error, stream))?;
-            Ok(false)
-        }
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(Error::Submitted {
-            detail: format!("{stream} pipe read failed: {error}"),
-        }),
     }
 }
 
@@ -647,25 +618,56 @@ pub(crate) fn session(
     })
 }
 
-/// Run a command for a Rust caller. The connection runs on a scoped thread with bounded pipes
-/// for stdin and both outputs; the calling thread, which owns the non-`Send` writers and input
-/// source, feeds and drains those pipes. A writer that blocks then stalls only the caller's
-/// thread, while the connection keeps answering the server.
-pub(crate) fn exec_stream_to_writers(
+fn writer_thread<W: Write + Send + 'static>(
+    mut pipe: File,
+    mut writer: W,
+    done: File,
+    stream: &'static str,
+) -> Result<std::thread::JoinHandle<Result<W, Error>>, Error> {
+    std::thread::Builder::new()
+        .spawn(move || {
+            let _done = done;
+            let mut buffer = Zeroizing::new(vec![0; COPY_BUFFER]);
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => return Ok(writer),
+                    Ok(read) => writer
+                        .write_all(&buffer[..read])
+                        .map_err(|error| sink_error(error, stream))?,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        return Err(Error::Submitted {
+                            detail: format!("{stream} pipe read failed: {error}"),
+                        });
+                    }
+                }
+            }
+        })
+        .map_err(|error| Error::NotSubmitted {
+            detail: format!("cannot start {stream} writer thread: {error}"),
+        })
+}
+
+pub(crate) fn exec_stream_to_writers<O: Write + Send + 'static, E: Write + Send + 'static>(
     connection: &mut Connection,
     command: &str,
     options: &StreamOptions,
     stdin: Option<&mut dyn InputSource>,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> Result<ExecResult, Error> {
+    stdout: O,
+    stderr: E,
+) -> Result<(ExecResult, O, E), Error> {
+    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
     let (out_pipe, out_writer) = pipe()?;
     let (err_pipe, err_writer) = pipe()?;
+    let (out_done_pipe, out_done) = pipe()?;
+    let (err_done_pipe, err_done) = pipe()?;
     let (mut input_pipe, input_writer) = pipe()?;
     let (abort_reader, abort_writer) = pipe()?;
     nonblocking(&out_writer)?;
     nonblocking(&err_writer)?;
     nonblocking(&input_writer)?;
+    let out_thread = writer_thread(out_pipe, stdout, out_done, "stdout")?;
+    let err_thread = writer_thread(err_pipe, stderr, err_done, "stderr")?;
 
     let has_stdin = stdin.is_some();
     let mut out_sink = FileSink(out_writer);
@@ -697,17 +699,16 @@ pub(crate) fn exec_stream_to_writers(
         let pumped = CallerIo {
             stdin,
             input: Some(input_writer),
-            out_pipe,
-            err_pipe,
-            out: stdout,
-            err: stderr,
+            out_done_pipe,
+            err_done_pipe,
             input_buffer: Zeroizing::new(vec![0; INPUT_BUFFER]),
-            copy_buffer: Zeroizing::new(vec![0; COPY_BUFFER]),
             pending: 0..0,
             input_idle: false,
             input_eof: false,
             out_done: false,
             err_done: false,
+            deadline,
+            interrupt: options.interrupt.clone(),
         }
         .run();
         drop(abort_writer);
@@ -716,16 +717,33 @@ pub(crate) fn exec_stream_to_writers(
     });
     connection.transport().clear_abort();
     let (pumped, joined) = outcome?;
-
-    match joined {
+    let result = match joined {
         Err(payload) => std::panic::resume_unwind(payload),
-        Ok(result) => match pumped {
-            Ok(()) => result,
-            Err(error) => {
-                connection.mark_unusable();
-                Err(error)
-            }
-        },
+        Ok(result) => result,
+    };
+    if let Err(error) = pumped {
+        connection.mark_unusable();
+        let certainty = connection.transport().certainty();
+        return Err(match error {
+            Error::Timeout { .. } => Error::Timeout { certainty },
+            Error::Cancelled { .. } => Error::Cancelled { certainty },
+            error if certainty == Certainty::Submitted => error.after_submission(),
+            error => error,
+        });
+    }
+    let stdout = out_thread
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    let stderr = err_thread
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    match (result, stdout, stderr) {
+        (_, Err(error), _) | (_, _, Err(error)) => {
+            connection.mark_unusable();
+            Err(error)
+        }
+        (Err(error), _, _) => Err(error),
+        (Ok(result), Ok(stdout), Ok(stderr)) => Ok((result, stdout, stderr)),
     }
 }
 

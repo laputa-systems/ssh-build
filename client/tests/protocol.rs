@@ -433,8 +433,8 @@ fn a_peer_that_stops_reading_stalls_the_sender_into_a_timeout() {
             "command",
             &StreamOptions::default(),
             Some(&mut Endless),
-            &mut io::sink(),
-            &mut io::sink(),
+            io::sink(),
+            io::sink(),
         )
         .expect_err("stalled");
     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());

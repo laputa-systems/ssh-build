@@ -114,9 +114,9 @@ fn large_echo_has_equal_digests_and_survives_rekey() {
     let artifact = directory.path().join("large.bin");
     let expected = pattern_file(&artifact, 128 * 1024 * 1024);
     let mut input = File::open(&artifact).expect("open artifact");
-    let mut output = HashSink::new();
-    let mut errors = io::sink();
-    let result = connection
+    let output = HashSink::new();
+    let errors = io::sink();
+    let (result, output, _errors) = connection
         .exec_stream(
             "cat",
             &StreamOptions {
@@ -125,8 +125,8 @@ fn large_echo_has_equal_digests_and_survives_rekey() {
                 timeout: Some(Duration::from_secs(180)),
             },
             Some(&mut input),
-            &mut output,
-            &mut errors,
+            output,
+            errors,
         )
         .expect("128 MiB echo succeeds");
     assert_eq!(result.status, ExecStatus::Exited(0));
@@ -137,9 +137,9 @@ fn large_echo_has_equal_digests_and_survives_rekey() {
 fn saturated_stderr_does_not_deadlock() {
     let fixture = fixture();
     let mut connection = authenticated(&fixture);
-    let mut output = io::sink();
-    let mut errors = CountSink(0);
-    let result = connection
+    let output = io::sink();
+    let errors = CountSink(0);
+    let (result, _output, errors) = connection
         .exec_stream(
             "head -c 8388608 /dev/zero >&2",
             &StreamOptions {
@@ -148,8 +148,8 @@ fn saturated_stderr_does_not_deadlock() {
                 timeout: Some(Duration::from_secs(30)),
             },
             None,
-            &mut output,
-            &mut errors,
+            output,
+            errors,
         )
         .expect("saturated stderr succeeds");
     assert_eq!(result.status, ExecStatus::Exited(0));
@@ -160,8 +160,8 @@ fn saturated_stderr_does_not_deadlock() {
 fn deadline_cancels_a_running_stream() {
     let fixture = fixture();
     let mut connection = authenticated(&fixture);
-    let mut output = io::sink();
-    let mut errors = io::sink();
+    let output = io::sink();
+    let errors = io::sink();
     match connection.exec_stream(
         "sleep 5",
         &StreamOptions {
@@ -170,8 +170,8 @@ fn deadline_cancels_a_running_stream() {
             timeout: Some(Duration::from_millis(200)),
         },
         None,
-        &mut output,
-        &mut errors,
+        output,
+        errors,
     ) {
         Err(Error::Timeout {
             certainty: Certainty::Submitted,
@@ -188,9 +188,9 @@ fn large_stdin_is_hashed_remotely() {
     let artifact = directory.path().join("large.bin");
     let expected = pattern_file(&artifact, 128 * 1024 * 1024);
     let mut input = File::open(&artifact).expect("open artifact");
-    let mut output = Vec::new();
-    let mut errors = io::sink();
-    let result = connection
+    let output = Vec::new();
+    let errors = io::sink();
+    let (result, output, _errors) = connection
         .exec_stream(
             "sha256sum",
             &StreamOptions {
@@ -199,11 +199,82 @@ fn large_stdin_is_hashed_remotely() {
                 timeout: Some(Duration::from_secs(180)),
             },
             Some(&mut input),
-            &mut output,
-            &mut errors,
+            output,
+            errors,
         )
         .expect("128 MiB stdin succeeds");
     assert_eq!(result.status, ExecStatus::Exited(0));
     let text = String::from_utf8(output).expect("sha256sum output is text");
     assert_eq!(text.split_whitespace().next(), Some(expected.as_str()));
+}
+
+struct ForeverWriter(std::sync::mpsc::Sender<()>);
+
+impl Write for ForeverWriter {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        let _ = self.0.send(());
+        loop {
+            std::thread::park();
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn blocked_writer_returns_on_timeout_and_interrupt() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::time::Instant;
+
+    for cancel in [false, true] {
+        let (blocked, waiting) = mpsc::channel();
+        let (finished, result) = mpsc::channel();
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&interrupted);
+        std::thread::spawn(move || {
+            let mut connection = authenticated(&fixture());
+            let options = StreamOptions {
+                timeout: Some(Duration::from_secs(if cancel { 10 } else { 1 })),
+                interrupt: Some(Arc::new(move || flag.load(Ordering::SeqCst))),
+                ..StreamOptions::default()
+            };
+            let outcome = connection.exec_stream(
+                "printf output; sleep 5",
+                &options,
+                None,
+                ForeverWriter(blocked),
+                io::sink(),
+            );
+            let _ = finished.send(outcome.map(|_| ()));
+        });
+        waiting
+            .recv_timeout(Duration::from_secs(5))
+            .expect("writer entered write");
+        let started = Instant::now();
+        if cancel {
+            interrupted.store(true, Ordering::SeqCst);
+        }
+        let error = result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("call returns while writer is blocked")
+            .expect_err("operation is interrupted");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        if cancel {
+            assert!(
+                matches!(error, Error::Cancelled { certainty: Certainty::Submitted }),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, Error::Timeout { certainty: Certainty::Submitted }),
+                "{error:?}"
+            );
+        }
+    }
 }
