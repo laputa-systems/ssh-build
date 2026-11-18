@@ -960,6 +960,7 @@ fn output_held_for_a_full_pipe_is_written_after_the_server_hangs_up() {
             link.send(&packet);
         }
         link.exit_status(channel, 0);
+        link.eof(channel);
         link.hangup();
     });
     let (stdout_file, fifo, _directory) = silent_stdin();
@@ -1046,7 +1047,7 @@ fn a_stalled_writer_does_not_stop_the_connection_from_being_served() {
     };
     let mut connection = peer.connect(TIMEOUT);
     let handle = thread::spawn(move || {
-        let result = connection.exec_stream(
+        connection.exec_stream(
             "command",
             &StreamOptions {
                 timeout: Some(Duration::from_secs(10)),
@@ -1055,8 +1056,7 @@ fn a_stalled_writer_does_not_stop_the_connection_from_being_served() {
             None,
             writer,
             io::sink(),
-        );
-        result
+        )
     });
     let reply = observed
         .recv_timeout(Duration::from_secs(5))

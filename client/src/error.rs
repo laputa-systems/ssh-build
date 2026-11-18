@@ -108,6 +108,11 @@ pub enum Error {
         /// The underlying failure.
         detail: String,
     },
+    /// A failure that occurred after a request may have reached the server.
+    AfterSubmission {
+        /// The original failure.
+        cause: Box<Error>,
+    },
     /// The peer violated the SSH protocol.
     Protocol {
         /// Why the protocol state was rejected.
@@ -180,6 +185,7 @@ impl fmt::Display for Error {
             Self::Submitted { detail } => {
                 write!(formatter, "SSH transport failed after submission: {detail}")
             }
+            Self::AfterSubmission { cause } => write!(formatter, "{cause}"),
             Self::Protocol { detail } => write!(formatter, "SSH protocol error: {detail}"),
             Self::Timeout {
                 certainty: Certainty::NotSubmitted,
@@ -209,7 +215,14 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AfterSubmission { cause } => Some(cause.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
@@ -239,7 +252,7 @@ impl Error {
     /// Whether the failed request may have reached the server.
     pub fn certainty(&self) -> Certainty {
         match self {
-            Self::Submitted { .. } | Self::OutputLimit { .. } => Certainty::Submitted,
+            Self::Submitted { .. } | Self::AfterSubmission { .. } | Self::OutputLimit { .. } => Certainty::Submitted,
             Self::Timeout { certainty } | Self::Cancelled { certainty, .. } => *certainty,
             _ => Certainty::NotSubmitted,
         }
@@ -248,15 +261,14 @@ impl Error {
     pub(crate) fn after_submission(self) -> Self {
         match self {
             Self::Submitted { .. }
+            | Self::AfterSubmission { .. }
             | Self::OutputLimit { .. }
             | Self::Timeout { .. }
             | Self::Cancelled { .. }
             | Self::Rejected { .. }
             | Self::Unusable => self,
             Self::NotSubmitted { detail } => Self::Submitted { detail },
-            other => Self::Submitted {
-                detail: other.to_string(),
-            },
+            other => Self::AfterSubmission { cause: Box::new(other) },
         }
     }
 }

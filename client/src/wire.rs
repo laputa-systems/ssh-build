@@ -202,8 +202,8 @@ impl ReceiveFraming {
 
     fn admits(self, packet_length: u32) -> bool {
         match self {
-            Self::Plain => (packet_length + 4).is_multiple_of(8),
-            Self::Aead { block } => packet_length.is_multiple_of(block),
+            Self::Plain => (packet_length + 4) % 8 == 0,
+            Self::Aead { block } => packet_length % block == 0,
         }
     }
 }

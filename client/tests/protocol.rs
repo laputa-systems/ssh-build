@@ -118,7 +118,9 @@ fn a_connection_closed_after_the_exit_status_still_returns_the_result() {
     let peer = serve_exec(Behavior::default(), 1 << 20, |link, channel| {
         link.data(channel, b"done\n");
         link.exit_status(channel, 3);
+        link.eof(channel);
         link.expect(CHANNEL_EOF);
+        link.expect(CHANNEL_CLOSE);
         link.hangup();
     });
     let mut connection = peer.connect(TIMEOUT);
