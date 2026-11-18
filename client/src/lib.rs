@@ -22,7 +22,7 @@ pub mod wire;
 
 pub use auth::Identity;
 pub use client::{ClientConfig, Connection, RekeyLimits};
-pub use error::{Certainty, Error};
+pub use error::{Certainty, Error, RemoteStop};
 pub use exec::{ExecOptions, ExecResult, ExecStatus};
 pub use session::{Keepalive, PtyRequest, SessionEvents, SessionRequest, TerminalSize};
 pub use stream::{FileSink, InputSource, OutputSink, StreamOptions};

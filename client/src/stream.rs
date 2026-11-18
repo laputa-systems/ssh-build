@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::channel::{Channel, LOCAL_MAX_PACKET, LOCAL_WINDOW, validate_environment};
 use crate::client::Connection;
-use crate::error::{Certainty, Error};
+use crate::error::{Certainty, Error, RemoteStop};
 use crate::exec::{ExecResult, ExecStatus};
 use crate::session::{PtyRequest, SessionEvents, SessionRequest};
 use crate::wire::{Interrupt, Packet, SshReader, plain_text};
@@ -23,7 +23,8 @@ const STDERR_EXTENDED_DATA: u32 = 1;
 pub struct StreamOptions {
     /// The whole-command deadline; without one only the interrupt ends a silent command.
     pub timeout: Option<Duration>,
-    /// Reports that the caller wants the command abandoned.
+    /// Interrupts a running command with TERM and waits briefly for its exit report.
+    /// Acknowledgement does not establish which effects occurred.
     pub interrupt: Option<Interrupt>,
     /// Variables to ask the server to set, by SSH `env` request.
     pub env: Vec<(String, String)>,
@@ -147,6 +148,7 @@ impl CallerIo<'_> {
             if self.interrupt.as_ref().is_some_and(|interrupt| interrupt()) {
                 return Err(Error::Cancelled {
                     certainty: Certainty::NotSubmitted,
+                    remote: crate::error::RemoteStop::Unacknowledged,
                 });
             }
             if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -455,6 +457,7 @@ fn drain_after_disconnect(connection: &mut Connection, outputs: &mut [Drain<'_>;
         if interrupt.as_ref().is_some_and(|interrupt| interrupt()) {
             return Err(Error::Cancelled {
                 certainty: Certainty::Submitted,
+                remote: crate::error::RemoteStop::Unacknowledged,
             });
         }
         let mut slice = DRAIN_POLL;
@@ -722,11 +725,19 @@ pub(crate) fn exec_stream_to_writers<O: Write + Send + 'static, E: Write + Send 
         Ok(result) => result,
     };
     if let Err(error) = pumped {
+        if matches!(error, Error::Cancelled { .. })
+            && let Err(Error::Cancelled { remote: RemoteStop::Acknowledged { .. }, .. }) = &result
+        {
+            return result.map(|_| unreachable!());
+        }
         connection.mark_unusable();
         let certainty = connection.transport().certainty();
         return Err(match error {
             Error::Timeout { .. } => Error::Timeout { certainty },
-            Error::Cancelled { .. } => Error::Cancelled { certainty },
+            Error::Cancelled { .. } => Error::Cancelled {
+                certainty,
+                remote: RemoteStop::Unacknowledged,
+            },
             error if certainty == Certainty::Submitted => error.after_submission(),
             error => error,
         });
@@ -789,6 +800,10 @@ fn run(
     );
     match driven {
         Ok(()) => {}
+        Err(Error::Cancelled { .. }) => {
+            let remote = cancel_remote(connection, &mut channel, &mut completion);
+            return Err(Error::Cancelled { certainty: Certainty::Submitted, remote });
+        }
         Err(_) if connection.transport().peer_closed() && completion.is_reported() => {
             connection.mark_unusable();
             drain_after_disconnect(connection, &mut outputs)?;
@@ -800,6 +815,56 @@ fn run(
         stdout: Vec::new(),
         stderr: Vec::new(),
     })
+}
+
+struct Discard;
+
+impl Write for Discard {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> { Ok(data.len()) }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+impl OutputSink for Discard {
+    fn descriptor(&self) -> Option<BorrowedFd<'_>> { None }
+}
+
+fn cancel_remote(
+    connection: &mut Connection,
+    channel: &mut Channel,
+    completion: &mut Completion,
+) -> RemoteStop {
+    connection.transport().begin_cancel_wait();
+    let mut stdout = Discard;
+    let mut stderr = Discard;
+    let mut outputs = [Drain::new(&mut stdout, "stdout"), Drain::new(&mut stderr, "stderr")];
+    let wait = (|| -> Result<(), Error> {
+        channel.send_term(connection.transport())?;
+        loop {
+            connection.transport().check()?;
+            while let Some(packet) = connection.try_next_packet()? {
+                connection.transport().check()?;
+                on_packet(connection, channel, completion, packet, &mut outputs)?;
+                if completion.is_reported() || channel.close_received {
+                    return Ok(());
+                }
+            }
+            connection.transport().check()?;
+            let events = connection.transport().wait(false)?;
+            if events.contains(PollFlags::IN) || events.contains(PollFlags::HUP) {
+                connection.transport().fill_nonblocking()?;
+            }
+        }
+    })();
+    let remote = if completion.is_reported() {
+        RemoteStop::Acknowledged { status: completion.status() }
+    } else {
+        RemoteStop::Unacknowledged
+    };
+    if wait.is_ok() && channel.close_received {
+        let _ = channel.send_close(connection.transport());
+        let _ = connection.transport().flush_nonblocking();
+    }
+    remote
 }
 
 fn drive(

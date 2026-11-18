@@ -50,7 +50,8 @@ pub struct ExecOptions {
     pub timeout: Option<Duration>,
     /// Maximum bytes captured from each output stream that does not go to a file.
     pub max_output: usize,
-    /// Reports that the caller wants the command abandoned.
+    /// Interrupts a running command with TERM and waits briefly for its exit report.
+    /// Acknowledgement does not establish which effects occurred.
     pub interrupt: Option<Interrupt>,
     /// Variables to ask the server to set, by SSH `env` request.
     pub env: Vec<(String, String)>,

@@ -244,3 +244,12 @@ has been downloaded and checked.
   on a native host with BMI1/AVX2, on Linux x86-64; on an emulated x86-64 CPU without BMI1/AVX2 the
   server refuses to start with a clear message.
 - Two clean `--no-cache` builds of the Linux arm64 server are bit-for-bit identical.
+
+## Native client cancellation
+
+An interrupted running command receives a best-effort SSH TERM request. The client waits at most
+two seconds, and never beyond the operation deadline, for an exit status or signal. Such a report
+acknowledges that the server's command stopped; it does not establish what effects occurred or
+that descendant processes stopped. A channel close alone is not an acknowledgement. Servers may
+ignore the request (including OxiSH login mode), so absent an exit report the remote outcome remains
+unknown and retrying may be unsafe.

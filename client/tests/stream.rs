@@ -267,7 +267,7 @@ fn blocked_writer_returns_on_timeout_and_interrupt() {
         assert!(started.elapsed() < Duration::from_secs(3));
         if cancel {
             assert!(
-                matches!(error, Error::Cancelled { certainty: Certainty::Submitted }),
+                matches!(error, Error::Cancelled { certainty: Certainty::Submitted, ..}),
                 "{error:?}"
             );
         } else {

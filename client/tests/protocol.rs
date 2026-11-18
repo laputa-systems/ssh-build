@@ -472,7 +472,7 @@ fn the_caller_can_cancel_a_running_command() {
     assert!(matches!(
         error,
         Error::Cancelled {
-            certainty: Certainty::Submitted
+            certainty: Certainty::Submitted, ..
         }
     ));
     drop(connection);

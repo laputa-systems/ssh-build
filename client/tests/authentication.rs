@@ -66,7 +66,9 @@ fn authentication_deadline_covers_agent_socket_establishment() {
 #[test]
 fn authentication_cancellation_covers_agent_socket_establishment() {
     let error = authentication_with_a_full_agent_backlog(AgentStop::Cancellation);
-    assert!(matches!(error, Error::Cancelled { certainty: oxish_client::Certainty::NotSubmitted }));
+    assert!(matches!(error, Error::Cancelled {
+        certainty: oxish_client::Certainty::NotSubmitted, ..
+    }));
 }
 
 fn transport_noise() -> Vec<Vec<u8>> {
