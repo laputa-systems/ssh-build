@@ -671,7 +671,8 @@ mod tests {
             certainty: oxish_client::Certainty::Submitted
         }));
         assert!(!is_transient(&Error::Cancelled {
-            certainty: oxish_client::Certainty::Submitted
+            certainty: oxish_client::Certainty::Submitted,
+            remote: oxish_client::RemoteStop::Unacknowledged,
         }));
         assert!(!is_transient(&Error::HostKeyMismatch {
             expected: String::new(),

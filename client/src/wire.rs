@@ -391,6 +391,13 @@ impl Transport {
         previous
     }
 
+    pub(crate) fn begin_cancel_wait(&mut self) {
+        self.interrupt = None;
+        self.abort = None;
+        self.keepalive = None;
+        self.bound_phase(Duration::from_secs(2));
+    }
+
     /// Restore the deadline returned by [`Self::bound_phase`].
     pub fn restore_deadline(&mut self, previous: Option<Instant>) {
         self.deadline = previous;
@@ -441,6 +448,7 @@ impl Transport {
         if self.interrupt.as_ref().is_some_and(|interrupt| interrupt()) {
             return Some(Error::Cancelled {
                 certainty: self.certainty,
+                remote: crate::error::RemoteStop::Unacknowledged,
             });
         }
         if self
@@ -554,6 +562,7 @@ impl Transport {
                     if abort.is_some() && !descriptors[5].revents().is_empty() {
                         return Err(Error::Cancelled {
                             certainty: self.certainty,
+                            remote: crate::error::RemoteStop::Unacknowledged,
                         });
                     }
                     let events = descriptors[0].revents();
@@ -932,6 +941,7 @@ fn connect_stream(
         if interrupt.is_some_and(|interrupt| interrupt()) {
             return Err(Error::Cancelled {
                 certainty: Certainty::NotSubmitted,
+                remote: crate::error::RemoteStop::Unacknowledged,
             });
         }
         let now = Instant::now();

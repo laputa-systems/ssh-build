@@ -208,6 +208,16 @@ impl Channel {
         transport.encode_raw(&packet)
     }
 
+    pub(crate) fn send_term(&mut self, transport: &mut Transport) -> Result<(), Error> {
+        let mut packet = Vec::new();
+        MessageType::ChannelRequest.encode(&mut packet);
+        packet.extend_from_slice(&self.remote_id.to_be_bytes());
+        put_string(&mut packet, b"signal");
+        packet.push(0);
+        put_string(&mut packet, b"TERM");
+        transport.send_raw(&packet)
+    }
+
     /// Send an `exec` request and wait for its reply.
     pub fn exec(&mut self, connection: &mut Connection, command: &[u8]) -> Result<(), Error> {
         self.start(connection, "exec", Some(command))

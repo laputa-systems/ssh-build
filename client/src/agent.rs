@@ -108,6 +108,7 @@ impl Agent {
         if self.interrupt.as_ref().is_some_and(|interrupt| interrupt()) {
             return Err(Error::Cancelled {
                 certainty: Certainty::NotSubmitted,
+                remote: crate::error::RemoteStop::Unacknowledged,
             });
         }
         let now = Instant::now();
@@ -293,7 +294,7 @@ mod tests {
         let checks = Arc::new(AtomicUsize::new(0));
         let interrupt: Interrupt = Arc::new(move || checks.fetch_add(1, Ordering::Relaxed) > 0);
         let error = blocked_attempt(Duration::from_secs(3), None, Some(interrupt));
-        assert!(matches!(error, Error::Cancelled { certainty: Certainty::NotSubmitted }));
+        assert!(matches!(error, Error::Cancelled { certainty: Certainty::NotSubmitted, ..}));
     }
 
     #[test]

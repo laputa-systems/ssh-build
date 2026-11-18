@@ -52,7 +52,8 @@ pub struct SessionRequest {
     pub env: Vec<(String, String)>,
     /// The whole-session deadline; without one only the interrupt ends a silent session.
     pub timeout: Option<Duration>,
-    /// Reports that the caller wants the session abandoned.
+    /// Interrupts a running session with TERM and waits briefly for its exit report.
+    /// Acknowledgement does not establish which effects occurred.
     pub interrupt: Option<Interrupt>,
     /// Probe a silent peer and fail the session when it stays silent too long.
     pub keepalive: Option<Keepalive>,

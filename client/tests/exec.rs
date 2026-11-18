@@ -306,3 +306,69 @@ fn a_failed_command_makes_the_session_unusable() {
         Err(Error::Unusable)
     ));
 }
+
+#[test]
+fn cancellation_reports_remote_stop_or_unacknowledged_for_exec_and_stream() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::time::Instant;
+    use oxish_client::{RemoteStop, StreamOptions};
+
+    for stream in [false, true] {
+        for (command, acknowledged) in [("sleep 30", true),
+            ("trap '' TERM; sleep 30", false)] {
+            let mut connection = authenticated(&fixture());
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&cancelled);
+            let timer = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(500));
+                flag.store(true, Ordering::SeqCst);
+            });
+            let interrupt = Arc::new(move || cancelled.load(Ordering::SeqCst));
+            let start = Instant::now();
+            let error = if stream {
+                connection.exec_stream(command, &StreamOptions {
+                    interrupt: Some(interrupt), ..StreamOptions::default()
+                }, None, std::io::sink(), std::io::sink()).map(|_| ())
+            } else {
+                connection.exec(command, &ExecOptions {
+                    interrupt: Some(interrupt), ..ExecOptions::default()
+                }).map(|_| ())
+            }.expect_err("cancelled");
+            timer.join().expect("timer");
+            assert!(start.elapsed() < Duration::from_secs(4), "{command}: {error:?}");
+            match error {
+                Error::Cancelled { certainty: Certainty::Submitted, remote } => {
+                    assert_eq!(matches!(remote, RemoteStop::Acknowledged { .. }), acknowledged,
+                        "{command}, stream={stream}: {remote:?}");
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn cancellation_wait_does_not_extend_the_command_deadline() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::time::Instant;
+    use oxish_client::RemoteStop;
+
+    let mut connection = authenticated(&fixture());
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancelled);
+    let timer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        flag.store(true, Ordering::SeqCst);
+    });
+    let start = Instant::now();
+    let error = connection.exec("trap '' TERM; sleep 30", &ExecOptions {
+        timeout: Some(Duration::from_secs(1)),
+        interrupt: Some(Arc::new(move || cancelled.load(Ordering::SeqCst))),
+        ..ExecOptions::default()
+    }).expect_err("cancelled");
+    timer.join().expect("timer");
+    assert!(start.elapsed() < Duration::from_millis(1800), "{error:?}");
+    assert!(matches!(error, Error::Cancelled {
+        certainty: Certainty::Submitted, remote: RemoteStop::Unacknowledged
+    }));
+}

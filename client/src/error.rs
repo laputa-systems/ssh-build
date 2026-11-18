@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::exec::ExecStatus;
+
 use oxish_proto::{ProtoError, crypto::CryptoError};
 
 /// Whether a request may have reached the server.
@@ -9,6 +11,18 @@ pub enum Certainty {
     NotSubmitted,
     /// The request may have reached the server; retrying is unsafe.
     Submitted,
+}
+
+/// Evidence that the remote command stopped after cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteStop {
+    /// The server reported the command's exit; its earlier effects remain unknown.
+    Acknowledged {
+        /// The server-reported exit status or signal.
+        status: ExecStatus,
+    },
+    /// No exit report arrived within the cancellation grace period.
+    Unacknowledged,
 }
 
 /// A failure to establish or use an SSH connection.
@@ -108,6 +122,8 @@ pub enum Error {
     Cancelled {
         /// Whether the request may have reached the server.
         certainty: Certainty,
+        /// Whether the server reported the remote command stopped.
+        remote: RemoteStop,
     },
     /// An environment variable name or value cannot be sent.
     InvalidEnvironment {
@@ -172,10 +188,10 @@ impl fmt::Display for Error {
                 certainty: Certainty::Submitted,
             } => write!(formatter, "SSH operation timed out after submission"),
             Self::Cancelled {
-                certainty: Certainty::NotSubmitted,
+                certainty: Certainty::NotSubmitted, ..
             } => write!(formatter, "SSH operation cancelled before submission"),
             Self::Cancelled {
-                certainty: Certainty::Submitted,
+                certainty: Certainty::Submitted, ..
             } => write!(formatter, "SSH operation cancelled after submission"),
             Self::InvalidEnvironment { detail } => write!(formatter, "invalid environment: {detail}"),
             Self::Rejected { request } => write!(formatter, "server rejected the {request} request"),
@@ -224,7 +240,7 @@ impl Error {
     pub fn certainty(&self) -> Certainty {
         match self {
             Self::Submitted { .. } | Self::OutputLimit { .. } => Certainty::Submitted,
-            Self::Timeout { certainty } | Self::Cancelled { certainty } => *certainty,
+            Self::Timeout { certainty } | Self::Cancelled { certainty, .. } => *certainty,
             _ => Certainty::NotSubmitted,
         }
     }

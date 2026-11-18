@@ -368,7 +368,9 @@ fn the_caller_can_cancel_a_connect_that_the_peer_keeps_alive() {
     stop.store(true, Ordering::SeqCst);
     let error = outcome.expect_err("cancelled");
     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
-    assert!(matches!(error, Error::Cancelled { certainty: Certainty::NotSubmitted }), "{error:?}");
+    assert!(matches!(error, Error::Cancelled {
+        certainty: Certainty::NotSubmitted, ..
+    }), "{error:?}");
 }
 
 fn flooding_banner_peer() -> Peer {
@@ -430,7 +432,9 @@ fn the_caller_can_cancel_authentication() {
     .0
     .expect_err("cancelled");
     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
-    assert!(matches!(error, Error::Cancelled { certainty: Certainty::NotSubmitted }), "{error:?}");
+    assert!(matches!(error, Error::Cancelled {
+        certainty: Certainty::NotSubmitted, ..
+    }), "{error:?}");
     peer.finish();
 }
 
@@ -711,7 +715,9 @@ fn the_caller_can_cancel_authentication_while_the_agent_is_silent() {
     });
     assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     let error = outcome.expect_err("cancelled");
-    assert!(matches!(error, Error::Cancelled { certainty: Certainty::NotSubmitted }), "{error:?}");
+    assert!(matches!(error, Error::Cancelled {
+        certainty: Certainty::NotSubmitted, ..
+    }), "{error:?}");
     drop(connection);
     peer.finish();
 }
