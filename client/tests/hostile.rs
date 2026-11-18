@@ -182,8 +182,8 @@ fn a_stalled_write_does_not_buffer_the_peers_traffic_without_bound() {
             "command",
             &StreamOptions::default(),
             Some(&mut Endless),
-            &mut io::sink(),
-            &mut io::sink(),
+            io::sink(),
+            io::sink(),
         )
     });
     let error = outcome.expect_err("the stalled write ends in a timeout");
@@ -213,8 +213,8 @@ fn reads_do_not_reset_the_deadline_of_a_stalled_write() {
             "command",
             &StreamOptions::default(),
             Some(&mut Endless),
-            &mut io::sink(),
-            &mut io::sink(),
+            io::sink(),
+            io::sink(),
         )
         .expect_err("the stalled write times out");
     assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
@@ -1033,7 +1033,7 @@ fn a_stalled_writer_does_not_stop_the_connection_from_being_served() {
         link.expect_close();
     });
     let (release, wait) = mpsc::channel();
-    let mut writer = StalledWriter {
+    let writer = StalledWriter {
         release: wait,
         blocked: false,
         written: 0,
@@ -1047,10 +1047,10 @@ fn a_stalled_writer_does_not_stop_the_connection_from_being_served() {
                 ..StreamOptions::default()
             },
             None,
-            &mut writer,
-            &mut io::sink(),
+            writer,
+            io::sink(),
         );
-        (result, writer.written)
+        result
     });
     let reply = observed
         .recv_timeout(Duration::from_secs(5))
@@ -1058,9 +1058,9 @@ fn a_stalled_writer_does_not_stop_the_connection_from_being_served() {
         .expect("the peer reads the answer");
     assert_eq!(reply, REQUEST_FAILURE);
     release.send(()).expect("release the writer");
-    let (result, written) = handle.join().expect("the exec thread returns");
-    assert_eq!(result.expect("exec").status, ExecStatus::Exited(0));
-    assert_eq!(written, 8 * 32 * 1024);
+    let (result, writer, _) = handle.join().expect("the exec thread returns").expect("exec");
+    assert_eq!(result.status, ExecStatus::Exited(0));
+    assert_eq!(writer.written, 8 * 32 * 1024);
     peer.finish();
 }
 
