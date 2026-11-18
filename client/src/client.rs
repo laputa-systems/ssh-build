@@ -328,6 +328,9 @@ impl Connection {
                 Some(packet) => packet,
                 None => {
                     self.rekey_if_due()?;
+                    if !self.pending.is_empty() {
+                        continue;
+                    }
                     self.transport.recv()?
                 }
             };

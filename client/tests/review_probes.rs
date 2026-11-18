@@ -167,7 +167,7 @@ fn a_host_key_change_at_a_rekey_after_submission_is_still_a_host_key_mismatch() 
         .exec("command", &ExecOptions::default())
         .expect_err("the host key changed");
     assert!(
-        matches!(error, Error::HostKeyMismatch { .. }),
+        matches!(&error, Error::AfterSubmission { cause } if matches!(cause.as_ref(), Error::HostKeyMismatch { .. })),
         "a substituted host key mid-command must keep its trust variant: {error:?}"
     );
     assert_eq!(error.certainty(), Certainty::Submitted, "{error:?}");

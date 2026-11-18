@@ -136,9 +136,11 @@ pub enum Identity {
     },
 }
 
+type Signer = dyn FnMut(&[u8]) -> Result<Vec<u8>, Error>;
+
 struct Credential {
     public_key: Vec<u8>,
-    sign: Box<dyn FnMut(&[u8]) -> Result<Vec<u8>, Error>>,
+    sign: Box<Signer>,
 }
 
 fn credential(

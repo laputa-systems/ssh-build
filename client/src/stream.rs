@@ -804,7 +804,7 @@ fn run(
             let remote = cancel_remote(connection, &mut channel, &mut completion);
             return Err(Error::Cancelled { certainty: Certainty::Submitted, remote });
         }
-        Err(_) if connection.transport().peer_closed() && completion.is_reported() => {
+        Err(_) if connection.transport().peer_closed() && completion.is_reported() && channel.eof_received => {
             connection.mark_unusable();
             drain_after_disconnect(connection, &mut outputs)?;
         }
@@ -896,11 +896,11 @@ fn drive(
         }
         channel.replenish(connection.transport())?;
         let feeding = feed(connection, channel, input)?;
-        if channel.close_received {
+        let holding = outputs.iter().any(Drain::waiting);
+        if channel.close_received || (channel.eof_received && channel.eof_sent && !holding) {
             channel.send_close(connection.transport())?;
         }
         let flushed = connection.transport().flush_nonblocking()?;
-        let holding = outputs.iter().any(Drain::waiting);
         if channel.is_closed() && flushed && !holding {
             break;
         }

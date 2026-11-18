@@ -252,8 +252,9 @@ impl Channel {
 
         let mut early = Vec::new();
         let mut early_bytes = 0;
+        let mut early_data = 0;
         loop {
-            let packet = connection.next_packet()?;
+            let mut packet = connection.next_packet()?;
             if early.len() >= MAX_EARLY_PACKETS {
                 return Err(protocol_error(
                     "peer sent too many messages before the session reply",
@@ -271,25 +272,39 @@ impl Channel {
                 }
                 MessageType::ChannelWindowAdjust => self.window_adjust(&packet.payload)?,
                 MessageType::ChannelData | MessageType::ChannelExtendedData => {
-                    early_bytes += self.pre_reply_data_length(&packet)?;
-                    if early_bytes > LOCAL_WINDOW as usize {
+                    early_data += self.pre_reply_data_length(&packet)?;
+                    if early_data > LOCAL_WINDOW as usize {
                         return Err(protocol_error(
                             "peer sent more than the channel window before the session reply",
                         ));
                     }
-                    early.push(packet);
                 }
                 MessageType::ChannelEof | MessageType::ChannelClose => {
                     self.pre_reply_recipient(&packet.payload)?;
-                    early.push(packet);
                 }
                 MessageType::ChannelRequest => {
-                    self.pre_reply_recipient(&packet.payload)?;
-                    early.push(packet);
+                    let mut reader = SshReader::new(&packet.payload);
+                    self.expect_recipient(reader.u32()?)?;
+                    let request = reader.text()?;
+                    let want_reply = reader.u8()?;
+                    if request != "exit-status" && request != "exit-signal" {
+                        let mut payload = Vec::new();
+                        payload.extend_from_slice(&self.local_id.to_be_bytes());
+                        put_string(&mut payload, request.as_bytes());
+                        payload.push(want_reply);
+                        packet.payload = Zeroizing::new(payload);
+                    }
                 }
                 other => {
                     return Err(protocol_error(format!("unexpected {kind} reply {other:?}")));
                 }
+            }
+            if packet.message_type != MessageType::ChannelWindowAdjust {
+                early_bytes += packet.payload.len() + 1;
+                if early_bytes > LOCAL_WINDOW as usize + 256 * 1024 {
+                    return Err(protocol_error("peer sent too much before the session reply"));
+                }
+                early.push(packet);
             }
         }
     }

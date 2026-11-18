@@ -359,26 +359,6 @@ fn encryption(name: &str) -> Result<EncryptionAlgorithm<'static>, Error> {
     }
 }
 
-fn is_connection_layer(message_type: MessageType) -> bool {
-    matches!(
-        message_type,
-        MessageType::GlobalRequest
-            | MessageType::RequestSuccess
-            | MessageType::RequestFailure
-            | MessageType::ChannelOpen
-            | MessageType::ChannelOpenConfirmation
-            | MessageType::ChannelOpenFailure
-            | MessageType::ChannelWindowAdjust
-            | MessageType::ChannelData
-            | MessageType::ChannelExtendedData
-            | MessageType::ChannelEof
-            | MessageType::ChannelClose
-            | MessageType::ChannelRequest
-            | MessageType::ChannelSuccess
-            | MessageType::ChannelFailure
-    )
-}
-
 const MAX_QUEUED_PACKETS: usize = 4096;
 const MAX_QUEUED_BYTES: usize = LOCAL_WINDOW as usize + 256 * 1024;
 
@@ -426,10 +406,11 @@ fn receive(
             return Ok(packet);
         }
         match (&mut queue, packet.message_type) {
-            (Some(queue), message_type) if is_connection_layer(message_type) => {
+            (Some(_), MessageType::Ignore | MessageType::Debug | MessageType::Unimplemented) => {}
+            (Some(queue), message_type) if message_type != MessageType::Disconnect
+                && !(20..=49).contains(&u8::from(message_type)) => {
                 queue.admit(packet)?;
             }
-            (Some(_), MessageType::Ignore | MessageType::Debug | MessageType::Unimplemented) => {}
             (_, MessageType::Disconnect) => {
                 return Err(protocol("server disconnected during key exchange"));
             }
