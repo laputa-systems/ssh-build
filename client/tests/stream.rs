@@ -213,15 +213,23 @@ struct ForeverWriter(std::sync::mpsc::Sender<()>);
 impl Write for ForeverWriter {
     fn write(&mut self, _: &[u8]) -> io::Result<usize> {
         let _ = self.0.send(());
-        loop { std::thread::park(); }
+        loop {
+            std::thread::park();
+        }
     }
 
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
 fn blocked_writer_returns_on_timeout_and_interrupt() {
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
     use std::time::Instant;
 
     for cancel in [false, true] {
@@ -236,18 +244,37 @@ fn blocked_writer_returns_on_timeout_and_interrupt() {
                 interrupt: Some(Arc::new(move || flag.load(Ordering::SeqCst))),
                 ..StreamOptions::default()
             };
-            let outcome = connection.exec_stream("printf output; sleep 5", &options, None, ForeverWriter(blocked), io::sink());
+            let outcome = connection.exec_stream(
+                "printf output; sleep 5",
+                &options,
+                None,
+                ForeverWriter(blocked),
+                io::sink(),
+            );
             let _ = finished.send(outcome.map(|_| ()));
         });
-        waiting.recv_timeout(Duration::from_secs(5)).expect("writer entered write");
+        waiting
+            .recv_timeout(Duration::from_secs(5))
+            .expect("writer entered write");
         let started = Instant::now();
-        if cancel { interrupted.store(true, Ordering::SeqCst); }
-        let error = result.recv_timeout(Duration::from_secs(3)).expect("call returns while writer is blocked").expect_err("operation is interrupted");
+        if cancel {
+            interrupted.store(true, Ordering::SeqCst);
+        }
+        let error = result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("call returns while writer is blocked")
+            .expect_err("operation is interrupted");
         assert!(started.elapsed() < Duration::from_secs(3));
         if cancel {
-            assert!(matches!(error, Error::Cancelled { certainty: Certainty::Submitted }), "{error:?}");
+            assert!(
+                matches!(error, Error::Cancelled { certainty: Certainty::Submitted }),
+                "{error:?}"
+            );
         } else {
-            assert!(matches!(error, Error::Timeout { certainty: Certainty::Submitted }), "{error:?}");
+            assert!(
+                matches!(error, Error::Timeout { certainty: Certainty::Submitted }),
+                "{error:?}"
+            );
         }
     }
 }
