@@ -76,7 +76,7 @@ impl SshChaCha20Poly1305 {
         self.payload_cipher(sequence_number).cipher(payload);
 
         let mut poly = Poly1305::new(&poly_key);
-        crate::low::zeroise(&mut poly_key);
+        zeroise(&mut poly_key);
         poly.add_bytes(length);
         poly.add_bytes(payload);
         tag_out.copy_from_slice(&poly.finish());
@@ -100,7 +100,7 @@ impl SshChaCha20Poly1305 {
 
         let mut poly_key = self.poly_key(sequence_number);
         let mut poly = Poly1305::new(&poly_key);
-        crate::low::zeroise(&mut poly_key);
+        zeroise(&mut poly_key);
         poly.add_bytes(packet);
         let expected = poly.finish();
 
