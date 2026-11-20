@@ -91,28 +91,41 @@ unsafe fn _zero_bytes(ptr: *mut u8, len: usize) {
 /// # Safety
 /// The caller must ensure that there are `len` bytes readable at `a` and `b`,
 pub(in crate::low) unsafe fn ct_compare_bytes(a: *const u8, b: *const u8, len: usize) -> u8 {
-    let mut acc = 0u8;
+    let acc: u64;
     // SAFETY: reads `len` bytes from `a` and `b`, which the caller guarantees
     unsafe {
         core::arch::asm!(
-            "   2: cmp {len}, 0",
-            "      je  3f",
+            // by-8 loop
+            "   2: cmp {len}, 8",
+            "      jb  3f",
             "      mov {tmp}, [{a}]",
             "      xor {tmp}, [{b}]",
+            "      or  {acc}, {tmp}",
+            "      add {a}, 8",
+            "      add {b}, 8",
+            "      sub {len}, 8",
+            "      jmp 2b",
+            // by-1 loop
+            "   3: test {len}, {len}",
+            "      jz  4f",
+            "      movzx {tmp:e}, byte ptr [{a}]",
+            "      xor {tmp:l}, byte ptr [{b}]",
             "      or  {acc}, {tmp}",
             "      add {a}, 1",
             "      add {b}, 1",
             "      sub {len}, 1",
-            "      jmp 2b",
-            "   3:  ",
+            "      jmp 3b",
+            // acc = (acc != 0) ? !0 : 0
+            "   4: neg {acc}",
+            "      sbb {acc}, {acc}",
             a = inout(reg) a => _,
             b = inout(reg) b => _,
             len = inout(reg) len => _,
-            tmp = inout(reg_byte) 0u8 => _,
-            acc = inout(reg_byte) acc,
+            tmp = out(reg) _,
+            acc = inout(reg) 0u64 => acc,
         );
     }
-    acc
+    acc as u8
 }
 
 /// This macro interdicts is_x86_feature_detected to
@@ -154,60 +167,49 @@ macro_rules! have_cpu_feature {
     ("avx512vl") => {
         crate::low::x86_64::cpu::test_toggle("avx512vl", is_x86_feature_detected!("avx512vl"))
     };
+    ("avx512vbmi") => {
+        crate::low::x86_64::cpu::test_toggle("avx512vbmi", is_x86_feature_detected!("avx512vbmi"))
+    };
+    ("avx512vbmi2") => {
+        crate::low::x86_64::cpu::test_toggle("avx512vbmi2", is_x86_feature_detected!("avx512vbmi2"))
+    };
     ("sha") => {
         crate::low::x86_64::cpu::test_toggle("sha", is_x86_feature_detected!("sha"))
     };
 }
 
-/// Token type reflecting the check for CPU features needed for AVX512-AES-GCM
-///
-/// A value of this type is proof that the CPU dynamic feature check has happened.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct HaveAvx512ForAesGcm(());
+// Token types reflecting the checks for CPU features needed for various functions
+// An instance of one of these types is proof that the CPU dynamic feature check
+// has happened successfully.
 
-impl HaveAvx512ForAesGcm {
-    pub(crate) fn check() -> Option<Self> {
-        match have_cpu_feature!("avx512f")
-            && have_cpu_feature!("avx512bw")
-            && have_cpu_feature!("avx512vl")
-            && have_cpu_feature!("vpclmulqdq")
-            && have_cpu_feature!("vaes")
-        {
-            true => Some(Self(())),
-            false => None,
-        }
-    }
-}
+// AVX512-AES-GCM
+cpu_feature_token!(
+    HaveAvx512ForAesGcm,
+    "avx512f",
+    "avx512bw",
+    "avx512vl",
+    "vpclmulqdq",
+    "vaes"
+);
 
-/// Token type reflecting the check for CPU features needed for SHA256 using SHA-NI
-///
-/// A value of this type is proof that the CPU dynamic feature check has happened.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct HaveSha256(());
+// AVX512-ML-KEM
+cpu_feature_token!(
+    HaveAvx512ForMlKem,
+    "avx512f",
+    "avx512bw",
+    "avx512vbmi",
+    "avx512vbmi2"
+);
 
-impl HaveSha256 {
-    pub(crate) fn check() -> Option<Self> {
-        match have_cpu_feature!("sha") {
-            true => Some(Self(())),
-            false => None,
-        }
-    }
-}
+// AVX512 Keccak-f1600
+cpu_feature_token!(HaveAvx512ForSha3, "avx512f", "avx512vl");
 
-/// Token type reflecting the check for the BMI2 CPU feature
-///
-/// A value of this type is proof that the CPU dynamic feature check has happened.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct HaveBmi2(());
+// SHA256 using SHA-NI
+cpu_feature_token!(HaveSha256, "sha");
 
-impl HaveBmi2 {
-    pub(crate) fn check() -> Option<Self> {
-        match have_cpu_feature!("bmi2") {
-            true => Some(Self(())),
-            false => None,
-        }
-    }
-}
+// BMI2, useful for accelerating SHA-512
+cpu_feature_token!(HaveBmi2, "bmi2");
+
 #[cfg(not(debug_assertions))]
 pub(crate) fn test_toggle(_id: &str, detected: bool) -> bool {
     detected
@@ -224,44 +226,24 @@ pub(crate) fn test_toggle(id: &str, detected: bool) -> bool {
 }
 
 pub(crate) fn verify_cpu_features() {
+    assert!(
+        is_cpu_supported(),
+        "graviola requires adx, aes, avx, avx2, bmi1, and pclmulqdq CPU support. \
+        (rebuild with VALGRIND_BUG_494162 for valgrind compatibility)"
+    );
+}
+
+pub(crate) fn is_cpu_supported() -> bool {
     // these are the cpu features we require unconditionally.
     // this limits the library to x86_64 processors released after approx 2013.
-
-    // mandatory feature requirements
-    // our aes-gcm
-    assert!(
-        have_cpu_feature!("aes"),
-        "graviola requires aes CPU support"
-    );
-    assert!(
-        have_cpu_feature!("pclmulqdq"),
-        "graviola requires pclmulqdq CPU support"
-    );
-
-    // s2n-bignum non _alt versions
-    assert!(
-        have_cpu_feature!("bmi1"),
-        "graviola requires bmi1 CPU support"
-    );
-
-    // see this valgrind bug: https://bugs.kde.org/show_bug.cgi?id=494162
-    assert!(
-        have_cpu_feature!("adx") || option_env!("VALGRIND_BUG_494162").is_some(),
-        "graviola requires adx CPU support (rebuild with VALGRIND_BUG_494162 for valgrind compatibility)"
-    );
-
-    // assorted intrinsic code
-    assert!(
-        is_x86_feature_detected!("avx"),
-        "graviola requires avx CPU support"
-    );
-    assert!(
-        have_cpu_feature!("avx2"),
-        "graviola requires avx2 CPU support"
-    );
-
     // there are more features required, but (eg)
     // ssse3 is implied by avx.
+    have_cpu_feature!("aes")
+        && have_cpu_feature!("pclmulqdq")
+        && have_cpu_feature!("bmi1")
+        && (have_cpu_feature!("adx") || option_env!("VALGRIND_BUG_494162").is_some())
+        && is_x86_feature_detected!("avx")
+        && have_cpu_feature!("avx2")
 }
 
 // --- Safe abstractions over common intrinsics operations ---

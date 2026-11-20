@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.89"
 name = "graviola"
-version = "0.4.1"
+version = "0.4.5"
 build = false
 autolib = false
 autobins = false
@@ -30,6 +30,12 @@ license = "Apache-2.0 OR ISC OR MIT-0"
 repository = "https://github.com/ctz/graviola/"
 resolver = "2"
 
+[package.metadata.docs.rs]
+rustdoc-args = [
+    "--cfg",
+    "graviola_docsrs",
+]
+
 [features]
 __ctgrind = ["dep:crabgrind"]
 default = []
@@ -42,13 +48,16 @@ path = "src/lib.rs"
 version = "1"
 
 [dependencies.crabgrind]
-version = "0.2.6"
+version = "0.4"
 optional = true
 
 [dependencies.getrandom]
-version = "0.3"
+version = "0.4"
 
 [lints.rust.unexpected_cfgs]
 level = "warn"
 priority = 0
-check-cfg = ["cfg(coverage_nightly)"]
+check-cfg = [
+    "cfg(coverage_nightly)",
+    "cfg(graviola_docsrs)",
+]

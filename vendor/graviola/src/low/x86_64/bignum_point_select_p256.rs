@@ -37,8 +37,9 @@ fn _select_aff_p256(z: &mut [u64; 8], table: &[u64], index: u8) {
 
     let ones = index;
 
-    for point in table.chunks_exact(8) {
-        // SAFETY: `point` is 8 words due to `chunks_exact` and readable
+    let (chunks, _) = table.as_chunks::<8>();
+    for point in chunks {
+        // SAFETY: `point` is 8 words due to `as_chunks` and readable
         let (row0, row1) = unsafe {
             (
                 _mm256_loadu_si256(point.as_ptr().add(0).cast()),
@@ -79,8 +80,9 @@ fn _select_jac_p256(z: &mut [u64; 12], table: &[u64], index: u8) {
 
     let ones = index;
 
-    for point in table.chunks_exact(12) {
-        // SAFETY: `point` is 12 words due to `chunks_exact` and readable
+    let (chunks, _) = table.as_chunks::<12>();
+    for point in chunks {
+        // SAFETY: `point` is 12 words due to `as_chunks` and readable
         let (row0, row1, row2) = unsafe {
             (
                 _mm256_loadu_si256(point.as_ptr().add(0).cast()),

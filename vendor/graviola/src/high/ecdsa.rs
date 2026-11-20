@@ -16,22 +16,46 @@ use crate::mid::rng::{RandomSource, SystemRandom};
 ///
 /// You can make one of these by loading a key from a file
 /// with [`Self::from_pkcs8_der()`] or [`Self::from_sec1_der()`],
-/// or by generating a random key using [`Curve::generate_random_key()`].
+/// or by generating a random key using [`Self::generate()`].
 pub struct SigningKey<C: Curve> {
     /// The private key.
     pub private_key: C::PrivateKey,
 }
 
 impl<C: Curve> SigningKey<C> {
+    /// Generate a new random key.
+    pub fn generate() -> Result<Self, Error> {
+        let _entry = Entry::new_secret();
+        let private_key = C::generate_random_key(&mut SystemRandom)?;
+        Ok(Self { private_key })
+    }
+
     /// Load an ECDSA private key in PKCS#8 format.
+    ///
+    /// This supports PKCS#8 v1 (RFC 5208) and v2 (RFC 5958, which may include the public key).
+    /// If the encoding includes the alleged public key, this is checked against the actual one.
     pub fn from_pkcs8_der(bytes: &[u8]) -> Result<Self, Error> {
         let _entry = Entry::new_secret();
-        pkcs8::Key::decode(
+        let p8 = pkcs8::Key::decode(
             bytes,
             &asn1::oid::id_ecPublicKey,
             Some(asn1::Any::ObjectId(C::oid())),
-        )
-        .and_then(|k| Self::from_sec1_der(k.private_key()))
+        )?;
+
+        let key = Self::from_sec1_der(p8.private_key())?;
+
+        if let Some(alleged_public_key) = p8.public_key() {
+            let mut actual_public_key_buf = [0u8; MAX_UNCOMPRESSED_PUBLIC_KEY_LEN];
+            let actual_public_key = key
+                .private_key
+                .public_key_encode_uncompressed(&mut actual_public_key_buf)?;
+
+            if alleged_public_key != actual_public_key {
+                return Err(KeyFormatError::MismatchedPkcs8PublicKey.into());
+            }
+        }
+
+        Ok(key)
     }
 
     /// Encode this private key in PKCS#8 DER format.
@@ -129,6 +153,7 @@ impl<C: Curve> SigningKey<C> {
     /// returned.  [`Error::WrongLength`] is returned if `output` is not sufficient
     /// to contain the full encoding.
     pub fn to_spki_der<'a>(&self, output: &'a mut [u8]) -> Result<&'a [u8], Error> {
+        let _entry = Entry::new_secret();
         let mut pub_key_buffer = [0u8; MAX_UNCOMPRESSED_PUBLIC_KEY_LEN];
         let pub_key_buffer = self
             .private_key
@@ -358,7 +383,6 @@ mod tests {
     use crate::high::curve::Curve;
     use crate::high::{curve, hash};
     use crate::mid::rng::SliceRandomSource;
-    use crate::mid::rng::SystemRandom;
     use crate::test::*;
 
     #[test]
@@ -398,6 +422,21 @@ mod tests {
             Some(Error::Asn1Error(asn1::Error::UnhandledEnumValue)),
         );
 
+        let pkcs8_v2 = include_bytes!("ecdsa/secp256r1.pkcs8v2.der");
+        check_sign_verify::<curve::P256>(
+            SigningKey::<curve::P256>::from_pkcs8_der(pkcs8_v2)
+                .unwrap()
+                .private_key,
+        );
+        let mut wrong_public_key = pkcs8_v2.to_vec();
+        *wrong_public_key.last_mut().unwrap() ^= 0x01;
+        assert_eq!(
+            SigningKey::<curve::P256>::from_pkcs8_der(&wrong_public_key).err(),
+            Some(Error::KeyFormatError(
+                KeyFormatError::MismatchedPkcs8PublicKey
+            )),
+        );
+
         check_sign_verify::<curve::P384>(
             SigningKey::<curve::P384>::from_pkcs8_der(include_bytes!("ecdsa/secp384r1.pkcs8.der"))
                 .unwrap()
@@ -420,11 +459,11 @@ mod tests {
 
     #[test]
     fn smoke_test_ecdsa_sign() {
-        let k = curve::P256::generate_random_key(&mut SystemRandom).unwrap();
-        check_sign_verify::<curve::P256>(k);
+        let k = SigningKey::<curve::P256>::generate().unwrap();
+        check_sign_verify::<curve::P256>(k.private_key);
 
-        let k = curve::P384::generate_random_key(&mut SystemRandom).unwrap();
-        check_sign_verify::<curve::P384>(k);
+        let k = SigningKey::<curve::P384>::generate().unwrap();
+        check_sign_verify::<curve::P384>(k.private_key);
     }
 
     fn check_sign_verify<C: Curve>(private_key: C::PrivateKey) {
@@ -492,7 +531,7 @@ mod tests {
             .public_key_encode_uncompressed(&mut public_key_buf)
             .unwrap();
         let verify = VerifyingKey::<curve::P256> {
-            public_key: <curve::P256 as curve::Curve>::PublicKey::from_x962_uncompressed(
+            public_key: <curve::P256 as Curve>::PublicKey::from_x962_uncompressed(
                 public_key_buf,
             )
             .unwrap(),
@@ -543,7 +582,7 @@ mod tests {
             .unwrap();
         let k = SigningKey::<curve::P256> { private_key };
         let v = VerifyingKey::<curve::P256> {
-            public_key: <curve::P256 as curve::Curve>::PublicKey::from_x962_uncompressed(
+            public_key: <curve::P256 as Curve>::PublicKey::from_x962_uncompressed(
                 public_key,
             )
             .unwrap(),

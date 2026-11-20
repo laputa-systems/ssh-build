@@ -63,10 +63,10 @@ fn _cipher<const ENC: bool>(
     let (rk_first, rks, rk_last) = key.round_keys();
 
     let mut counter = Counter::new(initial_counter);
-    let mut by8_iter = cipher_inout.chunks_exact_mut(128);
+    let (by8_iter, remainder) = cipher_inout.as_chunks_mut::<128>();
     let avx_ghash_table = ghash.table.avx();
 
-    for blocks in by8_iter.by_ref() {
+    for blocks in by8_iter {
         // prefetch to avoid any stall later
         super::cpu::prefetch(blocks, 64);
 
@@ -131,7 +131,7 @@ fn _cipher<const ENC: bool>(
         let c7 = _mm_xor_si128(c7, p7);
         let c8 = _mm_xor_si128(c8, p8);
 
-        // SAFETY: `blocks` is 128 bytes and writable, due to `chunks_exact_mut`
+        // SAFETY: `blocks` is 128 bytes and writable, due to `as_chunks_mut`
         unsafe {
             _mm_storeu_si128(blocks.as_mut_ptr().add(0).cast(), c1);
             _mm_storeu_si128(blocks.as_mut_ptr().add(16).cast(), c2);
@@ -162,15 +162,15 @@ fn _cipher<const ENC: bool>(
         ghash.current = ghash::_mul8(avx_ghash_table, a1, a2, a3, a4, a5, a6, a7, a8);
     }
 
-    let cipher_inout = by8_iter.into_remainder();
+    let cipher_inout = remainder;
 
     if !ENC {
         ghash.add(cipher_inout);
     }
 
     {
-        let mut blocks_iter = cipher_inout.chunks_exact_mut(16);
-        for block in blocks_iter.by_ref() {
+        let (blocks_iter, remainder) = cipher_inout.as_chunks_mut::<16>();
+        for block in blocks_iter {
             let c1 = counter.next();
 
             let mut c1 = _mm_xor_si128(c1, rk_first);
@@ -181,15 +181,15 @@ fn _cipher<const ENC: bool>(
 
             let c1 = _mm_aesenclast_si128(c1, rk_last);
 
-            // SAFETY: `block` is 16 bytes due to `chunks_exact_mut`
+            // SAFETY: `block` is 16 bytes due to `as_chunks_mut`
             let p1 = unsafe { _mm_loadu_si128(block.as_ptr().cast()) };
             let c1 = _mm_xor_si128(c1, p1);
 
-            // SAFETY: `block` is 16 bytes and writable, due to `chunks_exact_mut`
+            // SAFETY: `block` is 16 bytes and writable, due to `as_chunks_mut`
             unsafe { _mm_storeu_si128(block.as_mut_ptr().cast(), c1) };
         }
 
-        let cipher_inout = blocks_iter.into_remainder();
+        let cipher_inout = remainder;
         if !cipher_inout.is_empty() {
             let mut block = [0u8; 16];
             let len = cipher_inout.len();
@@ -240,14 +240,14 @@ fn _cipher_avx512<const ENC: bool>(
     let (rk_first, rks, rk_last) = round_keys.split();
 
     let mut counter = Counter512::new(initial_counter);
-    let mut by16_iter = cipher_inout.chunks_exact_mut(AVX512_MINIMUM_CIPHER_LEN);
+    let (by16_iter, remainder) = cipher_inout.as_chunks_mut::<AVX512_MINIMUM_CIPHER_LEN>();
 
     let ghash_avx512 = match ghash.table {
         GhashTable::Avx512(ghash_avx512) => ghash_avx512,
         _ => panic!("unexpected ghash table variant"),
     };
 
-    for blocks in by16_iter.by_ref() {
+    for blocks in by16_iter {
         // prefetch to avoid any stall later
         super::cpu::prefetch(blocks, 256);
 
@@ -273,7 +273,7 @@ fn _cipher_avx512<const ENC: bool>(
         let c89ab = _mm512_aesenclast_epi128(c89ab, rk_last);
         let ccdef = _mm512_aesenclast_epi128(ccdef, rk_last);
 
-        // SAFETY: `blocks` is 256 bytes due to `chunks_exact_mut`
+        // SAFETY: `blocks` is 256 bytes due to `as_chunks_mut`
         let (p0123, p4567, p89ab, pcdef) = unsafe {
             (
                 _mm512_loadu_si512(blocks.as_ptr().add(0).cast()),
@@ -288,7 +288,7 @@ fn _cipher_avx512<const ENC: bool>(
         let c89ab = _mm512_xor_epi32(c89ab, p89ab);
         let ccdef = _mm512_xor_epi32(ccdef, pcdef);
 
-        // SAFETY: `blocks` is 256 bytes and writable due to `chunks_exact_mut`
+        // SAFETY: `blocks` is 256 bytes and writable due to `as_chunks_mut`
         unsafe {
             _mm512_storeu_si512(blocks.as_mut_ptr().add(0).cast(), c0123);
             _mm512_storeu_si512(blocks.as_mut_ptr().add(64).cast(), c4567);
@@ -313,7 +313,7 @@ fn _cipher_avx512<const ENC: bool>(
         ghash.current = ghash::_mul16(ghash_avx512, a0123, a4567, a89ab, acdef);
     }
 
-    let cipher_inout = by16_iter.into_remainder();
+    let cipher_inout = remainder;
     let mut counter = counter.into_128();
 
     if !ENC {
@@ -321,9 +321,9 @@ fn _cipher_avx512<const ENC: bool>(
     }
 
     {
-        let mut blocks_iter = cipher_inout.chunks_exact_mut(16);
+        let (blocks_iter, remainder) = cipher_inout.as_chunks_mut::<16>();
         let (rk_first, rks, rk_last) = key.round_keys();
-        for block in blocks_iter.by_ref() {
+        for block in blocks_iter {
             let c1 = counter.next();
 
             let mut c1 = _mm_xor_si128(c1, rk_first);
@@ -344,7 +344,7 @@ fn _cipher_avx512<const ENC: bool>(
             }
         }
 
-        let cipher_inout = blocks_iter.into_remainder();
+        let cipher_inout = remainder;
         if !cipher_inout.is_empty() {
             let mut block = [0u8; 16];
             let len = cipher_inout.len();

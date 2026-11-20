@@ -38,9 +38,12 @@ use crate::{
     },
 };
 
+mod sample_ntt;
+
 /// An ML-KEM-768 decapsulation key.
 pub struct DecapKey {
     ek_pke: EncapKey,
+    transpose_a_hat: Coeffs<{ K * K * N }, Ntt>,
     dk_pke: [u8; K * 384],
     h_ek: [u8; 32],
     z: [u8; 32],
@@ -93,7 +96,7 @@ impl DecapKey {
 
         // 1. (ekPKE, dkPKE) <- K-PKE.KeyGen(d)
         // 2. ek <- ekPKE
-        let (ek_pke, dk_pke) = Self::kpke_keygen(&d);
+        let (ek_pke, transpose_a_hat, dk_pke) = Self::kpke_keygen(&d);
 
         // 3. dk <- (dkPKE || ek || H(ek) || z)
         // 4. return (ek, dk)
@@ -105,6 +108,7 @@ impl DecapKey {
         Self {
             dk_pke,
             ek_pke,
+            transpose_a_hat,
             h_ek,
             z,
         }
@@ -116,20 +120,42 @@ impl DecapKey {
         // 5. m' <- K-PKE.Decrypt(dkPKE, c)
         let m_prime = self.kpke_decrypt(c);
 
+        // 7. K‾ <- J(z || c)
+        //
+        // J's input does not depend on m', so its first two blocks share keccak-f
+        // permutations with other work: the first with G in step 6., and the second
+        // with the PRF invocations in step 8.
+        let (c_head, c_rest) = c.0.split_at(sha3::SHAKE_256_R_BYTES - 32);
+        let (j_second_block, c_tail) = c_rest
+            .split_first_chunk::<{ sha3::SHAKE_256_R_BYTES }>()
+            .unwrap();
+        let mut j_first_block = [0u8; sha3::SHAKE_256_R_BYTES];
+        j_first_block[..32].copy_from_slice(&self.z);
+        j_first_block[32..].copy_from_slice(c_head);
+        let mut j = sha3::Shake256Sponge::new();
+
         // 6. (K', r') <- G(m' || h)
-        let mut g = sha3::Sha3_512Context::new();
-        g.update(&m_prime.0);
-        g.update(&self.h_ek);
-        let kr_prime = g.finish();
+        let mut g = sha3::Sha3_512Sponge::new();
+        g.absorb(&m_prime.0);
+        g.absorb(&self.h_ek);
+        let mut kr_prime = [0u8; 64];
+        g.finish_into_and_absorb_block(&mut kr_prime, &mut j, &j_first_block);
         let (k_prime, r_prime) = kr_prime.split_at(32);
         let r_prime = KpkeRandomness(r_prime.try_into().unwrap());
 
-        // 7. K‾ <- J(z || c)
-        let mut k_bar = SharedSecret([0u8; 32]);
-        sha3::Shake256::new(&[&self.z, &c.0]).read(&mut k_bar.0);
-
         // 8. c' <- K-PKE.Encrypt(ekPKE, m', r')
-        let c_prime = self.ek_pke.kpke_encrypt(m_prime, r_prime);
+        let (c_prime, j) = self.ek_pke.kpke_encrypt(
+            &self.transpose_a_hat,
+            m_prime,
+            r_prime,
+            Some((j, j_second_block)),
+        );
+
+        // 7. (continued)
+        let mut j = j.unwrap();
+        j.absorb(c_tail);
+        let mut k_bar = SharedSecret([0u8; 32]);
+        sha3::Shake256::from_sponge(j).read(&mut k_bar.0);
 
         // 9. - 11. if c != c' then K' <- K‾
         // 12. return K'
@@ -139,7 +165,9 @@ impl DecapKey {
     }
 
     /// This is Algorithm 13: K-PKE.KeyGen(d) -> (ek_PKE, dk_PKE)
-    fn kpke_keygen(d: &[u8; 32]) -> (EncapKey, [u8; K * 384]) {
+    ///
+    /// Additionally returns transpose(A^), for use in re-encryption during decapsulation.
+    fn kpke_keygen(d: &[u8; 32]) -> (EncapKey, Coeffs<{ K * K * N }, Ntt>, [u8; K * 384]) {
         // 1. (𝜌, 𝜎) <- G(d || k)
         let mut g = sha3::Sha3_512Context::new();
         g.update(d);
@@ -149,11 +177,16 @@ impl DecapKey {
         let rho: [u8; 32] = rho.try_into().unwrap();
         let sigma = sigma.try_into().unwrap();
 
-        // 3. - 7.
-        let a_hat = Coeffs::sample_poly(&rho);
-
         // 8. - 15.
-        let (s, e) = Coeffs::sample_poly_cbd_dual(sigma);
+        //
+        // These come before steps 3. - 7., so that a spare lane of their keccak-f can
+        // provide the first squeeze of A^'s ninth polynomial.
+        let (ninth, (s, e)) = sample_ntt::NinthPoly::squeeze_first_with(&rho, |sponge, out| {
+            Coeffs::sample_poly_cbd_dual(sigma, Some((sponge, out)))
+        });
+
+        // 3. - 7.
+        let a_hat = Coeffs::sample_poly(&rho, Some(ninth));
 
         // 16. ŝ <- NTT(s)
         let mut s_hat = s.ntt();
@@ -167,13 +200,12 @@ impl DecapKey {
         let encap = EncapKey {
             t_hat: t_hat.to_bytes(),
             rho,
-            transpose_a_hat: a_hat.transpose(),
         };
 
         s_hat.reduce_in_place();
         let decap = s_hat.to_bytes();
 
-        (encap, decap)
+        (encap, a_hat.transpose(), decap)
     }
 
     /// This is Algorithm 15: K-PKE.Decrypt(dk_PKE, c)
@@ -210,7 +242,6 @@ impl Drop for DecapKey {
 pub struct EncapKey {
     t_hat: [u8; K * 384],
     rho: [u8; 32],
-    transpose_a_hat: Coeffs<{ K * K * N }, Ntt>,
 }
 
 impl EncapKey {
@@ -230,13 +261,7 @@ impl EncapKey {
             return Err(Error::OutOfRange);
         }
 
-        let transpose_a_hat = Coeffs::sample_poly_transposed(&rho);
-
-        Ok(Self {
-            t_hat,
-            rho,
-            transpose_a_hat,
-        })
+        Ok(Self { t_hat, rho })
     }
 
     /// Encapsulate a random shared secret, returning the shared secret and a ciphertext.
@@ -262,10 +287,17 @@ impl EncapKey {
     #[doc(hidden)]
     pub fn encaps_internal(self, m: Message) -> (SharedSecret, Ciphertext) {
         // 1. (K, r) <- G(m || H(ek))
-        let mut h = sha3::Sha3_256Context::new();
-        h.update(&self.t_hat);
-        h.update(&self.rho);
-        let h_ek = h.finish();
+        //
+        // The ninth polynomial of transpose(A^) (needed in step 2.) depends only
+        // on rho, so it is squeezed alongside the first three blocks of H(ek).
+        let mut h = sha3::Sha3_256Sponge::new();
+        let (h_blocks, _) = self.t_hat.as_chunks::<{ sha3::SHA3_256_R_BYTES }>();
+        let (first_blocks, _) = h_blocks.split_first_chunk::<3>().unwrap();
+        let ninth = sample_ntt::NinthPoly::squeeze_alongside(&self.rho, &mut h, first_blocks);
+        h.absorb(&self.t_hat[3 * sha3::SHA3_256_R_BYTES..]);
+        h.absorb(&self.rho);
+        let mut h_ek = [0u8; 32];
+        h.finish_into(&mut h_ek);
 
         let mut g = sha3::Sha3_512Context::new();
         g.update(&m.0);
@@ -276,33 +308,40 @@ impl EncapKey {
         let r = KpkeRandomness(r.try_into().unwrap());
 
         // 2. c <- K-PKE.Encrypt(ek, m, r)
-        let c = self.kpke_encrypt(m, r);
+        //  (steps 4. - 8. of K-PKE.Encrypt: expand transpose(A^) from 𝜌)
+        let transpose_a_hat = Coeffs::sample_poly_transposed(&self.rho, Some(ninth));
+        let (c, _) = self.kpke_encrypt(&transpose_a_hat, m, r, None);
         (SharedSecret(k), c)
     }
 
-    fn kpke_encrypt(&self, m: Message, r: KpkeRandomness) -> Ciphertext {
+    /// If `j_spare` is provided, absorb its block alongside the PRFs and return
+    /// the updated sponge.
+    ///
+    /// `transpose_a_hat` must be the matrix expanded from `self.rho`.
+    fn kpke_encrypt(
+        &self,
+        transpose_a_hat: &Coeffs<{ K * K * N }, Ntt>,
+        m: Message,
+        r: KpkeRandomness,
+        j_spare: Option<(sha3::Shake256Sponge, &[u8; sha3::SHAKE_256_R_BYTES])>,
+    ) -> (Ciphertext, Option<sha3::Shake256Sponge>) {
         // 2. t^ <- ByteDecode12(ekPKE[0 ∶ 384k])
         let t_hat = Coeffs::from_bytes(&self.t_hat);
 
         // 3. 𝜌 <- ekPKE[384k ∶ 384k + 32]
         //  - only required for a_hat expansion
-        // 4. - 8. rolled into self.transpose_a_hat.
+        // 4. - 8. rolled into transpose_a_hat (supplied by caller).
 
         // 9. - 12.
         // 13. - 16.
-        let (y, e_1) = Coeffs::sample_poly_cbd_dual(&r.0);
-
         // 17. e_2 <- SamplePolyCBD(PRF (r, N))
-        let mut buf = [0u8; 128];
-        sha3::Shake256::new(&[&r.0, &[K_BYTE * 2]]).read(&mut buf);
-        let mut e_2 = Coeffs::zero();
-        sample_cbd2(&buf, &mut e_2.0);
+        let (y, e_1, e_2, j) = Coeffs::sample_poly_cbd_triple(&r.0, j_spare);
 
         // 18. y^ <- NTT(y)
         let y_hat = y.ntt();
 
         // 19. u <- NTT^-1(transpose(A^) ∘ y^) + e_1
-        let u = self.transpose_a_hat.mul_and_inverse_ntt(&y_hat).add(&e_1);
+        let u = transpose_a_hat.mul_and_inverse_ntt(&y_hat).add(&e_1);
 
         // 20. µ <- Decompress_1(ByteDecode_1(m))
         let mu = Coeffs::from_message_bits(m);
@@ -319,7 +358,7 @@ impl EncapKey {
         v.compress_into_bytes_dv_4(c_2.try_into().unwrap());
 
         // 24. return c <- (c_1 || c_2)
-        c
+        (c, j)
     }
 }
 
@@ -409,114 +448,16 @@ impl<const C: usize, D: Domain> Coeffs<C, D> {
 }
 
 impl Coeffs<{ K * K * N }, Ntt> {
-    fn sample_poly(rho: &[u8; 32]) -> Self {
-        Self::_sample_poly_ntt::<false>(rho)
-    }
-
-    fn sample_poly_transposed(rho: &[u8; 32]) -> Self {
-        Self::_sample_poly_ntt::<true>(rho)
-    }
-
-    fn _sample_poly_ntt<const TRANSPOSED: bool>(rho: &[u8; 32]) -> Self {
-        let mut r = Coeffs::zero();
-
-        // We have K * K polynomials to generate.  In this case, K := 3, so 9.
-        // We have a by-4 keccak, so we can attack the problem in two
-        // sets of four, followed by one straggler.
-
-        let mut work_iter = SAMPLE_POLY_WORK.chunks_exact(4);
-
-        for c4 in work_iter.by_ref() {
-            let inputs = match TRANSPOSED {
-                false => &[
-                    &[c4[0].1, c4[0].0],
-                    &[c4[1].1, c4[1].0],
-                    &[c4[2].1, c4[2].0],
-                    &[c4[3].1, c4[3].0],
-                ],
-                true => &[
-                    &[c4[0].0, c4[0].1],
-                    &[c4[1].0, c4[1].1],
-                    &[c4[2].0, c4[2].1],
-                    &[c4[3].0, c4[3].1],
-                ],
-            };
-
-            Self::_sample_poly_ntt_quad(
-                rho,
-                inputs,
-                (&mut r.0[c4[0].2..c4[3].2 + N]).try_into().unwrap(),
-            );
-        }
-
-        for (i, j, offs) in work_iter.remainder() {
-            let input = match TRANSPOSED {
-                false => &[*j, *i],
-                true => &[*i, *j],
-            };
-            Shake128ForMlKem::new(&[rho, input])
-                .sample_into((&mut r.0[*offs..*offs + N]).try_into().unwrap());
-        }
-
+    fn sample_poly(rho: &[u8; 32], ninth: Option<sample_ntt::NinthPoly>) -> Self {
+        let mut r = Self(sample_ntt::sample_ntt(rho, ninth), PhantomData);
         r.reorder();
-
         r
     }
 
-    fn _sample_poly_ntt_quad(rho: &[u8; 32], inputs: &[&[u8; 2]; 4], outputs: &mut [i16; N * 4]) {
-        let mut buf = [0; 40];
-        buf[..32].copy_from_slice(rho);
-        buf[34] = sha3::SHAKE_PAD_BYTE;
-
-        let mut buf0 = buf;
-        buf0[32..34].clone_from_slice(inputs[0]);
-        let mut buf1 = buf;
-        buf1[32..34].clone_from_slice(inputs[1]);
-        let mut buf2 = buf;
-        buf2[32..34].clone_from_slice(inputs[2]);
-        let mut buf3 = buf;
-        buf3[32..34].clone_from_slice(inputs[3]);
-
-        let sponge_4x = sha3::SqueezingSponge4xShake128::new(&[&buf0, &buf1, &buf2, &buf3]);
-        let (output0, outputs) = outputs.split_at_mut(N);
-        let (output1, outputs) = outputs.split_at_mut(N);
-        let (output2, output3) = outputs.split_at_mut(N);
-
-        let mut samples = [[0; sha3::SHAKE_128_R_BYTES * 3]; 4];
-        let [tsponge0, tsponge1, tsponge2, tsponge3] = sponge_4x.squeeze(&mut samples);
-
-        let tail0 = Shake128ForMlKem::sample(&samples[0], output0.try_into().unwrap());
-        let tail1 = Shake128ForMlKem::sample(&samples[1], output1.try_into().unwrap());
-        let tail2 = Shake128ForMlKem::sample(&samples[2], output2.try_into().unwrap());
-        let tail3 = Shake128ForMlKem::sample(&samples[3], output3.try_into().unwrap());
-
-        if !tail0.is_empty() {
-            Shake128ForMlKem {
-                sponge: tsponge0.restitute(),
-            }
-            .tail_case(tail0);
-        }
-
-        if !tail1.is_empty() {
-            Shake128ForMlKem {
-                sponge: tsponge1.restitute(),
-            }
-            .tail_case(tail1);
-        }
-
-        if !tail2.is_empty() {
-            Shake128ForMlKem {
-                sponge: tsponge2.restitute(),
-            }
-            .tail_case(tail2);
-        }
-
-        if !tail3.is_empty() {
-            Shake128ForMlKem {
-                sponge: tsponge3.restitute(),
-            }
-            .tail_case(tail3);
-        }
+    fn sample_poly_transposed(rho: &[u8; 32], ninth: Option<sample_ntt::NinthPoly>) -> Self {
+        let mut r = Self(sample_ntt::sample_ntt_transposed(rho, ninth), PhantomData);
+        r.reorder();
+        r
     }
 
     // a * s + e
@@ -593,20 +534,6 @@ impl Coeffs<{ K * K * N }, Ntt> {
         r.inverse_ntt()
     }
 }
-
-/// Values for i and j (pre-transpose) plus start offset of N coefficients within
-/// a K * K * N matrix.
-const SAMPLE_POLY_WORK: &[(u8, u8, usize)] = &[
-    (0, 0, 0), //
-    (0, 1, N),
-    (0, 2, N * 2),
-    (1, 0, K * N),
-    (1, 1, N + K * N),
-    (1, 2, N * 2 + K * N),
-    (2, 0, K * N * 2),
-    (2, 1, N + K * N * 2),
-    (2, 2, N * 2 + K * N * 2),
-];
 
 impl Coeffs<{ K * N }, Ntt> {
     /// This is `ByteDecode_12(bytes)`.
@@ -741,7 +668,15 @@ impl Coeffs<{ K * N }, Normal> {
     ///
     /// In other words, it produces two noise vectors, diversifying the seed `sigma`
     /// with indices from 0..2K.
-    fn sample_poly_cbd_dual(sigma: &[u8; 32]) -> (Self, Self) {
+    ///
+    /// `spare` is passed through to [`sha3::Shake256::one_shot_sextet`].
+    fn sample_poly_cbd_dual(
+        sigma: &[u8; 32],
+        spare: Option<(
+            &mut sha3::Shake128SqueezingSponge,
+            &mut [u8; sha3::SHAKE_128_R_BYTES],
+        )>,
+    ) -> (Self, Self) {
         // We need 2 * K samples.
         let mut samples = [[0; 128]; 6];
 
@@ -763,7 +698,11 @@ impl Coeffs<{ K * N }, Normal> {
         buf4[32] = 4;
         buf5[32] = 5;
 
-        sha3::Shake256::one_shot_sextet(&[&buf0, &buf1, &buf2, &buf3, &buf4, &buf5], &mut samples);
+        sha3::Shake256::one_shot_sextet(
+            &[&buf0, &buf1, &buf2, &buf3, &buf4, &buf5],
+            &mut samples,
+            spare,
+        );
 
         let mut a = Coeffs::zero();
         let mut b = Coeffs::zero();
@@ -778,6 +717,46 @@ impl Coeffs<{ K * N }, Normal> {
         }
 
         (a, b)
+    }
+
+    /// This is triple `SamplePolyCBD`, as required by `K-PKE.Encrypt`.
+    ///
+    /// It produces two noise vectors and one noise polynomial, diversifying the
+    /// seed `r` with indices from 0..=2K.  `j_spare` is passed through to
+    /// [`sha3::Shake256::one_shot_septet`].
+    fn sample_poly_cbd_triple(
+        r: &[u8; 32],
+        j_spare: Option<(sha3::Shake256Sponge, &[u8; sha3::SHAKE_256_R_BYTES])>,
+    ) -> (Self, Self, Coeffs<N, Normal>, Option<sha3::Shake256Sponge>) {
+        // We need 2 * K + 1 samples.
+        let mut samples = [[0; 128]; 7];
+
+        let mut buf = [0; 40];
+        buf[..32].copy_from_slice(r);
+        buf[33] = sha3::SHAKE_PAD_BYTE;
+        let inputs = core::array::from_fn(|i| {
+            let mut buf_i = buf;
+            buf_i[32] = i as u8;
+            buf_i
+        });
+
+        let j = sha3::Shake256::one_shot_septet(&inputs, &mut samples, j_spare);
+
+        let mut a = Coeffs::zero();
+        let mut b = Coeffs::zero();
+        let mut c = Coeffs::zero();
+
+        for (sample, poly) in samples.iter().zip(
+            a.0.as_chunks_mut()
+                .0
+                .iter_mut()
+                .chain(b.0.as_chunks_mut().0.iter_mut())
+                .chain(c.0.as_chunks_mut().0.iter_mut()),
+        ) {
+            sample_cbd2(sample, poly);
+        }
+
+        (a, b, c, j)
     }
 
     /// K-wise NTT
@@ -912,8 +891,10 @@ impl<const C: usize> Coeffs<C, Normal> {
 }
 
 fn sample_cbd2(buf: &[u8; 128], out: &mut [i16; 256]) {
-    for (in_bytes, out_coeffs) in buf.chunks_exact(4).zip(out.chunks_exact_mut(8)) {
-        let t = u32::from_le_bytes(in_bytes.try_into().unwrap());
+    let (buf_chunks, _) = buf.as_chunks::<4>();
+    let (out_chunks, _) = out.as_chunks_mut::<8>();
+    for (in_bytes, out_coeffs) in buf_chunks.iter().zip(out_chunks.iter_mut()) {
+        let t = u32::from_le_bytes(*in_bytes);
         let d = (t & 0x5555_5555) + ((t >> 1) & 0x5555_5555);
 
         for (j, coeff) in out_coeffs.iter_mut().enumerate() {
@@ -921,100 +902,6 @@ fn sample_cbd2(buf: &[u8; 128], out: &mut [i16; 256]) {
             let b = ((d >> (4 * j + 2)) & 0x3) as i16;
             *coeff = a - b;
         }
-    }
-}
-
-/// SHAKE128, but oriented at use in ML-KEM's `SampleNTT()`
-struct Shake128ForMlKem {
-    sponge: sha3::Shake128SqueezingSponge,
-}
-
-impl Shake128ForMlKem {
-    fn new(message: &[&[u8]]) -> Self {
-        Self {
-            sponge: sha3::Shake128Sponge::new_for_message(message),
-        }
-    }
-
-    /// Extract 256 coefficients that are < Q by rejection sampling.
-    ///
-    /// Refer to FIPS-203 `SampleNTT()`.  This function is the inner rejection loop.
-    fn sample_into(mut self, output: &mut [i16; 256]) {
-        // First, we squeeze three blocks.  Each block contributes up to 112 coefficients,
-        // so we get 336 candidate coefficients.
-        let mut initial_bytes = [0; sha3::SHAKE_128_R_BYTES * 3];
-        self.sponge.squeeze(&mut initial_bytes);
-
-        let tail = Self::sample(&initial_bytes, output);
-
-        // If we were unlucky, 336 candidate coeffients weren't enough.  That
-        // happens with low but not negligible probability (1 in ~120).
-        if !tail.is_empty() {
-            self.tail_case(tail);
-        }
-    }
-
-    /// Sample into `output` using the bytes `samples`
-    ///
-    /// Returns the _unwritten_ items in output.  Call `tail_case()` with this value if
-    /// non-empty.
-    #[must_use]
-    fn sample<'a>(
-        samples: &'_ [u8; sha3::SHAKE_128_R_BYTES * 3],
-        output: &'a mut [i16; 256],
-    ) -> &'a mut [i16] {
-        let used = low::mlkem_rej_uniform_vartime(output, samples) as usize;
-        output.split_at_mut(used).1
-    }
-
-    fn tail_case(self, output: &mut [i16]) {
-        let tail_iterator = Shake128TwelveBitIterator::new(self.sponge).filter(|f| *f < Q);
-
-        for (out, coeff) in output.iter_mut().zip(tail_iterator) {
-            *out = coeff;
-        }
-    }
-}
-
-/// Iterates over 12-bit samples drawn from `sponge`.
-struct Shake128TwelveBitIterator {
-    sponge: sha3::Shake128SqueezingSponge,
-    samples: [i16; Self::SAMPLE_COUNT],
-    used: usize,
-}
-
-impl Shake128TwelveBitIterator {
-    fn new(sponge: sha3::Shake128SqueezingSponge) -> Self {
-        Self {
-            sponge,
-            samples: [0; Self::SAMPLE_COUNT],
-            used: Self::SAMPLE_COUNT,
-        }
-    }
-
-    /// Each three bytes of SHAKE output yields two coefficients.
-    const SAMPLE_COUNT: usize = sha3::SHAKE_128_R_BYTES / 3 * 2;
-}
-
-impl Iterator for Shake128TwelveBitIterator {
-    type Item = i16;
-
-    #[cold]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.used == self.samples.len() {
-            let mut bytes = [0u8; sha3::SHAKE_128_R_BYTES];
-            self.sponge.squeeze(&mut bytes);
-
-            for (buf, d) in bytes.chunks_exact(3).zip(self.samples.chunks_exact_mut(2)) {
-                d[0] = (u16::from_le_bytes([buf[0], buf[1]]) & 0xfff) as i16;
-                d[1] = (u16::from_le_bytes([buf[1], buf[2]]) >> 4) as i16;
-            }
-            self.used = 0;
-        }
-
-        let item = self.samples[self.used];
-        self.used += 1;
-        Some(item)
     }
 }
 

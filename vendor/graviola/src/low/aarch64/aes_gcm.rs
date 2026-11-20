@@ -48,9 +48,9 @@ fn _cipher<const ENC: bool>(
     let inc = vsetq_lane_u8(1, vdupq_n_u8(0), 15);
     let inc = vreinterpretq_u32_u8(vrev32q_u8(inc));
 
-    let mut by8 = cipher_inout.chunks_exact_mut(128);
+    let (by8, remainder) = cipher_inout.as_chunks_mut::<128>();
 
-    for cipher8 in by8.by_ref() {
+    for cipher8 in by8 {
         cpu::prefetch_rw(cipher8.as_ptr());
         counter = vaddq_u32(counter, inc);
         let b0 = vrev32q_u8(vreinterpretq_u8_u32(counter));
@@ -133,9 +133,9 @@ fn _cipher<const ENC: bool>(
         }
     }
 
-    let mut singles = by8.into_remainder().chunks_exact_mut(16);
+    let (singles, remainder) = remainder.as_chunks_mut::<16>();
 
-    for cipher in singles.by_ref() {
+    for cipher in singles {
         // SAFETY: cipher is 16 bytes long, via `chunks_exact_mut`.
         let input_block = unsafe { vld1q_u8(cipher.as_ptr().add(0).cast()) };
         if !ENC {
@@ -164,7 +164,7 @@ fn _cipher<const ENC: bool>(
     }
 
     {
-        let cipher_inout = singles.into_remainder();
+        let cipher_inout = remainder;
         if !cipher_inout.is_empty() {
             if !ENC {
                 ghash.add(cipher_inout);

@@ -1,8 +1,8 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 6322b9ea4d4c3ac45fee8b6705f1f6f4ea95b9fb..3e350a3d0ae9b8436e675aaa158651c92953dd05 100644
+index 145b9f1a633888f1ebf4209e0f4713bc3e11f38e..bad638cfd8245e9b3f0b0ee2d5ca12f40c8b92aa 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -38,18 +38,6 @@ default = []
+@@ -44,18 +44,6 @@ default = []
  name = "graviola"
  path = "src/lib.rs"
  
@@ -21,19 +21,10 @@ index 6322b9ea4d4c3ac45fee8b6705f1f6f4ea95b9fb..3e350a3d0ae9b8436e675aaa158651c9
  [dependencies.cfg-if]
  version = "1"
  
-@@ -60,32 +48,6 @@ optional = true
+@@ -66,32 +54,6 @@ optional = true
  [dependencies.getrandom]
- version = "0.3"
+ version = "0.4"
  
--[dev-dependencies.aws-lc-rs]
--version = "1.16"
--features = [
--    "alloc",
--    "prebuilt-nasm",
--    "non-fips",
--]
--default-features = false
--
 -[dev-dependencies.hex]
 -version = "0.4"
 -features = ["serde"]
@@ -51,14 +42,23 @@ index 6322b9ea4d4c3ac45fee8b6705f1f6f4ea95b9fb..3e350a3d0ae9b8436e675aaa158651c9
 -[dev-dependencies.tempfile]
 -version = "3.24.0"
 -
+-[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dev-dependencies.aws-lc-rs]
+-version = "1.16"
+-features = [
+-    "alloc",
+-    "prebuilt-nasm",
+-    "non-fips",
+-]
+-default-features = false
+-
  [lints.rust.unexpected_cfgs]
  level = "warn"
  priority = 0
 diff --git a/src/lib.rs b/src/lib.rs
-index c6564aeb91b0f15b6a245194d54b0f36300640e7..d37169c69e820cf95995b13938cc8d8ca3054174 100644
+index 6c5953ef2c1edd90b8699043586432aa18dcf42f..7d27e8a9cea8d021c34f9d10bddf7caabff62e01 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -176,6 +176,7 @@ pub mod hashing {
+@@ -196,6 +196,7 @@ full_platform! {
  pub mod aead {
      pub use super::mid::aes_gcm::AesGcm;
      pub use super::mid::chacha20poly1305::ChaCha20Poly1305;
@@ -80,22 +80,22 @@ index 68eea3919909703d6a8cb681ce47efb35a853288..fe7073ee76e2d4b2afb64f33a189c0c3
  #[cfg(target_arch = "x86_64")]
  impl Zeroable for core::arch::x86_64::__m128i {}
 diff --git a/src/mid/mod.rs b/src/mid/mod.rs
-index 7eb8dd8b3d6d2fd6893e2fbd6d3d642ddfbc64f5..07f91c9f5f260d632ee745df3d86f201b33f3f30 100644
+index e7043e01d482a636a854b562d5b4a4ec284fcaff..e69b41e158cd3f1dd968aa4ba5a94e60ae101053 100644
 --- a/src/mid/mod.rs
 +++ b/src/mid/mod.rs
-@@ -12,6 +12,7 @@ pub(super) mod p384;
- pub(super) mod rng;
- pub(super) mod rsa_priv;
- pub(super) mod rsa_pub;
-+pub(super) mod ssh_chacha20poly1305;
- pub mod sha2;
- pub mod sha3;
- pub(super) mod util;
+@@ -15,6 +15,7 @@ full_platform! {
+     pub(super) mod rng;
+     pub(super) mod rsa_priv;
+     pub(super) mod rsa_pub;
++    pub(super) mod ssh_chacha20poly1305;
+     pub mod sha3;
+     pub(super) mod util;
+     pub(super) mod x25519;
 diff --git a/src/mid/sha2.rs b/src/mid/sha2.rs
-index 575c8cbe3578c299aa9060c7f934ee681838f205..c29addb9efd6b642150ef90cc0e8e7f8a73e94a5 100644
+index 48889af3a44b2c0daa7f5d2b63975fa34409ad29..0a4a7fdad54617f378c65be54a08df01114a9933 100644
 --- a/src/mid/sha2.rs
 +++ b/src/mid/sha2.rs
-@@ -91,6 +91,12 @@ impl Sha256Context {
+@@ -88,6 +88,12 @@ impl Sha256Context {
      pub const OUTPUT_SZ: usize = 32;
  }
  
@@ -108,7 +108,7 @@ index 575c8cbe3578c299aa9060c7f934ee681838f205..c29addb9efd6b642150ef90cc0e8e7f8
  /// A context for incremental computation of SHA384.
  #[derive(Clone)]
  pub struct Sha384Context {
-@@ -221,6 +227,12 @@ impl Sha512Context {
+@@ -215,6 +221,12 @@ impl Sha512Context {
      pub const OUTPUT_SZ: usize = 64;
  }
  

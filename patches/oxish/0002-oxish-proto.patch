@@ -91,7 +91,10 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..1a1b8feb33f7399fe593c3815eeaca20
 -            value: has_command,
 -            next,
 -        } = bool::decode(bytes)?;
--
++        let Some((&tag, next)) = bytes.split_first() else {
++            return Err(ProtoError::InvalidPacket("truncated key options"));
++        };
+ 
 -        let (command, next) = match has_command {
 -            true => {
 -                let Decoded {
@@ -101,10 +104,7 @@ index dab51789c0e6f43d2c649ab208638e363994ae5c..1a1b8feb33f7399fe593c3815eeaca20
 -
 -                let command = str::from_utf8(command)
 -                    .map_err(|_| ProtoError::InvalidPacket("invalid UTF-8 in forced command"))?;
-+        let Some((&tag, next)) = bytes.split_first() else {
-+            return Err(ProtoError::InvalidPacket("truncated key options"));
-+        };
- 
+-
 -                (Some(command.to_owned()), next)
 -            }
 -            false => (None, next),
@@ -228,43 +228,47 @@ diff --git a/oxish-proto/src/channels.rs b/oxish-proto/src/channels.rs
 index ba82dacd74df929decdf39513911e554469059c9..805508b62ab24820adb21df4c5bd2f5a7c1590d8 100644
 --- a/oxish-proto/src/channels.rs
 +++ b/oxish-proto/src/channels.rs
-@@ -110,21 +110,30 @@ pub struct ChannelOpenFailure<'a> {
+@@ -110,15 +110,6 @@ pub struct ChannelOpenFailure<'a> {
  }
  
  impl ChannelOpenFailure<'static> {
 -    /// Failure response for a channel open with too many open channels
 -    pub fn connect_failed(recipient_channel: u32) -> Self {
-+    /// Failure response for a channel open reusing an active channel identifier
-+    pub fn duplicate_id(recipient_channel: u32) -> Self {
+-        Self {
+-            recipient_channel,
+-            reason_code: ChannelOpenFailureReason::ConnectFailed,
+-            description: "too many open channels",
+-        }
+-    }
+-
+     /// Failure response for a channel open reusing an active channel identifier
+     pub fn duplicate_id(recipient_channel: u32) -> Self {
+         Self {
+@@ -128,6 +119,24 @@ impl ChannelOpenFailure<'static> {
+         }
+     }
+ 
++    /// Failure response for a channel open beyond the connection's channel limit
++    pub fn resource_shortage(recipient_channel: u32) -> Self {
 +        Self {
 +            recipient_channel,
-+            reason_code: ChannelOpenFailureReason::AdministrativelyProhibited,
-+            description: "channel ID already in use",
++            reason_code: ChannelOpenFailureReason::ResourceShortage,
++            description: "too many open channels",
 +        }
 +    }
 +
-+    /// Failure response for a channel open beyond the connection's channel limit
-+    pub fn resource_shortage(recipient_channel: u32) -> Self {
-         Self {
-             recipient_channel,
--            reason_code: ChannelOpenFailureReason::ConnectFailed,
-+            reason_code: ChannelOpenFailureReason::ResourceShortage,
-             description: "too many open channels",
-         }
-     }
- 
--    /// Failure response for a channel open reusing an active channel identifier
--    pub fn duplicate_id(recipient_channel: u32) -> Self {
 +    /// Failure response for a channel open whose maximum packet size is too small to serve
 +    pub fn packet_size_too_small(recipient_channel: u32) -> Self {
-         Self {
-             recipient_channel,
-             reason_code: ChannelOpenFailureReason::AdministrativelyProhibited,
--            description: "channel ID already in use",
++        Self {
++            recipient_channel,
++            reason_code: ChannelOpenFailureReason::AdministrativelyProhibited,
 +            description: "maximum packet size is too small",
-         }
-     }
- 
++        }
++    }
++
+     /// Failure response for a channel open with an unsupported channel type
+     pub fn unknown_type(recipient_channel: u32) -> Self {
+         Self {
 @@ -269,6 +278,17 @@ impl<'a> TryFrom<IncomingPacket<'a>> for ChannelRequest<'a> {
                      }
                  }

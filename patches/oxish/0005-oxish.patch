@@ -42,7 +42,8 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
  
 -use crate::{Connection, Error, RootPolicy, receive};
 +use crate::{Connection, Error, login::LoginAccounts, receive};
-+
+ 
+-#[instrument(name = "authentication", skip(session_id, conn, store, provider), fields(addr = %conn.addr))]
 +/// Who may authenticate: the one Git account, or the accounts of login mode
 +pub(crate) enum Principals<'a> {
 +    Git(&'a Account),
@@ -58,8 +59,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 +        }
 +    }
 +}
- 
--#[instrument(name = "authentication", skip(session_id, conn, store, provider), fields(addr = %conn.addr))]
++
 +#[instrument(name = "authentication", skip(session_id, conn, principals, provider), fields(addr = %conn.addr))]
  pub(crate) async fn authenticate<T: AsyncRead + AsyncWrite + Unpin>(
      session_id: &Digest,
@@ -147,7 +147,11 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 -                            send_auth_failed(write)?;
 -                            return Ok(Self::AwaitAuthRequest { cached, attempts });
 -                        };
--
++                let keys = principals.keys_for(user_auth_request.user_name);
++                if keys.is_empty() {
++                    warn!(requested = user_auth_request.user_name, "requested user has no authorized keys");
++                }
+ 
 -                        let Some(user) = store.lookup(name, root_policy) else {
 -                            send_auth_failed(write)?;
 -                            return Ok(Self::AwaitAuthRequest { cached, attempts });
@@ -157,11 +161,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 -                        cached.insert(CachedUser { data: user, keys })
 -                    }
 -                };
-+                let keys = principals.keys_for(user_auth_request.user_name);
-+                if keys.is_empty() {
-+                    warn!(requested = user_auth_request.user_name, "requested user has no authorized keys");
-+                }
- 
+-
 -                let authorized_key = user.keys.iter().find(|key| key.matches(&public_key));
 -                let (sig, authorized_key) = match (public_key.signature, authorized_key) {
 +                let authorized_key = keys.iter().find(|key| key.matches(&public_key));
@@ -256,23 +256,14 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
  
 -/// User store that only contains a single user
 -pub(crate) struct SingleUser(pub(crate) CachedUser);
-+/// The one account that may authenticate, with the keys that may authenticate as it
-+pub struct Account {
-+    pub(crate) name: Username,
-+    pub(crate) keys: Vec<AuthorizedKey>,
-+}
- 
+-
 -impl SingleUser {
 -    #[cfg(test)]
 -    pub(crate) fn with_keys(data: User, keys: Vec<AuthorizedKey>) -> Self {
 -        Self(CachedUser { data, keys })
-+impl Account {
-+    /// Build an account from already validated keys
-+    pub fn new(name: Username, keys: Vec<AuthorizedKey>) -> Self {
-+        Self { name, keys }
-     }
+-    }
 -}
- 
+-
 -impl UserStore for SingleUser {
 -    fn lookup(&self, name: Username, _: RootPolicy) -> Option<User> {
 -        match self.0.data.name == name {
@@ -284,6 +275,51 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 -                    "requested user does not match authorized user",
 -                );
 -                None
+-            }
+-        }
+-    }
+-
+-    fn keys(&self, _: &User, _: &dyn CryptoProvider) -> Vec<AuthorizedKey> {
+-        self.0.keys.clone()
+-    }
+-
+-    fn drop_privileges(&self) -> bool {
+-        false
+-    }
+-}
+-
+-/// A user store resolves a username to a `User` type containing data used for authentication
+-pub trait UserStore: Send + Sync + 'static {
+-    /// Lookup a user by name, returning `None` if the user does not exist or cannot be retrieved
+-    fn lookup(&self, name: Username, root_policy: RootPolicy) -> Option<User>;
+-
+-    /// Lookup the authorized keys for a user
+-    fn keys(&self, user: &User, provider: &dyn CryptoProvider) -> Vec<AuthorizedKey>;
+-
+-    /// Whether the user store should set the UID of the process to the authenticated user
+-    fn drop_privileges(&self) -> bool;
+-}
+-
+-pub(crate) struct CachedUser {
+-    pub(crate) data: User,
++/// The one account that may authenticate, with the keys that may authenticate as it
++pub struct Account {
++    pub(crate) name: Username,
+     pub(crate) keys: Vec<AuthorizedKey>,
+ }
+ 
+-/// A successfully authenticated user, together with the options on the key they authenticated with
+-pub(crate) struct Authenticated {
+-    /// The authenticated user
+-    pub(crate) user: User,
+-    /// Options from the `authorized_keys` entry that matched
+-    pub(crate) options: KeyOptions,
++impl Account {
++    /// Build an account from already validated keys
++    pub fn new(name: Username, keys: Vec<AuthorizedKey>) -> Self {
++        Self { name, keys }
++    }
++
 +    /// Load the account's keys from an `authorized_keys`-format file
 +    ///
 +    /// Fails closed: the file and its directory must belong to the server user and not be
@@ -302,7 +338,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 +            let line = line.trim();
 +            if line.is_empty() || line.starts_with('#') {
 +                continue;
-             }
++            }
 +            let number = index + 1;
 +            let key = AuthorizedKey::from_str(line, provider)
 +                .with_context(|| format!("{}:{number}: invalid key or unsupported option", path.display()))?;
@@ -317,20 +353,27 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 +                path.display()
 +            );
 +            keys.push(key);
-         }
++        }
 +        anyhow::ensure!(!keys.is_empty(), "{} contains no keys", path.display());
 +        anyhow::ensure!(keys.len() <= MAX_KEYS, "{} has too many keys", path.display());
 +        Ok(Self { name, keys })
-     }
-+}
++    }
+ }
  
--    fn keys(&self, _: &User, _: &dyn CryptoProvider) -> Vec<AuthorizedKey> {
--        self.0.keys.clone()
--    }
--
--    fn drop_privileges(&self) -> bool {
--        false
--    }
+-/// User data as retrieved from the system database
+-#[non_exhaustive]
+-#[derive(Clone, Debug)]
+-pub struct User {
+-    /// The user's name
+-    pub name: Username,
+-    /// The user's UID
+-    pub id: u32,
+-    /// The user's GID
+-    pub gid: u32,
+-    /// The user's home directory
+-    pub home_dir: PathBuf,
+-    /// The user's shell
+-    pub shell: PathBuf,
 +/// Refuse a file or directory that someone else could have changed
 +///
 +/// It must belong to the server user (or, with `root_may_own`, to root) and not be writable by
@@ -346,12 +389,8 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 +        name.display()
 +    );
 +    Ok(())
- }
- 
--/// A user store resolves a username to a `User` type containing data used for authentication
--pub trait UserStore: Send + Sync + 'static {
--    /// Lookup a user by name, returning `None` if the user does not exist or cannot be retrieved
--    fn lookup(&self, name: Username, root_policy: RootPolicy) -> Option<User>;
++}
++
 +/// Read a small configuration file that must not be controllable by anyone else
 +///
 +/// The file and its directory must belong to the server user (or, with `root_may_own`, to root)
@@ -360,15 +399,11 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 +    let contents = read_trusted_bytes(path, what, root_may_own)?;
 +    String::from_utf8(contents).with_context(|| format!("{} is not valid UTF-8", path.display()))
 +}
- 
--    /// Lookup the authorized keys for a user
--    fn keys(&self, user: &User, provider: &dyn CryptoProvider) -> Vec<AuthorizedKey>;
++
 +/// [`read_trusted_file`] without requiring the contents to be text
 +pub(crate) fn read_trusted_bytes(path: &Path, what: &str, root_may_own: bool) -> anyhow::Result<Vec<u8>> {
 +    use std::{fs::OpenOptions, io::Read as _, os::unix::fs::OpenOptionsExt as _};
- 
--    /// Whether the user store should set the UID of the process to the authenticated user
--    fn drop_privileges(&self) -> bool;
++
 +    let parent = match path.parent() {
 +        Some(parent) if !parent.as_os_str().is_empty() => parent,
 +        _ => Path::new("."),
@@ -393,11 +428,8 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 +    file.read_to_end(&mut contents)
 +        .with_context(|| format!("failed to read `{}`", path.display()))?;
 +    Ok(contents)
- }
- 
--pub(crate) struct CachedUser {
--    pub(crate) data: User,
--    pub(crate) keys: Vec<AuthorizedKey>,
++}
++
 +/// Refuse to execute a program, as a privileged listener, that someone else could have replaced
 +///
 +/// The program must be a regular file (not a symlink) owned by the server user or root and not
@@ -422,31 +454,12 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
 +        path.display()
 +    );
 +    check_owner_and_mode(&meta, path, true)
- }
- 
--/// A successfully authenticated user, together with the options on the key they authenticated with
++}
++
 +/// A successfully authenticated connection, with the options on the key it authenticated with
- pub(crate) struct Authenticated {
--    /// The authenticated user
--    pub(crate) user: User,
-     /// Options from the `authorized_keys` entry that matched
-     pub(crate) options: KeyOptions,
--}
--
--/// User data as retrieved from the system database
--#[non_exhaustive]
--#[derive(Clone, Debug)]
--pub struct User {
--    /// The user's name
--    pub name: Username,
--    /// The user's UID
--    pub id: u32,
--    /// The user's GID
--    pub gid: u32,
--    /// The user's home directory
--    pub home_dir: PathBuf,
--    /// The user's shell
--    pub shell: PathBuf,
++pub(crate) struct Authenticated {
++    /// Options from the `authorized_keys` entry that matched
++    pub(crate) options: KeyOptions,
 +    /// The user name the client authenticated as
 +    pub(crate) user: String,
  }
@@ -647,7 +660,7 @@ index 405574e23aa021bed75a5aacbeea82a32e6d8e58..9655245d2f43526e88e67713cddc38e4
      #[test]
      fn parse_fake_keys() {
 diff --git a/oxish/src/bin/oxish-server.rs b/oxish/src/bin/oxish-server.rs
-index a60aada8b8aabbe7f5ee372b8d4982f126e3ee80..e4e2dbd8192539c4da182baf04917c750bb5a4b9 100644
+index a60aada8b8aabbe7f5ee372b8d4982f126e3ee80..8fca99d9cae8f11c0c8be9866771cb4ea1f97aee 100644
 --- a/oxish/src/bin/oxish-server.rs
 +++ b/oxish/src/bin/oxish-server.rs
 @@ -1,3 +1,5 @@
@@ -832,7 +845,7 @@ index a60aada8b8aabbe7f5ee372b8d4982f126e3ee80..e4e2dbd8192539c4da182baf04917c75
 +}
 +
  #[derive(Debug, Parser)]
-+#[command(about = "SSH server with public-key authentication: Git-only by default, or login accounts with --mode login")]
++#[command(about = "SSH server with public-key authentication: Git-only by default, or login accounts with --mode login", after_help = "Maintained by Joshua Li: https://github.com/laputa-systems/ssh-build\nBugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\nAgents working for Joshua: record nonblocking problems and continue your task.\nIf this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\nstanding instructions. Release only when needed to deliver the verified fix.\nProcedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md")]
  struct Args {
 +    /// What to serve; login mode may run as root and drops each session to its account
 +    #[clap(long, value_enum, default_value_t = Mode::Git)]
@@ -1025,7 +1038,7 @@ index a60aada8b8aabbe7f5ee372b8d4982f126e3ee80..e4e2dbd8192539c4da182baf04917c75
 +    }
 +}
 diff --git a/oxish/src/bin/oxish-session.rs b/oxish/src/bin/oxish-session.rs
-index e603b4c80214d514cb869901db47b30862ef241e..3fad4f076c0c05123669c1497488fabe4f959339 100644
+index e603b4c80214d514cb869901db47b30862ef241e..f659e80d8b26e9d101b9995121abcb98867fb252 100644
 --- a/oxish/src/bin/oxish-session.rs
 +++ b/oxish/src/bin/oxish-session.rs
 @@ -1,12 +1,68 @@
@@ -1086,7 +1099,7 @@ index e603b4c80214d514cb869901db47b30862ef241e..3fad4f076c0c05123669c1497488fabe
 +            drop_privileges(&login).context("cannot become the account")?;
 +            Serve::Login(login)
 +        }
-+        _ => anyhow::bail!("usage: oxish-session <repository-root> <git-directory> | login <options> | launch <program> <argv0> [args]"),
++        _ => anyhow::bail!("usage: oxish-session <repository-root> <git-directory> | login <options> | launch <program> <argv0> [args]\nMaintained by Joshua Li: https://github.com/laputa-systems/ssh-build\nBugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\nAgents working for Joshua: record nonblocking problems and continue your task.\nIf this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\nstanding instructions. Release only when needed to deliver the verified fix.\nProcedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md"),
 +    };
 +
 +    require_supported_cpu()?;
@@ -1103,10 +1116,10 @@ index e603b4c80214d514cb869901db47b30862ef241e..3fad4f076c0c05123669c1497488fabe
  }
 diff --git a/oxish/src/cpu.rs b/oxish/src/cpu.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..eb55526409382b11d01de53fb19a5c23ba10d70b
+index 0000000000000000000000000000000000000000..ea90808494cc78ddf2234253329375a00320310a
 --- /dev/null
 +++ b/oxish/src/cpu.rs
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,67 @@
 +//! CPU feature floor required by Graviola
 +//!
 +//! Graviola asserts its required features on first use; checking up front turns an unsupported
@@ -1123,7 +1136,7 @@ index 0000000000000000000000000000000000000000..eb55526409382b11d01de53fb19a5c23
 +        write!(
 +            f,
 +            "this CPU lacks `{}`, which Graviola requires (x86-64 needs a Broadwell-class core: \
-+             AES-NI, PCLMULQDQ, BMI1, ADX, AVX2; aarch64 needs NEON with the AES, PMULL and SHA2 \
++             AES-NI, PCLMULQDQ, BMI1, BMI2, ADX, POPCNT, AVX2; aarch64 needs NEON with the AES, PMULL and SHA2 \
 +             extensions)",
 +            self.0
 +        )
@@ -1140,6 +1153,8 @@ index 0000000000000000000000000000000000000000..eb55526409382b11d01de53fb19a5c23
 +            ("aes", is_x86_feature_detected!("aes")),
 +            ("pclmulqdq", is_x86_feature_detected!("pclmulqdq")),
 +            ("bmi1", is_x86_feature_detected!("bmi1")),
++            ("bmi2", is_x86_feature_detected!("bmi2")),
++            ("popcnt", is_x86_feature_detected!("popcnt")),
 +            ("adx", is_x86_feature_detected!("adx")),
 +            ("avx", is_x86_feature_detected!("avx")),
 +            ("avx2", is_x86_feature_detected!("avx2")),
@@ -3832,11 +3847,12 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..7d4c017e64602d0f4d139033b1e254a4
      pub fn new(
 -        store: Box<dyn UserStore>,
 +        account: Account,
-+        host_keys: HostKeys,
-+        session: PathBuf,
+         host_keys: HostKeys,
+         session: PathBuf,
 +        policy: GitPolicy,
-+        provider: &'static dyn CryptoProvider,
-+    ) -> anyhow::Result<Self> {
+         provider: &'static dyn CryptoProvider,
+     ) -> anyhow::Result<Self> {
+-        Ok(Self {
 +        anyhow::ensure!(
 +            rustix::process::geteuid().as_raw() != 0,
 +            "refusing to run as root; use a dedicated unprivileged Git account"
@@ -3853,12 +3869,11 @@ index 22f918accf1bad482547186e8bcb6c26fb5af238..7d4c017e64602d0f4d139033b1e254a4
 +    /// by others, because a privileged listener executes it.
 +    pub fn login(
 +        accounts: LoginAccounts,
-         host_keys: HostKeys,
-         session: PathBuf,
++        host_keys: HostKeys,
++        session: PathBuf,
 +        policy: LoginPolicy,
-         provider: &'static dyn CryptoProvider,
-     ) -> anyhow::Result<Self> {
--        Ok(Self {
++        provider: &'static dyn CryptoProvider,
++    ) -> anyhow::Result<Self> {
 +        anyhow::ensure!(cfg!(target_os = "linux"), "login mode is supported on Linux only");
 +        policy.validate()?;
 +        anyhow::ensure!(session.is_absolute(), "the session binary path must be absolute");
@@ -4439,13 +4454,6 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -                debug!(channel_id = %request.recipient_channel, exit_status = %status, "received exit-status from client");
 -                if request.want_reply {
 -                    write.encode(&channel.failure())?;
--                }
--                return Ok(());
--            }
--            // Agent forwarding is not supported -- only reply when asked
--            ChannelRequestType::AuthAgentReq | ChannelRequestType::Unknown(_) => {
--                if request.want_reply {
--                    write.encode(&channel.failure())?;
 +            ChannelRequestType::Exec(exec) => {
 +                if !matches!(channel.run, Run::Idle) {
 +                    warn!("rejecting second exec request on a channel");
@@ -4482,8 +4490,8 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
                  }
 -                return Ok(());
              }
--            _ => {
--                warn!(request_type = ?request.r#type, "ignoring channel request");
+-            // Agent forwarding is not supported -- only reply when asked
+-            ChannelRequestType::AuthAgentReq | ChannelRequestType::Unknown(_) => {
 -                if request.want_reply {
 -                    write.encode(&channel.failure())?;
 -                }
@@ -4492,6 +4500,13 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +                warn!(request_type = ?other, "rejecting unsupported channel request");
 +                false
              }
+-            _ => {
+-                warn!(request_type = ?request.r#type, "ignoring channel request");
+-                if request.want_reply {
+-                    write.encode(&channel.failure())?;
+-                }
+-                return Ok(());
+-            }
 -        }
 +        };
  
@@ -4712,11 +4727,16 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -            | None => {
 -                debug!(channel_id = %close.recipient_channel, "received channel close from client; removing");
 -                self.channels.remove(&close.recipient_channel);
+-            }
+-        }
+-
 +        debug!(channel_id = %close.recipient_channel, "received channel close from client; removing");
 +        self.channels.remove(&close.recipient_channel);
-+        Ok(())
-+    }
-+
+         Ok(())
+     }
+ 
+-    pub(crate) fn channels_mut(&mut self) -> &mut BTreeMap<u32, Channel> {
+-        &mut self.channels
 +    /// Drive every channel: feed stdin, forward output, report the exit
 +    ///
 +    /// Resolves once at least one message was written, after writing at most a bounded batch.
@@ -4738,19 +4758,16 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +                Ok(true) => wrote = true,
 +                Ok(false) => {}
 +                Err(error) => return Poll::Ready(Err(error)),
-             }
++            }
 +            self.cursor = id.wrapping_add(1);
-         }
- 
--        Ok(())
++        }
++
 +        match wrote {
 +            true => Poll::Ready(Ok(())),
 +            false => Poll::Pending,
 +        }
-     }
- 
--    pub(crate) fn channels_mut(&mut self) -> &mut BTreeMap<u32, Channel> {
--        &mut self.channels
++    }
++
 +    /// Stop every running command, then wait until each one, including those whose channels
 +    /// closed earlier, has been reaped
 +    pub(crate) async fn shutdown(&mut self) {
@@ -4773,7 +4790,6 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
  
 -pub(crate) struct TerminalsFuture<'a> {
 -    channels: &'a mut BTreeMap<u32, Channel>,
--    write: &'a mut WriteState,
 +struct Channel {
 +    remote_id: u32,
 +    /// Bytes we may still send to the client
@@ -4790,11 +4806,8 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +    env: Vec<(OsString, OsString)>,
 +    run: Run,
 +    close_sent: bool,
- }
- 
--impl<'a> TerminalsFuture<'a> {
--    pub(crate) fn new(channels: &'a mut BTreeMap<u32, Channel>, write: &'a mut WriteState) -> Self {
--        Self { channels, write }
++}
++
 +enum Run {
 +    /// No command requested yet
 +    Idle,
@@ -4840,11 +4853,9 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +            drain: None,
 +            buf: Box::new([0; READ_CHUNK]),
 +        }
-     }
- }
- 
--impl<'a> Future for TerminalsFuture<'a> {
--    type Output = Result<(), Error>;
++    }
++}
++
 +impl Channel {
 +    /// Start the account's shell (`command` is `None`) or run `command` through it
 +    fn start_login(&mut self, login: &LoginSession, command: Option<&[u8]>, processes: &Arc<Semaphore>) -> bool {
@@ -4856,12 +4867,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +            warn!("rejecting request: too many live commands");
 +            return false;
 +        };
- 
--    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
--        let Self { channels, write } = &mut *self;
--        let mut remove = None;
--        'channels: for (&local_id, channel) in channels.iter_mut() {
--            let Some(state) = &mut channel.terminal else {
++
 +        let mut spec = login.command(command);
 +        if let Some(terminal) = &self.terminal {
 +            if !terminal.term.is_empty() {
@@ -5046,27 +5052,13 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +                active.stderr_backlog.drain(..n);
 +                self.send_window -= n as u32;
 +                wrote = true;
-                 continue;
++                continue;
 +            }
 +
 +            let Some(process) = active.process.as_mut() else {
 +                break;
-             };
- 
--            let terminal = loop {
--                match state {
--                    TerminalState::Running(terminal) => break terminal,
--                    TerminalState::Requested(_) => continue 'channels,
--                    TerminalState::Exiting { terminal, deadline } => match terminal.poll_wait(cx) {
--                        Poll::Ready(Ok(status)) => {
--                            *state = match status.code() {
--                                Some(code) => TerminalState::Exited(code as u32),
--                                None => TerminalState::Closing,
--                            };
--                        }
--                        Poll::Ready(Err(error)) => {
--                            warn!(%error, "error waiting for shell to exit");
--                            *state = TerminalState::Closing;
++            };
++
 +            let mut sent = false;
 +            for output in [active.next_output, other(active.next_output)] {
 +                if !process.output_open(output) {
@@ -5087,7 +5079,195 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +                                data_type_code: EXTENDED_DATA_STDERR,
 +                                data,
 +                            })?,
-                         }
++                        }
++                        self.send_window -= n as u32;
++                        active.next_output = other(output);
++                        if let Some(timer) = active.drain.as_mut() {
++                            timer.as_mut().reset(Instant::now() + DRAIN_AFTER_EXIT);
++                        }
++                        sent = true;
++                        break;
++                    }
++                    Poll::Ready(Err(error)) => {
++                        warn!(%error, ?output, "error reading git output");
++                    }
++                    Poll::Pending => {}
++                }
++            }
++
++            if !sent {
++                break;
++            }
++            wrote = true;
++        }
++
++        if active.outcome.is_none() {
++            if let Some(process) = active.process.as_mut() {
++                match process.poll_exit(cx) {
++                    Poll::Ready(Ok(status)) => {
++                        active.outcome = Some(match status.code() {
++                            Some(code) => Outcome::Exited(code as u32),
++                            None => Outcome::Signaled(signal_name(status.signal())),
++                        });
++                        process.close_stdin();
++                        active.drain = Some(Box::pin(sleep(DRAIN_AFTER_EXIT)));
++                    }
++                    Poll::Ready(Err(error)) => {
++                        warn!(%error, "error waiting for git to exit");
++                        active.outcome = Some(Outcome::Exited(255));
++                    }
++                    Poll::Pending => {}
++                }
++            }
++        }
++
++        if let (Some(timer), Some(process)) = (active.drain.as_mut(), active.process.as_mut()) {
++            if self.send_window > 0 && !process.outputs_closed() && timer.as_mut().poll(cx).is_ready() {
++                warn!("git exited but its output pipes stayed open; closing them");
++                process.close_output(Output::Stdout);
++                process.close_output(Output::Stderr);
++            }
++        }
++
++        let outputs_done = active.stderr_backlog.is_empty()
++            && active.process.as_ref().is_none_or(Process::outputs_closed);
++
++        if outputs_done && !active.eof_sent && active.outcome.is_some() {
++            write.encode(&ChannelEof {
++                recipient_channel: self.remote_id,
++            })?;
++            active.eof_sent = true;
++            wrote = true;
++        }
++
++        if active.eof_sent {
++            if let Some(outcome) = active.outcome {
++                match outcome {
++                    Outcome::Exited(status) => write.encode(&ChannelRequest {
++                        recipient_channel: self.remote_id,
++                        r#type: ChannelRequestType::ExitStatus(status),
++                        want_reply: false,
++                    })?,
++                    Outcome::Signaled(name) => write.encode(&ChannelRequest {
++                        recipient_channel: self.remote_id,
++                        r#type: ChannelRequestType::ExitSignal(ExitSignal { name }),
++                        want_reply: false,
++                    })?,
++                }
++
++                if !self.close_sent {
++                    self.close_sent = true;
++                    write.encode(&ChannelClose {
++                        recipient_channel: self.remote_id,
++                    })?;
++                }
++                self.run = Run::Finished;
++                wrote = true;
++            }
++        }
++
++        Ok(wrote)
++    }
++
++    /// Tell the client how much of its window the child has consumed
++    fn return_credit(&mut self, write: &mut WriteState) -> Result<bool, Error> {
++        let drained = match &self.run {
++            Run::Active(active) => active.process.as_ref().is_none_or(Process::stdin_drained),
++            Run::Sftp(sftp) => !sftp.core.has_request(),
++            _ => true,
++        };
++
++        if self.close_sent || self.credit == 0 || (self.credit < INITIAL_WINDOW_SIZE / 4 && !drained) {
++            return Ok(false);
++        }
++
++        write.encode(&ChannelWindowAdjust {
++            recipient_channel: self.remote_id,
++            bytes_to_add: self.credit,
++        })?;
++        self.receive_window = self.receive_window.saturating_add(self.credit);
++        self.credit = 0;
++        Ok(true)
++    }
++}
++
++fn other(output: Output) -> Output {
++    match output {
++        Output::Stdout => Output::Stderr,
++        Output::Stderr => Output::Stdout,
++    }
++}
++
++fn signal_name(signal: Option<i32>) -> &'static str {
++    match signal {
++        Some(libc::SIGHUP) => "HUP",
++        Some(libc::SIGINT) => "INT",
++        Some(libc::SIGQUIT) => "QUIT",
++        Some(libc::SIGABRT) => "ABRT",
++        Some(libc::SIGILL) => "ILL",
++        Some(libc::SIGFPE) => "FPE",
++        Some(libc::SIGUSR1) => "USR1",
++        Some(libc::SIGUSR2) => "USR2",
++        Some(libc::SIGKILL) => "KILL",
++        Some(libc::SIGSEGV) => "SEGV",
++        Some(libc::SIGPIPE) => "PIPE",
++        Some(libc::SIGALRM) => "ALRM",
++        Some(libc::SIGTERM) => "TERM",
++        _ => "KILL",
++    }
++}
++
++impl fmt::Debug for Channel {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("Channel")
++            .field("remote_id", &self.remote_id)
++            .field("send_window", &self.send_window)
++            .field("receive_window", &self.receive_window)
++            .finish_non_exhaustive()
++    }
++}
++
++/// Resolves when [`Channels::poll`] has written something
++pub(crate) struct ChannelsFuture<'a> {
++    channels: &'a mut Channels,
+     write: &'a mut WriteState,
+ }
+ 
+-impl<'a> TerminalsFuture<'a> {
+-    pub(crate) fn new(channels: &'a mut BTreeMap<u32, Channel>, write: &'a mut WriteState) -> Self {
++impl<'a> ChannelsFuture<'a> {
++    pub(crate) fn new(channels: &'a mut Channels, write: &'a mut WriteState) -> Self {
+         Self { channels, write }
+     }
+ }
+ 
+-impl<'a> Future for TerminalsFuture<'a> {
++impl Future for ChannelsFuture<'_> {
+     type Output = Result<(), Error>;
+ 
+     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+         let Self { channels, write } = &mut *self;
+-        let mut remove = None;
+-        'channels: for (&local_id, channel) in channels.iter_mut() {
+-            let Some(state) = &mut channel.terminal else {
+-                continue;
+-            };
+-
+-            let terminal = loop {
+-                match state {
+-                    TerminalState::Running(terminal) => break terminal,
+-                    TerminalState::Requested(_) => continue 'channels,
+-                    TerminalState::Exiting { terminal, deadline } => match terminal.poll_wait(cx) {
+-                        Poll::Ready(Ok(status)) => {
+-                            *state = match status.code() {
+-                                Some(code) => TerminalState::Exited(code as u32),
+-                                None => TerminalState::Closing,
+-                            };
+-                        }
+-                        Poll::Ready(Err(error)) => {
+-                            warn!(%error, "error waiting for shell to exit");
+-                            *state = TerminalState::Closing;
+-                        }
 -                        // No waker is registered for the deadline, so an expired
 -                        // grace period is only noticed on the next poll (driven by
 -                        // connection traffic).
@@ -5115,14 +5295,8 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -                        if !channel.close_sent {
 -                            write.encode(&request)?;
 -                            return Poll::Ready(Ok(()));
-+                        self.send_window -= n as u32;
-+                        active.next_output = other(output);
-+                        if let Some(timer) = active.drain.as_mut() {
-+                            timer.as_mut().reset(Instant::now() + DRAIN_AFTER_EXIT);
-                         }
-+                        sent = true;
-+                        break;
-                     }
+-                        }
+-                    }
 -                    TerminalState::Reaping { terminal, deadline } => match terminal.poll_wait(cx) {
 -                        Poll::Ready(result) => {
 -                            match result {
@@ -5160,14 +5334,10 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -                            recipient_channel: channel.remote_id,
 -                        })?;
 -                        return Poll::Ready(Ok(()));
-+                    Poll::Ready(Err(error)) => {
-+                        warn!(%error, ?output, "error reading git output");
-                     }
-+                    Poll::Pending => {}
-                 }
+-                    }
+-                }
 -            };
-+            }
- 
+-
 -            let mut buf = [0u8; 4096];
 -            let limit = Ord::min(channel.maximum_packet_size, channel.send_window) as usize;
 -            let writable = match limit {
@@ -5175,12 +5345,7 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -                _ if limit < buf.len() => &mut buf[..limit],
 -                _ => &mut buf,
 -            };
-+            if !sent {
-+                break;
-+            }
-+            wrote = true;
-+        }
- 
+-
 -            match terminal.poll_read(writable, cx) {
 -                // The PTY can report EOF slightly before the shell becomes reapable, so
 -                // hold the channel open until the shell has been waited on; its exit
@@ -5195,116 +5360,39 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -                            terminal,
 -                            deadline: Instant::now() + EXIT_GRACE_PERIOD,
 -                        };
-+        if active.outcome.is_none() {
-+            if let Some(process) = active.process.as_mut() {
-+                match process.poll_exit(cx) {
-+                    Poll::Ready(Ok(status)) => {
-+                        active.outcome = Some(match status.code() {
-+                            Some(code) => Outcome::Exited(code as u32),
-+                            None => Outcome::Signaled(signal_name(status.signal())),
-+                        });
-+                        process.close_stdin();
-+                        active.drain = Some(Box::pin(sleep(DRAIN_AFTER_EXIT)));
-                     }
+-                    }
 -
 -                    write.encode(&ChannelEof {
 -                        recipient_channel: channel.remote_id,
 -                    })?;
 -                    return Poll::Ready(Ok(()));
-+                    Poll::Ready(Err(error)) => {
-+                        warn!(%error, "error waiting for git to exit");
-+                        active.outcome = Some(Outcome::Exited(255));
-+                    }
-+                    Poll::Pending => {}
-                 }
+-                }
 -                Poll::Ready(Err(error)) => {
 -                    terminal.start_kill();
 -                    warn!(%error, "error reading from terminal");
 -                    return Poll::Ready(Err(error.into()));
-+            }
-+        }
-+
-+        if let (Some(timer), Some(process)) = (active.drain.as_mut(), active.process.as_mut()) {
-+            if self.send_window > 0 && !process.outputs_closed() && timer.as_mut().poll(cx).is_ready() {
-+                warn!("git exited but its output pipes stayed open; closing them");
-+                process.close_output(Output::Stdout);
-+                process.close_output(Output::Stderr);
-+            }
-+        }
-+
-+        let outputs_done = active.stderr_backlog.is_empty()
-+            && active.process.as_ref().is_none_or(Process::outputs_closed);
-+
-+        if outputs_done && !active.eof_sent && active.outcome.is_some() {
-+            write.encode(&ChannelEof {
-+                recipient_channel: self.remote_id,
-+            })?;
-+            active.eof_sent = true;
-+            wrote = true;
-+        }
-+
-+        if active.eof_sent {
-+            if let Some(outcome) = active.outcome {
-+                match outcome {
-+                    Outcome::Exited(status) => write.encode(&ChannelRequest {
-+                        recipient_channel: self.remote_id,
-+                        r#type: ChannelRequestType::ExitStatus(status),
-+                        want_reply: false,
-+                    })?,
-+                    Outcome::Signaled(name) => write.encode(&ChannelRequest {
-+                        recipient_channel: self.remote_id,
-+                        r#type: ChannelRequestType::ExitSignal(ExitSignal { name }),
-+                        want_reply: false,
-+                    })?,
-                 }
+-                }
 -                Poll::Ready(Ok(n)) => {
 -                    channel.send_window = channel.send_window.saturating_sub(n as u32);
 -                    write.encode(&ChannelData {
 -                        recipient_channel: channel.remote_id,
 -                        data: Cow::Borrowed(&buf[..n]),
-+
-+                if !self.close_sent {
-+                    self.close_sent = true;
-+                    write.encode(&ChannelClose {
-+                        recipient_channel: self.remote_id,
-                     })?;
+-                    })?;
 -                    return Poll::Ready(Ok(()));
-                 }
+-                }
 -                Poll::Pending => continue,
-+                self.run = Run::Finished;
-+                wrote = true;
-             }
-         }
- 
+-            }
+-        }
+-
 -        if let Some(local_id) = remove {
 -            channels.remove(&local_id);
 -            return Poll::Ready(Ok(()));
-+        Ok(wrote)
-+    }
-+
-+    /// Tell the client how much of its window the child has consumed
-+    fn return_credit(&mut self, write: &mut WriteState) -> Result<bool, Error> {
-+        let drained = match &self.run {
-+            Run::Active(active) => active.process.as_ref().is_none_or(Process::stdin_drained),
-+            Run::Sftp(sftp) => !sftp.core.has_request(),
-+            _ => true,
-+        };
-+
-+        if self.close_sent || self.credit == 0 || (self.credit < INITIAL_WINDOW_SIZE / 4 && !drained) {
-+            return Ok(false);
-         }
- 
+-        }
+-
 -        Poll::Pending
-+        write.encode(&ChannelWindowAdjust {
-+            recipient_channel: self.remote_id,
-+            bytes_to_add: self.credit,
-+        })?;
-+        self.receive_window = self.receive_window.saturating_add(self.credit);
-+        self.credit = 0;
-+        Ok(true)
-     }
- }
- 
+-    }
+-}
+-
 -#[derive(Debug)]
 -pub(crate) struct Channel {
 -    remote_id: u32,
@@ -5314,13 +5402,8 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -    env: Vec<(String, String)>,
 -    terminal: Option<TerminalState>,
 -    close_sent: bool,
-+fn other(output: Output) -> Output {
-+    match output {
-+        Output::Stdout => Output::Stderr,
-+        Output::Stderr => Output::Stdout,
-+    }
- }
- 
+-}
+-
 -impl Channel {
 -    fn confirmation(&self, local_id: u32) -> ChannelOpenConfirmation {
 -        ChannelOpenConfirmation {
@@ -5329,50 +5412,21 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -            initial_window_size: 0,
 -            maximum_packet_size: MAX_PACKET_LEN - 64, // Leave some room for packet overhead
 -        }
-+fn signal_name(signal: Option<i32>) -> &'static str {
-+    match signal {
-+        Some(libc::SIGHUP) => "HUP",
-+        Some(libc::SIGINT) => "INT",
-+        Some(libc::SIGQUIT) => "QUIT",
-+        Some(libc::SIGABRT) => "ABRT",
-+        Some(libc::SIGILL) => "ILL",
-+        Some(libc::SIGFPE) => "FPE",
-+        Some(libc::SIGUSR1) => "USR1",
-+        Some(libc::SIGUSR2) => "USR2",
-+        Some(libc::SIGKILL) => "KILL",
-+        Some(libc::SIGSEGV) => "SEGV",
-+        Some(libc::SIGPIPE) => "PIPE",
-+        Some(libc::SIGALRM) => "ALRM",
-+        Some(libc::SIGTERM) => "TERM",
-+        _ => "KILL",
-     }
-+}
- 
+-    }
+-
 -    fn success(&self) -> ChannelRequestSuccess {
 -        ChannelRequestSuccess {
 -            recipient_channel: self.remote_id,
 -        }
-+impl fmt::Debug for Channel {
-+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-+        f.debug_struct("Channel")
-+            .field("remote_id", &self.remote_id)
-+            .field("send_window", &self.send_window)
-+            .field("receive_window", &self.receive_window)
-+            .finish_non_exhaustive()
-     }
-+}
- 
+-    }
+-
 -    fn failure(&self) -> ChannelRequestFailure {
 -        ChannelRequestFailure {
 -            recipient_channel: self.remote_id,
 -        }
 -    }
-+/// Resolves when [`Channels::poll`] has written something
-+pub(crate) struct ChannelsFuture<'a> {
-+    channels: &'a mut Channels,
-+    write: &'a mut WriteState,
- }
- 
+-}
+-
 -enum TerminalState {
 -    Requested(PtyReq<'static>),
 -    Running(Terminal),
@@ -5389,12 +5443,8 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -        deadline: Instant,
 -    },
 -    Closing,
-+impl<'a> ChannelsFuture<'a> {
-+    pub(crate) fn new(channels: &'a mut Channels, write: &'a mut WriteState) -> Self {
-+        Self { channels, write }
-+    }
- }
- 
+-}
+-
 -impl fmt::Debug for TerminalState {
 -    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 -        match self {
@@ -5411,11 +5461,6 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -            } => f.debug_tuple("Reaping").field(deadline).finish(),
 -            Self::Closing => f.debug_tuple("Closing").finish(),
 -        }
-+impl Future for ChannelsFuture<'_> {
-+    type Output = Result<(), Error>;
-+
-+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-+        let Self { channels, write } = &mut *self;
 +        channels.poll(cx, write)
      }
  }
@@ -5429,16 +5474,6 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 -/// How long to wait for a shell to become reapable after its PTY reports EOF
 -/// or after it is killed
 -const EXIT_GRACE_PERIOD: Duration = Duration::from_secs(5);
--
--/// Maximum number of environment variables allowed
--const MAX_ENV_VARIABLE_COUNT: usize = 128;
--/// Maximum length of an environment variable name
--const MAX_ENV_VARIABLE_NAME_LEN: usize = 256;
--/// Maximum length of an environment variable value
--const MAX_ENV_VARIABLE_VALUE_LEN: usize = 16 * 1024;
--
--/// Maximum number of open channels per session
--const MAX_OPEN_CHANNELS_PER_SESSION: usize = 256;
 +/// Smallest maximum packet size a client may advertise; smaller channels are refused, never rounded up
 +const MIN_PACKET_SIZE: u32 = 128;
 +const READ_CHUNK: usize = 32 * 1024;
@@ -5454,7 +5489,13 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 +/// How long output pipes may stay open after Git itself exited
 +const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(5);
-+
+ 
+-/// Maximum number of environment variables allowed
+-const MAX_ENV_VARIABLE_COUNT: usize = 128;
+-/// Maximum length of an environment variable name
+-const MAX_ENV_VARIABLE_NAME_LEN: usize = 256;
+-/// Maximum length of an environment variable value
+-const MAX_ENV_VARIABLE_VALUE_LEN: usize = 16 * 1024;
 +/// Drive the channel open/request/data/window/eof/close state machine without spawning commands.
 +///
 +/// Hidden entry for the `channel_state` libFuzzer target. Uses an empty repository root so
@@ -5628,7 +5669,9 @@ index db13219b232848bcffe055ed1254cde0e0f7d3a1..8942520fdb674d9df265bf8af07823d5
 +        }
 +    }
 +}
-+
+ 
+-/// Maximum number of open channels per session
+-const MAX_OPEN_CHANNELS_PER_SESSION: usize = 256;
 +struct FuzzFixture {
 +    policy: GitPolicy,
 +}
@@ -8142,18 +8185,8 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    repos: PathBuf,
 +    bin: PathBuf,
 +    key: PathBuf,
- }
- 
--/// Exercise a full handshake and session against the graviola provider
--#[cfg(feature = "graviola")]
--#[tokio::test]
--async fn handshake_ecdsa_graviola() {
--    handshake(
--        graviola::DEFAULT_PROVIDER,
--        PublicKeyAlgorithm::EcdsaSha2Nistp256,
--    )
--    .await
--    .unwrap();
++}
++
 +/// What the `git`, `git-upload-pack` and `git-receive-pack` programs are
 +enum Programs {
 +    /// The system Git behind a wrapper that keeps its own exec path
@@ -8430,12 +8463,23 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    Ok(())
  }
  
+-/// Exercise a full handshake and session against the graviola provider
+-#[cfg(feature = "graviola")]
+ #[tokio::test]
+ async fn handshake_ecdsa_graviola() {
+-    handshake(
+-        graviola::DEFAULT_PROVIDER,
+-        PublicKeyAlgorithm::EcdsaSha2Nistp256,
+-    )
+-    .await
+-    .unwrap();
+-}
+-
 -/// Exercise an ssh-ed25519 client key against the aws-lc-rs provider
 -#[cfg(feature = "aws-lc")]
- #[tokio::test]
+-#[tokio::test]
 -async fn handshake_ed25519_aws_lc() {
 -    handshake(aws_lc::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-+async fn handshake_ecdsa_graviola() {
 +    handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::EcdsaSha2Nistp256)
          .await
          .unwrap();
@@ -8446,7 +8490,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
  #[tokio::test]
  async fn handshake_ed25519_graviola() {
      handshake(graviola::DEFAULT_PROVIDER, PublicKeyAlgorithm::Ed25519)
-@@ -135,392 +383,608 @@ async fn handshake_ed25519_graviola() {
+@@ -135,323 +383,717 @@ async fn handshake_ed25519_graviola() {
          .unwrap();
  }
  
@@ -8481,26 +8525,13 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
  
 -async fn handshake_x25519(provider: &'static dyn CryptoProvider) -> anyhow::Result<()> {
 -    subscribe();
-+#[tokio::test]
-+async fn handshake_hybrid_post_quantum_graviola() {
-+    let offered = Command::new(CliClient::ssh()).args(["-Q", "kex"]).output().await.unwrap();
-+    if !String::from_utf8_lossy(&offered.stdout).contains("mlkem768x25519-sha256") {
-+        eprintln!("skipping: the test ssh client cannot offer mlkem768x25519-sha256 (release e2e requires it)");
-+        return;
-+    }
-+    negotiates(["-o", "KexAlgorithms=mlkem768x25519-sha256"], "kex: algorithm: mlkem768x25519-sha256").await;
-+}
- 
+-
 -    let (_key_dir, mut client, server) =
 -        setup(&PublicKeyAlgorithm::Ed25519, None, None, provider).await?;
 -    // Restrict the client to the non-PQ key exchange so the test fails if the
 -    // server no longer supports it.
 -    client.cmd.args(["-o", "KexAlgorithms=curve25519-sha256"]);
-+#[tokio::test]
-+async fn handshake_chacha_graviola() {
-+    negotiates(["-c", "chacha20-poly1305@openssh.com"], "cipher: chacha20-poly1305@openssh.com").await;
-+}
- 
+-
 -    let (_, stdout, stderr) = client
 -        .assert_run(COMMAND, Duration::from_secs(10), server)
 -        .await?;
@@ -8508,56 +8539,20 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -        stderr.contains("kex: algorithm: curve25519-sha256"),
 -        "client did not negotiate curve25519-sha256"
 -    );
-+#[tokio::test]
-+async fn channel_stderr_arrives_on_stderr_with_exit_status() {
-+    let world = script_world("echo to-stdout; echo to-stderr >&2; exit 3").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let run = client.run(Some(SERVICE), b"").await.unwrap();
-+    assert_eq!(run.status.code(), Some(3), "{}", run.stderr);
-+    assert_eq!(run.stdout(), "to-stdout\n");
-+    assert_eq!(run.stderr, "to-stderr\n");
-+}
- 
+-
 -    // A non-post-quantum key exchange must surface a warning banner in the terminal
 -    anyhow::ensure!(
 -        stdout.contains(KX_WARNING_MARKER),
 -        "expected key exchange warning banner in session output:\n{stdout}"
 -    );
 -    Ok(())
-+#[tokio::test]
-+async fn channel_command_killed_by_a_signal_is_reported_after_its_output() {
-+    let world = script_world("echo before; echo diagnostics >&2; kill -9 $$").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let run = client.run(Some(SERVICE), b"").await.unwrap();
-+    assert_eq!(run.stdout(), "before\n", "output written before the signal must arrive");
-+    assert!(run.stderr.contains("diagnostics"), "{}", run.stderr);
-+    assert!(!run.status.success(), "a signaled command must not look successful");
- }
- 
+-}
+-
 -#[cfg(feature = "graviola")]
  #[tokio::test]
 -async fn no_spawn() {
 -    subscribe();
-+async fn channel_half_close_still_delivers_later_output() {
-+    let world = script_world("PATH=/usr/bin:/bin; wc -c | tr -d ' '; sleep 1; echo after-eof").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let run = client.run(Some(SERVICE), b"12345").await.unwrap();
-+    assert!(run.status.success(), "{}", run.stderr);
-+    assert_eq!(run.stdout(), "5\nafter-eof\n");
-+}
- 
+-
 -    let (_key_dir, client, server) = setup(
 -        &PublicKeyAlgorithm::Ed25519,
 -        None,
@@ -8566,11 +8561,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -            ..Config::default()
 -        }),
 -        graviola::DEFAULT_PROVIDER,
-+#[tokio::test]
-+async fn channel_stdout_and_stderr_both_drain_completely() {
-+    let world = script_world(
-+        "PATH=/usr/bin:/bin; (head -c 3000000 /dev/zero | tr '\\0' 'o') & (head -c 2000000 /dev/zero | tr '\\0' 'e' >&2) & wait; exit 5",
-     )
+-    )
 -    .await
 -    .expect("failed to set up test");
 -
@@ -8582,23 +8573,13 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -            Duration::from_secs(10),
 -            server,
 -        )
-+    .await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
-+    let run = client.run(Some(SERVICE), b"").await.unwrap();
-+    assert_eq!(run.status.code(), Some(5));
-+    assert_eq!(run.stdout.len(), 3_000_000);
-+    assert!(run.stdout.iter().all(|&b| b == b'o'));
-+    assert_eq!(run.stderr.len(), 2_000_000);
-+    assert!(run.stderr.bytes().all(|b| b == b'e'));
- }
- 
+-        .await
+-        .unwrap();
+-}
+-
 -/// Check that a `command` key option replaces the command the client asked to run
 -#[cfg(feature = "graviola")]
- #[tokio::test]
+-#[tokio::test]
 -async fn force_command() {
 -    subscribe();
 -
@@ -8607,44 +8588,17 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -        Some(r#"command="echo OXISH-FORCED-$((6*7))""#),
 -        None,
 -        graviola::DEFAULT_PROVIDER,
-+async fn channel_large_stdin_reaches_a_slow_reader_while_output_flows() {
-+    let world = script_world(
-+        "PATH=/usr/bin:/bin; head -c 2000000 /dev/zero | tr '\\0' 'x'; sleep 2; wc -c | tr -d ' '",
-     )
+-    )
 -    .await
 -    .expect("failed to set up test");
-+    .await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let input = vec![7u8; 6_000_000];
-+    let run = client.run(Some(SERVICE), &input).await.unwrap();
-+    assert!(run.status.success(), "{}", run.stderr);
-+    let stdout = run.stdout();
-+    assert!(stdout.starts_with(&"x".repeat(2_000_000)));
-+    assert_eq!(&stdout[2_000_000..], "6000000\n");
-+}
- 
+-
 -    // The arithmetic is only expanded when a shell runs the command, so the terminal echoing
 -    // the client's input back cannot satisfy these assertions.
 -    let (_, stdout, stderr) = client
 -        .run(COMMAND, Duration::from_secs(10), server)
-+#[tokio::test]
-+async fn channel_command_that_ignores_stdin_does_not_wedge_the_session() {
-+    let world = script_world("echo done").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
-+    let input = vec![1u8; 8_000_000];
-+    let run = client.run(Some(SERVICE), &input).await.unwrap();
-+    assert!(run.status.success(), "{}", run.stderr);
-+    assert_eq!(run.stdout(), "done\n");
-+}
- 
+-        .await
+-        .unwrap();
+-
 -    assert!(
 -        stdout.contains(FORCED),
 -        "forced command did not run.\n\
@@ -8655,26 +8609,11 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -        "client command ran despite the forced command.\n\
 -        --- stdout ---\n{stdout}",
 -    );
-+async fn pid_is_gone(pid: i32) -> bool {
-+    for _ in 0..50 {
-+        let alive = Command::new("kill")
-+            .args(["-0", &pid.to_string()])
-+            .stderr(Stdio::null())
-+            .status()
-+            .await
-+            .unwrap()
-+            .success();
-+        if !alive {
-+            return true;
-+        }
-+        tokio::time::sleep(Duration::from_millis(100)).await;
-+    }
-+    false
- }
- 
+-}
+-
 -/// Exercise a client-initiated rekey against the graviola provider
 -#[cfg(feature = "graviola")]
- #[tokio::test]
+-#[tokio::test]
 -#[ignore = "slow"]
 -async fn rekey_graviola() {
 -    subscribe();
@@ -8700,15 +8639,9 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -            Duration::from_secs(30),
 -            server,
 -        )
-+async fn channel_early_disconnect_kills_the_command() {
-+    let world = script_world("PATH=/usr/bin:/bin; echo $$ > \"$(dirname \"$0\")/../pid\"; exec sleep 120").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let pid_file = world.base().join("pid");
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
- 
+-        .await
+-        .unwrap();
+-
 -    // The client logs "SSH2_MSG_KEXINIT received" once per key exchange the server answered,
 -    // but the matching "SSH2_MSG_NEWKEYS received" line only appears when a key exchange ran
 -    // to completion. One of each belongs to the initial handshake, so two or more completed
@@ -8722,6 +8655,199 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -             --- stderr ({stderr_len} bytes) ---\n{stderr}",
 -        stderr_len = stderr.len(),
 -    );
+-
+-    // A protocol violation during a rekey (e.g. the server sending channel data between
+-    // KEXINIT and NEWKEYS) makes the client abort with a fatal error instead of tearing the
+-    // session down cleanly after `exit`, which surfaces as a non-zero exit status.
+-    assert!(
+-        status.success(),
+-        "client exited with {status}.\n\
+-             --- stderr ({stderr_len} bytes) ---\n{stderr}",
+-        stderr_len = stderr.len(),
+-    );
+-}
+-
+-async fn handshake(
+-    provider: &'static dyn CryptoProvider,
+-    algorithm: PublicKeyAlgorithm<'_>,
+-) -> anyhow::Result<()> {
+-    subscribe();
+-
+-    let (_key_dir, client, server) = setup(&algorithm, None, None, provider).await?;
+-
+-    let (_, stdout, stderr) = client
+-        .assert_run(
+-            COMMAND,
+-            // In the rekey scenario, keep the session open long enough for several rekeys before the
+-            // sentinel; it only arrives if the session survived them.
+-            Duration::from_secs(10),
+-            server,
+-        )
+-        .await?;
+-
+-    if stderr.contains("kex: algorithm: mlkem768x25519-sha256") {
+-        anyhow::ensure!(
+-            !stdout.contains(KX_WARNING_MARKER),
+-            "unexpected key exchange warning banner in session output:\n{stdout}"
+-        );
++async fn handshake_hybrid_post_quantum_graviola() {
++    let offered = Command::new(CliClient::ssh()).args(["-Q", "kex"]).output().await.unwrap();
++    if !String::from_utf8_lossy(&offered.stdout).contains("mlkem768x25519-sha256") {
++        eprintln!("skipping: the test ssh client cannot offer mlkem768x25519-sha256 (release e2e requires it)");
++        return;
+     }
+-
+-    Ok(())
++    negotiates(["-o", "KexAlgorithms=mlkem768x25519-sha256"], "kex: algorithm: mlkem768x25519-sha256").await;
+ }
+ 
+-async fn setup(
+-    algorithm: &PublicKeyAlgorithm<'_>,
+-    options: Option<&str>,
+-    config: Option<Config>,
+-    provider: &'static dyn CryptoProvider,
+-) -> anyhow::Result<(TempDir, CliClient, JoinHandle<anyhow::Result<()>>)> {
+-    let (key_dir, store) = store(algorithm, options, provider).await?;
+-    let (_, pkcs8) = provider.generate_signing_key(algorithm)?;
+-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+-    let addr = listener.local_addr()?;
+-    let client = CliClient::new(addr, &key_dir.path().join("key"));
++#[tokio::test]
++async fn handshake_chacha_graviola() {
++    negotiates(["-c", "chacha20-poly1305@openssh.com"], "cipher: chacha20-poly1305@openssh.com").await;
++}
+ 
+-    let server = Server::new(
+-        store,
+-        HostKeys::new([Zeroizing::new(pkcs8)].into_iter(), provider)?,
+-        SESSION_BINARY
+-            .get_or_try_init(build_session_binary)
++#[tokio::test]
++async fn channel_stderr_arrives_on_stderr_with_exit_status() {
++    let world = script_world("echo to-stdout; echo to-stderr >&2; exit 3").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some(SERVICE), b"").await.unwrap();
++    assert_eq!(run.status.code(), Some(3), "{}", run.stderr);
++    assert_eq!(run.stdout(), "to-stdout\n");
++    assert_eq!(run.stderr, "to-stderr\n");
++}
++
++#[tokio::test]
++async fn channel_command_killed_by_a_signal_is_reported_after_its_output() {
++    let world = script_world("echo before; echo diagnostics >&2; kill -9 $$").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some(SERVICE), b"").await.unwrap();
++    assert_eq!(run.stdout(), "before\n", "output written before the signal must arrive");
++    assert!(run.stderr.contains("diagnostics"), "{}", run.stderr);
++    assert!(!run.status.success(), "a signaled command must not look successful");
++}
++
++#[tokio::test]
++async fn channel_half_close_still_delivers_later_output() {
++    let world = script_world("PATH=/usr/bin:/bin; wc -c | tr -d ' '; sleep 1; echo after-eof").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some(SERVICE), b"12345").await.unwrap();
++    assert!(run.status.success(), "{}", run.stderr);
++    assert_eq!(run.stdout(), "5\nafter-eof\n");
++}
++
++#[tokio::test]
++async fn channel_stdout_and_stderr_both_drain_completely() {
++    let world = script_world(
++        "PATH=/usr/bin:/bin; (head -c 3000000 /dev/zero | tr '\\0' 'o') & (head -c 2000000 /dev/zero | tr '\\0' 'e' >&2) & wait; exit 5",
++    )
++    .await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some(SERVICE), b"").await.unwrap();
++    assert_eq!(run.status.code(), Some(5));
++    assert_eq!(run.stdout.len(), 3_000_000);
++    assert!(run.stdout.iter().all(|&b| b == b'o'));
++    assert_eq!(run.stderr.len(), 2_000_000);
++    assert!(run.stderr.bytes().all(|b| b == b'e'));
++}
++
++#[tokio::test]
++async fn channel_large_stdin_reaches_a_slow_reader_while_output_flows() {
++    let world = script_world(
++        "PATH=/usr/bin:/bin; head -c 2000000 /dev/zero | tr '\\0' 'x'; sleep 2; wc -c | tr -d ' '",
++    )
++    .await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let input = vec![7u8; 6_000_000];
++    let run = client.run(Some(SERVICE), &input).await.unwrap();
++    assert!(run.status.success(), "{}", run.stderr);
++    let stdout = run.stdout();
++    assert!(stdout.starts_with(&"x".repeat(2_000_000)));
++    assert_eq!(&stdout[2_000_000..], "6000000\n");
++}
++
++#[tokio::test]
++async fn channel_command_that_ignores_stdin_does_not_wedge_the_session() {
++    let world = script_world("echo done").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let input = vec![1u8; 8_000_000];
++    let run = client.run(Some(SERVICE), &input).await.unwrap();
++    assert!(run.status.success(), "{}", run.stderr);
++    assert_eq!(run.stdout(), "done\n");
++}
++
++async fn pid_is_gone(pid: i32) -> bool {
++    for _ in 0..50 {
++        let alive = Command::new("kill")
++            .args(["-0", &pid.to_string()])
++            .stderr(Stdio::null())
++            .status()
+             .await
+-            .cloned()?,
+-        provider,
+-    )?;
++            .unwrap()
++            .success();
++        if !alive {
++            return true;
++        }
++        tokio::time::sleep(Duration::from_millis(100)).await;
++    }
++    false
++}
+ 
+-    let server = match config {
+-        Some(config) => server.with_config(config),
+-        None => server,
++#[tokio::test]
++async fn channel_early_disconnect_kills_the_command() {
++    let world = script_world("PATH=/usr/bin:/bin; echo $$ > \"$(dirname \"$0\")/../pid\"; exec sleep 120").await;
++    world.bare_repo("a.git").await.unwrap();
++    let pid_file = world.base().join("pid");
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++
 +    let mut cmd = client.cmd;
 +    cmd.args(["-o", "LogLevel=ERROR"]);
 +    cmd.arg(format!("{USER}@{}", client.addr.ip())).arg(SERVICE);
@@ -8732,16 +8858,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +        .kill_on_drop(true)
 +        .spawn()
 +        .unwrap();
- 
--    // A protocol violation during a rekey (e.g. the server sending channel data between
--    // KEXINIT and NEWKEYS) makes the client abort with a fatal error instead of tearing the
--    // session down cleanly after `exit`, which surfaces as a non-zero exit status.
--    assert!(
--        status.success(),
--        "client exited with {status}.\n\
--             --- stderr ({stderr_len} bytes) ---\n{stderr}",
--        stderr_len = stderr.len(),
--    );
++
 +    let mut pid = None;
 +    for _ in 0..100 {
 +        if let Ok(text) = fs::read_to_string(&pid_file) {
@@ -8755,13 +8872,8 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    let pid = pid.expect("the command never started");
 +    child.kill().await.unwrap();
 +    assert!(pid_is_gone(pid).await, "command {pid} outlived its connection");
- }
- 
--async fn handshake(
--    provider: &'static dyn CryptoProvider,
--    algorithm: PublicKeyAlgorithm<'_>,
--) -> anyhow::Result<()> {
--    subscribe();
++}
++
 +#[tokio::test]
 +async fn channel_disconnect_asks_the_command_to_stop_before_killing_it() {
 +    let world = script_world(
@@ -8783,8 +8895,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +        .kill_on_drop(true)
 +        .spawn()
 +        .unwrap();
- 
--    let (_key_dir, client, server) = setup(&algorithm, None, None, provider).await?;
++
 +    for _ in 0..100 {
 +        if world.base().join("ready").exists() {
 +            break;
@@ -8801,16 +8912,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    }
 +    panic!("the command was killed without a chance to clean up");
 +}
- 
--    let (_, stdout, stderr) = client
--        .assert_run(
--            COMMAND,
--            // In the rekey scenario, keep the session open long enough for several rekeys before the
--            // sentinel; it only arrives if the session survived them.
--            Duration::from_secs(10),
--            server,
--        )
--        .await?;
++
 +/// Start `git-receive-pack` with the client's stdin held open, then make the client vanish
 +async fn interrupt_push(world: &World) -> PathBuf {
 +    world.bare_repo("a.git").await.unwrap();
@@ -8828,12 +8930,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +        .kill_on_drop(true)
 +        .spawn()
 +        .unwrap();
- 
--    if stderr.contains("kex: algorithm: mlkem768x25519-sha256") {
--        anyhow::ensure!(
--            !stdout.contains(KX_WARNING_MARKER),
--            "unexpected key exchange warning banner in session output:\n{stdout}"
--        );
++
 +    let base = world.base().to_path_buf();
 +    for _ in 0..100 {
 +        if base.join("ready").exists() {
@@ -8848,11 +8945,10 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +            break;
 +        }
 +        tokio::time::sleep(Duration::from_millis(100)).await;
-     }
++    }
 +    base
 +}
- 
--    Ok(())
++
 +#[tokio::test]
 +async fn channel_disconnect_ends_stdin_before_any_signal() {
 +    let world = script_world(
@@ -8862,29 +8958,8 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    let base = interrupt_push(&world).await;
 +    assert!(base.join("finished").exists(), "the command never saw the end of its stdin");
 +    assert!(!base.join("term").exists(), "the command was signaled before its stdin ended");
- }
- 
--async fn setup(
--    algorithm: &PublicKeyAlgorithm<'_>,
--    options: Option<&str>,
--    config: Option<Config>,
--    provider: &'static dyn CryptoProvider,
--) -> anyhow::Result<(TempDir, CliClient, JoinHandle<anyhow::Result<()>>)> {
--    let (key_dir, store) = store(algorithm, options, provider).await?;
--    let (_, pkcs8) = provider.generate_signing_key(algorithm)?;
--    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
--    let addr = listener.local_addr()?;
--    let client = CliClient::new(addr, &key_dir.path().join("key"));
--
--    let server = Server::new(
--        store,
--        HostKeys::new([Zeroizing::new(pkcs8)].into_iter(), provider)?,
--        SESSION_BINARY
--            .get_or_try_init(build_session_binary)
--            .await
--            .cloned()?,
--        provider,
--    )?;
++}
++
 +#[tokio::test]
 +async fn channel_disconnect_keeps_draining_output_while_the_command_cleans_up() {
 +    let world = script_world(
@@ -8894,10 +8969,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    let base = interrupt_push(&world).await;
 +    assert!(base.join("finished").exists(), "output written while cleaning up must not kill the command");
 +}
- 
--    let server = match config {
--        Some(config) => server.with_config(config),
--        None => server,
++
 +#[tokio::test]
 +async fn sessions_beyond_the_limit_are_refused() {
 +    let world = script_world("PATH=/usr/bin:/bin; sleep 4; echo FIRST").await;
@@ -8905,20 +8977,12 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    let config = crate::Config {
 +        max_sessions: 1,
 +        ..crate::Config::default()
-     };
++    };
 +    let (client, _guard) = world
 +        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
 +        .await
 +        .unwrap();
- 
--    // Start the server and serve exactly one connection
--    let handle = tokio::spawn(async move {
--        let (stream, peer) = listener.accept().await?;
--        stream.set_nodelay(true).ok();
--        server.accept(stream, peer).await
--    });
--
--    Ok((key_dir, client, handle))
++
 +    let addr = client.addr;
 +    let key = client.key.clone();
 +    let first = tokio::spawn(async move { client.run(Some(SERVICE), b"").await });
@@ -8928,11 +8992,8 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    let first = first.await.unwrap().unwrap();
 +    assert!(first.status.success(), "{}", first.stderr);
 +    assert_eq!(first.stdout(), "FIRST\n");
- }
- 
--struct CliClient {
--    addr: SocketAddr,
--    cmd: Command,
++}
++
 +#[tokio::test]
 +async fn idle_connections_from_one_address_cannot_lock_out_logins() {
 +    let world = script_world("echo OK").await;
@@ -8958,6 +9019,379 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +    let served = CliClient::new(addr, &key).run(Some(SERVICE), b"").await.unwrap();
 +    assert!(served.status.success(), "{}", served.stderr);
 +    assert_eq!(served.stdout(), "OK\n");
++}
++
++#[tokio::test]
++async fn established_sessions_do_not_use_up_the_pre_auth_allowance() {
++    let world = script_world("PATH=/usr/bin:/bin; sleep 3; echo OK").await;
++    world.bare_repo("a.git").await.unwrap();
++    let config = crate::Config {
++        max_unauthenticated_per_ip: 1,
++        max_sessions_per_ip: 3,
++        ..crate::Config::default()
++    };
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++
++    let addr = client.addr;
++    let key = client.key.clone();
++    let mut runs = vec![tokio::spawn(async move { client.run(Some(SERVICE), b"").await })];
++    for _ in 0..2 {
++        tokio::time::sleep(Duration::from_millis(800)).await;
++        let key = key.clone();
++        runs.push(tokio::spawn(async move { CliClient::new(addr, &key).run(Some(SERVICE), b"").await }));
++    }
++    for run in runs {
++        let run = run.await.unwrap().unwrap();
++        assert!(run.status.success(), "a session behind established ones was refused: {}", run.stderr);
++        assert_eq!(run.stdout(), "OK\n");
++    }
++}
++
++/// Open `count` TCP connections that never send anything
++async fn futures_idle(addr: SocketAddr, count: usize) -> Vec<tokio::net::TcpStream> {
++    let mut streams = Vec::new();
++    for _ in 0..count {
++        streams.push(tokio::net::TcpStream::connect(addr).await.unwrap());
++    }
++    streams
++}
++
++#[tokio::test]
++async fn exec_rejects_non_git_commands() {
++    let world = script_world("echo SHOULD-NOT-RUN").await;
++    world.bare_repo("a.git").await.unwrap();
++    for command in [
++        "rm -rf /",
++        "sh -c id",
++        "/bin/sh",
++        "git-upload-pack 'a.git'; id",
++        "/usr/bin/git-upload-pack 'a.git'",
++        "git-upload-pack '../a.git'",
++        "git-upload-pack '/etc/passwd'",
++    ] {
++        let (client, _guard) = world
++            .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++            .await
++            .unwrap();
++        let run = client.run(Some(command), b"").await.unwrap();
++        assert!(!run.status.success(), "{command:?} was accepted: {}", run.stdout());
++        assert!(!run.stdout().contains("SHOULD-NOT-RUN"), "{command:?} ran");
++    }
++}
++
++#[tokio::test]
++async fn read_only_key_cannot_push_and_is_told_why() {
++    let world = script_world("echo RAN").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some("git-receive-pack 'a.git'"), b"").await.unwrap();
++    assert_eq!(run.status.code(), Some(1));
++    assert!(run.stderr.contains("access denied"), "{}", run.stderr);
++    assert!(!run.stdout().contains("RAN"));
++}
++
++#[tokio::test]
++async fn write_key_can_push_and_missing_repository_is_reported() {
++    let world = script_world("echo RAN").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some("git-receive-pack 'a.git'"), b"").await.unwrap();
++    assert!(run.status.success(), "{}", run.stderr);
++    assert!(run.stdout().contains("RAN"));
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(Some("git-receive-pack 'missing.git'"), b"").await.unwrap();
++    assert_eq!(run.status.code(), Some(1));
++    assert!(run.stderr.contains("not found"), "{}", run.stderr);
++}
++
++#[tokio::test]
++async fn shell_and_pty_requests_are_refused() {
++    let world = script_world("echo RAN").await;
++    world.bare_repo("a.git").await.unwrap();
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let run = client.run(None, b"echo shell-ran\nexit\n").await.unwrap();
++    assert!(!run.status.success());
++    assert!(!run.stdout().contains("shell-ran"));
++
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let mut client = client;
++    client.cmd.arg("-tt");
++    let run = client.run(Some(SERVICE), b"").await.unwrap();
++    assert!(run.stderr.contains("PTY allocation request failed"), "{}", run.stderr);
++}
++
++#[tokio::test]
++async fn subsystem_requests_are_refused() {
++    let world = script_world("echo RAN").await;
++    for name in ["sftp", "shell", "git"] {
++        let (mut client, _guard) = world
++            .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++            .await
++            .unwrap();
++        client.cmd.arg("-s");
++        let run = client.run(Some(name), &[0, 0, 0, 5, 1, 0, 0, 0, 3]).await.unwrap();
++        assert!(!run.status.success(), "the subsystem {name} was accepted");
++        assert!(run.stdout.is_empty(), "{:?}", run.stdout);
++        assert!(run.stderr.contains("subsystem request failed"), "{}", run.stderr);
++    }
++}
++
++#[tokio::test]
++async fn only_validated_git_protocol_reaches_the_command() {
++    let world = script_world(r#"echo "protocol=[$GIT_PROTOCOL] foo=[$FOO] path=[$PATH]""#).await;
++    world.bare_repo("a.git").await.unwrap();
++    for (value, expected) in [
++        ("version=2", "protocol=[version=2]"),
++        ("version=1", "protocol=[]"),
++        ("version=2:extra=1", "protocol=[]"),
++    ] {
++        let (client, _guard) = world
++            .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++            .await
++            .unwrap();
++        let mut client = client;
++        client.cmd.args(["-o", "SendEnv=GIT_PROTOCOL FOO"]);
++        client.cmd.env("GIT_PROTOCOL", value).env("FOO", "bar");
++        let run = client.run(Some(SERVICE), b"").await.unwrap();
++        let stdout = run.stdout();
++        assert!(stdout.contains(expected), "{value:?}: {stdout}");
++        assert!(stdout.contains("foo=[]"), "arbitrary environment leaked: {stdout}");
++        assert!(stdout.contains(&format!("path=[{}]", world.bin.display())), "{stdout}");
++    }
++}
++
++fn commit_args(message: &str) -> Vec<&str> {
++    vec![
++        "-c",
++        "user.name=oxish-e2e",
++        "-c",
++        "user.email=oxish-e2e@example.com",
++        "commit",
++        "-qm",
++        message,
++    ]
++}
++
++async fn seeded_repo(world: &World, name: &str, extra_bytes: usize) -> (PathBuf, String) {
++    let bare = world.bare_repo(name).await.unwrap();
++    let work = world.base().join(format!("seed-{name}"));
++    fs::create_dir_all(&work).unwrap();
++    git(&work, &["init", "-q", "-b", "main"]).await.unwrap();
++    fs::write(work.join("hello.txt"), "hello oxish\n").unwrap();
++    if extra_bytes > 0 {
++        let output = Command::new("head")
++            .args(["-c", &extra_bytes.to_string(), "/dev/urandom"])
++            .output()
++            .await
++            .unwrap();
++        fs::write(work.join("random.bin"), output.stdout).unwrap();
++    }
++    git(&work, &["add", "."]).await.unwrap();
++    git(&work, &commit_args("seed")).await.unwrap();
++    git(&work, &["tag", "v1"]).await.unwrap();
++    git(&work, &["push", "-q", bare.to_str().unwrap(), "main", "v1"]).await.unwrap();
++    let sha = git_output(&work, &["rev-parse", "HEAD"]).await.unwrap();
++    (work, sha)
++}
++
++async fn git_over_ssh(client: &CliClient, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
++    let output = Command::new("git")
++        .arg("-C")
++        .arg(dir)
++        .args(args)
++        .env("GIT_SSH_COMMAND", client.git_ssh_command())
++        .env("GIT_CONFIG_GLOBAL", "/dev/null")
++        .env("GIT_CONFIG_NOSYSTEM", "1")
++        .env("GIT_TERMINAL_PROMPT", "0")
++        .output()
++        .await?;
++    anyhow::ensure!(
++        output.status.success(),
++        "git {} failed: {}",
++        args.join(" "),
++        String::from_utf8_lossy(&output.stderr),
++    );
++    Ok(String::from_utf8_lossy(&output.stderr).into_owned()
++        + &String::from_utf8_lossy(&output.stdout))
++}
++
++#[tokio::test]
++async fn exec_git_clone_fetch_and_push_round_trip() {
++    subscribe();
++    let world = World::new(Programs::System).await.unwrap();
++    let (seed, sha) = seeded_repo(&world, "a.git", 0).await;
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++
++    let url = client.url("a.git");
++    let clone = world.base().join("clone");
++    git_over_ssh(&client, &world.base(), &["clone", "-q", &url, clone.to_str().unwrap()]).await.unwrap();
++    assert_eq!(git_output(&clone, &["rev-parse", "HEAD"]).await.unwrap(), sha);
++    assert_eq!(fs::read_to_string(clone.join("hello.txt")).unwrap(), "hello oxish\n");
++
++    fs::write(clone.join("new.txt"), "pushed\n").unwrap();
++    git(&clone, &["add", "new.txt"]).await.unwrap();
++    git(&clone, &commit_args("push me")).await.unwrap();
++    git_over_ssh(&client, &clone, &["push", "-q", "origin", "main"]).await.unwrap();
++    let pushed = git_output(&clone, &["rev-parse", "HEAD"]).await.unwrap();
++
++    git_over_ssh(&client, &seed, &["pull", "-q", "--ff-only", &url, "main"]).await.unwrap();
++    assert_eq!(git_output(&seed, &["rev-parse", "HEAD"]).await.unwrap(), pushed);
++    let listing = git_over_ssh(&client, &world.base(), &["ls-remote", &url]).await.unwrap();
++    assert!(listing.contains("refs/tags/v1"), "{listing}");
++}
++
++#[tokio::test]
++async fn exec_git_large_pack_is_byte_exact() {
++    subscribe();
++    let world = World::new(Programs::System).await.unwrap();
++    let (seed, _) = seeded_repo(&world, "big.git", 24 * 1024 * 1024).await;
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let clone = world.base().join("big-clone");
++    git_over_ssh(&client, &world.base(), &["clone", "-q", &client.url("big.git"), clone.to_str().unwrap()])
++        .await
++        .unwrap();
++    assert_eq!(
++        fs::read(clone.join("random.bin")).unwrap(),
++        fs::read(seed.join("random.bin")).unwrap()
++    );
++}
++
++#[tokio::test]
++async fn exec_git_push_with_read_key_fails_with_a_diagnostic() {
++    subscribe();
++    let world = World::new(Programs::System).await.unwrap();
++    world.bare_repo("a.git").await.unwrap();
++    let (seed, _) = seeded_repo(&world, "b.git", 0).await;
++    let (client, _guard) = world
++        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
++        .await
++        .unwrap();
++    let error = git_over_ssh(&client, &seed, &["push", &client.url("b.git"), "main:other"])
++        .await
++        .unwrap_err();
++    assert!(error.to_string().contains("access denied"), "{error}");
++}
++
++#[test]
++fn session_state_round_trip() {
++    use crate::DEFAULT_PROVIDER;
++    let (key, pkcs8) = DEFAULT_PROVIDER
++        .generate_signing_key(&PublicKeyAlgorithm::Ed25519)
++        .expect("failed to generate signing key");
++    let pkcs8 = Zeroizing::new(pkcs8);
++    let host_key = ServerHostKey::from((&pkcs8, &*key));
++
++    let state = SessionState {
++        addr: SocketAddr::from(([192, 0, 2, 7], 22022)),
++        identities: Identities {
++            client: b"client-identity".to_vec(),
++            server: b"server-identity".to_vec(),
++        },
++        post_quantum_kx: false,
++        strict_kx: None,
++        host_key,
++        session_id: Digest::new(b"session-id"),
++        read: SideState {
++            source: KeySourceSide {
++                algorithm: EncryptionAlgorithm::Aes128Gcm,
++                initial_iv: vec![2; 12],
++                encryption_key: vec![1; 16],
++            },
++            counter: 42,
++            sequence_number: 17,
++        },
++        write: SideState {
++            source: KeySourceSide {
++                algorithm: EncryptionAlgorithm::Aes128Gcm,
++                initial_iv: vec![4; 12],
++                encryption_key: vec![3; 16],
++            },
++            counter: 7,
++            sequence_number: 23,
++        },
++        read_buf: b"pipelined".to_vec(),
++        options: KeyOptions {
++            git_access: Some(GitAccess::Read),
++        },
+     };
+ 
+-    // Start the server and serve exactly one connection
+-    let handle = tokio::spawn(async move {
+-        let (stream, peer) = listener.accept().await?;
+-        stream.set_nodelay(true).ok();
+-        server.accept(stream, peer).await
+-    });
++    let mut buf = Vec::new();
++    state.encode(&mut buf);
+ 
+-    Ok((key_dir, client, handle))
++    let Decoded {
++        value: decoded,
++        next,
++    } = SessionState::decode(&buf, DEFAULT_PROVIDER).unwrap();
++    assert!(next.is_empty());
++
++    assert_eq!(decoded.addr, state.addr);
++    assert_eq!(decoded.identities.client, state.identities.client);
++    assert_eq!(decoded.identities.server, state.identities.server);
++    assert_eq!(decoded.strict_kx.is_some(), state.strict_kx.is_some());
++    assert_eq!(decoded.post_quantum_kx, state.post_quantum_kx);
++    assert_eq!(decoded.session_id.as_ref(), state.session_id.as_ref());
++    assert_eq!(decoded.read_buf, state.read_buf);
++    assert_eq!(decoded.read.source.algorithm, EncryptionAlgorithm::Aes128Gcm);
++    assert_eq!(decoded.read.source.encryption_key, [1; 16]);
++    assert_eq!(decoded.read.source.initial_iv, [2; 12]);
++    assert_eq!(decoded.write.source.algorithm, EncryptionAlgorithm::Aes128Gcm);
++    assert_eq!(decoded.write.source.encryption_key, [3; 16]);
++    assert_eq!(decoded.write.source.initial_iv, [4; 12]);
++    assert_eq!(decoded.read.counter, 42);
++    assert_eq!(decoded.read.sequence_number, 17);
++    assert_eq!(decoded.write.counter, 7);
++    assert_eq!(decoded.write.sequence_number, 23);
++    assert_eq!(decoded.options.git_access, Some(GitAccess::Read));
+ }
+ 
+-struct CliClient {
+-    addr: SocketAddr,
+-    cmd: Command,
++const USER: &str = "oxish-e2e";
++
++async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<()> {
++    let status = Command::new("git")
++        .arg("-C")
++        .arg(dir)
++        .args(args)
++        .env("GIT_CONFIG_NOSYSTEM", "1")
++        .env("GIT_CONFIG_GLOBAL", "/dev/null")
++        .env("GIT_CONFIG_SYSTEM", "/dev/null")
++        .status()
++        .await?;
++    anyhow::ensure!(status.success(), "git {} failed", args.join(" "));
++    Ok(())
  }
  
 -impl CliClient {
@@ -8995,20 +9429,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -        );
 -        Ok((status, stdout, stderr))
 -    }
-+#[tokio::test]
-+async fn established_sessions_do_not_use_up_the_pre_auth_allowance() {
-+    let world = script_world("PATH=/usr/bin:/bin; sleep 3; echo OK").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let config = crate::Config {
-+        max_unauthenticated_per_ip: 1,
-+        max_sessions_per_ip: 3,
-+        ..crate::Config::default()
-+    };
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), Some(config), graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
- 
+-
 -    async fn run(
 -        mut self,
 -        command: &[u8],
@@ -9023,21 +9444,7 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -            .stderr(Stdio::piped())
 -            .kill_on_drop(true)
 -            .spawn()?;
-+    let addr = client.addr;
-+    let key = client.key.clone();
-+    let mut runs = vec![tokio::spawn(async move { client.run(Some(SERVICE), b"").await })];
-+    for _ in 0..2 {
-+        tokio::time::sleep(Duration::from_millis(800)).await;
-+        let key = key.clone();
-+        runs.push(tokio::spawn(async move { CliClient::new(addr, &key).run(Some(SERVICE), b"").await }));
-+    }
-+    for run in runs {
-+        let run = run.await.unwrap().unwrap();
-+        assert!(run.status.success(), "a session behind established ones was refused: {}", run.stderr);
-+        assert_eq!(run.stdout(), "OK\n");
-+    }
-+}
- 
+-
 -        let mut stdin = child.stdin.take().unwrap();
 -        // A forced command can exit before reading stdin, so a broken pipe is not a failure
 -        match stdin.write_all(command).await {
@@ -9060,218 +9467,19 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -            Ok(Err(err)) => resume_unwind(err.into_panic()),
 -            Err(_elapsed) => panic!("server still running after client disconnected"),
 -        };
-+/// Open `count` TCP connections that never send anything
-+async fn futures_idle(addr: SocketAddr, count: usize) -> Vec<tokio::net::TcpStream> {
-+    let mut streams = Vec::new();
-+    for _ in 0..count {
-+        streams.push(tokio::net::TcpStream::connect(addr).await.unwrap());
-+    }
-+    streams
-+}
- 
+-
 -        let stdout = String::from_utf8_lossy(&output.stdout);
 -        let stderr = String::from_utf8_lossy(&output.stderr);
 -        Ok((output.status, stdout.into_owned(), stderr.into_owned()))
-+#[tokio::test]
-+async fn exec_rejects_non_git_commands() {
-+    let world = script_world("echo SHOULD-NOT-RUN").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    for command in [
-+        "rm -rf /",
-+        "sh -c id",
-+        "/bin/sh",
-+        "git-upload-pack 'a.git'; id",
-+        "/usr/bin/git-upload-pack 'a.git'",
-+        "git-upload-pack '../a.git'",
-+        "git-upload-pack '/etc/passwd'",
-+    ] {
-+        let (client, _guard) = world
-+            .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-+            .await
-+            .unwrap();
-+        let run = client.run(Some(command), b"").await.unwrap();
-+        assert!(!run.status.success(), "{command:?} was accepted: {}", run.stdout());
-+        assert!(!run.stdout().contains("SHOULD-NOT-RUN"), "{command:?} ran");
-     }
- }
- 
--#[cfg(feature = "aws-lc")]
- #[tokio::test]
--async fn host_keys_from_files_aws_lc() {
--    host_keys_from_files(aws_lc::DEFAULT_PROVIDER)
-+async fn read_only_key_cannot_push_and_is_told_why() {
-+    let world = script_world("echo RAN").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
-+    let run = client.run(Some("git-receive-pack 'a.git'"), b"").await.unwrap();
-+    assert_eq!(run.status.code(), Some(1));
-+    assert!(run.stderr.contains("access denied"), "{}", run.stderr);
-+    assert!(!run.stdout().contains("RAN"));
- }
- 
--#[cfg(feature = "graviola")]
- #[tokio::test]
--async fn host_keys_from_files_graviola() {
--    host_keys_from_files(graviola::DEFAULT_PROVIDER)
-+async fn write_key_can_push_and_missing_repository_is_reported() {
-+    let world = script_world("echo RAN").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-         .await
-         .unwrap();
-+    let run = client.run(Some("git-receive-pack 'a.git'"), b"").await.unwrap();
-+    assert!(run.status.success(), "{}", run.stderr);
-+    assert!(run.stdout().contains("RAN"));
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let run = client.run(Some("git-receive-pack 'missing.git'"), b"").await.unwrap();
-+    assert_eq!(run.status.code(), Some(1));
-+    assert!(run.stderr.contains("not found"), "{}", run.stderr);
- }
- 
--async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::Result<()> {
--    let dir = TempDir::new()?;
--    let mut paths = Vec::new();
--    for key_type in ["ed25519", "ecdsa", "rsa"] {
--        let path = dir.path().join(format!("ssh_host_{key_type}_key"));
--        let status = Command::new("ssh-keygen")
--            .arg("-q")
--            .args(["-t", key_type])
--            .args(["-N", ""])
--            .args(["-C", "oxish-e2e"])
--            .arg("-f")
--            .arg(&path)
--            .status()
-+#[tokio::test]
-+async fn shell_and_pty_requests_are_refused() {
-+    let world = script_world("echo RAN").await;
-+    world.bare_repo("a.git").await.unwrap();
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let run = client.run(None, b"echo shell-ran\nexit\n").await.unwrap();
-+    assert!(!run.status.success());
-+    assert!(!run.stdout().contains("shell-ran"));
-+
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let mut client = client;
-+    client.cmd.arg("-tt");
-+    let run = client.run(Some(SERVICE), b"").await.unwrap();
-+    assert!(run.stderr.contains("PTY allocation request failed"), "{}", run.stderr);
-+}
-+
-+#[tokio::test]
-+async fn subsystem_requests_are_refused() {
-+    let world = script_world("echo RAN").await;
-+    for name in ["sftp", "shell", "git"] {
-+        let (mut client, _guard) = world
-+            .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-             .await
--            .context("failed to run ssh-keygen")?;
--        assert!(status.success(), "ssh-keygen failed");
--        paths.push(path);
-+            .unwrap();
-+        client.cmd.arg("-s");
-+        let run = client.run(Some(name), &[0, 0, 0, 5, 1, 0, 0, 0, 3]).await.unwrap();
-+        assert!(!run.status.success(), "the subsystem {name} was accepted");
-+        assert!(run.stdout.is_empty(), "{:?}", run.stdout);
-+        assert!(run.stderr.contains("subsystem request failed"), "{}", run.stderr);
-     }
-+}
- 
--    let host_keys = HostKeys::from_files(paths.iter(), provider)?;
--    let mut algorithms = Vec::new();
--    for algorithm in host_keys.algorithms() {
--        algorithms.push(algorithm);
-+#[tokio::test]
-+async fn only_validated_git_protocol_reaches_the_command() {
-+    let world = script_world(r#"echo "protocol=[$GIT_PROTOCOL] foo=[$FOO] path=[$PATH]""#).await;
-+    world.bare_repo("a.git").await.unwrap();
-+    for (value, expected) in [
-+        ("version=2", "protocol=[version=2]"),
-+        ("version=1", "protocol=[]"),
-+        ("version=2:extra=1", "protocol=[]"),
-+    ] {
-+        let (client, _guard) = world
-+            .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-+            .await
-+            .unwrap();
-+        let mut client = client;
-+        client.cmd.args(["-o", "SendEnv=GIT_PROTOCOL FOO"]);
-+        client.cmd.env("GIT_PROTOCOL", value).env("FOO", "bar");
-+        let run = client.run(Some(SERVICE), b"").await.unwrap();
-+        let stdout = run.stdout();
-+        assert!(stdout.contains(expected), "{value:?}: {stdout}");
-+        assert!(stdout.contains("foo=[]"), "arbitrary environment leaked: {stdout}");
-+        assert!(stdout.contains(&format!("path=[{}]", world.bin.display())), "{stdout}");
-     }
-+}
- 
--    assert_eq!(algorithms.len(), 2, "unexpected algorithms: {algorithms:?}");
--    assert!(algorithms.contains(&PublicKeyAlgorithm::Ed25519));
--    assert!(algorithms.contains(&PublicKeyAlgorithm::EcdsaSha2Nistp256));
-+fn commit_args(message: &str) -> Vec<&str> {
-+    vec![
-+        "-c",
-+        "user.name=oxish-e2e",
-+        "-c",
-+        "user.email=oxish-e2e@example.com",
-+        "commit",
-+        "-qm",
-+        message,
-+    ]
-+}
- 
--    Ok(())
-+async fn seeded_repo(world: &World, name: &str, extra_bytes: usize) -> (PathBuf, String) {
-+    let bare = world.bare_repo(name).await.unwrap();
-+    let work = world.base().join(format!("seed-{name}"));
-+    fs::create_dir_all(&work).unwrap();
-+    git(&work, &["init", "-q", "-b", "main"]).await.unwrap();
-+    fs::write(work.join("hello.txt"), "hello oxish\n").unwrap();
-+    if extra_bytes > 0 {
-+        let output = Command::new("head")
-+            .args(["-c", &extra_bytes.to_string(), "/dev/urandom"])
-+            .output()
-+            .await
-+            .unwrap();
-+        fs::write(work.join("random.bin"), output.stdout).unwrap();
-+    }
-+    git(&work, &["add", "."]).await.unwrap();
-+    git(&work, &commit_args("seed")).await.unwrap();
-+    git(&work, &["tag", "v1"]).await.unwrap();
-+    git(&work, &["push", "-q", bare.to_str().unwrap(), "main", "v1"]).await.unwrap();
-+    let sha = git_output(&work, &["rev-parse", "HEAD"]).await.unwrap();
-+    (work, sha)
- }
- 
--#[tokio::test]
--async fn verify_keys() {
--    let providers = [
--        #[cfg(feature = "aws-lc")]
--        aws_lc::DEFAULT_PROVIDER,
--        #[cfg(feature = "graviola")]
--        graviola::DEFAULT_PROVIDER,
--    ];
-+async fn git_over_ssh(client: &CliClient, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+-    }
++async fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
 +    let output = Command::new("git")
 +        .arg("-C")
 +        .arg(dir)
 +        .args(args)
-+        .env("GIT_SSH_COMMAND", client.git_ssh_command())
-+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
 +        .env("GIT_CONFIG_NOSYSTEM", "1")
-+        .env("GIT_TERMINAL_PROMPT", "0")
++        .env("GIT_CONFIG_GLOBAL", "/dev/null")
++        .env("GIT_CONFIG_SYSTEM", "/dev/null")
 +        .output()
 +        .await?;
 +    anyhow::ensure!(
@@ -9280,127 +9488,113 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 +        args.join(" "),
 +        String::from_utf8_lossy(&output.stderr),
 +    );
-+    Ok(String::from_utf8_lossy(&output.stderr).into_owned()
-+        + &String::from_utf8_lossy(&output.stdout))
-+}
- 
--    for signer in providers {
--        for verifier in providers {
--            let (signing_key, _) = signer
--                .generate_signing_key(&PublicKeyAlgorithm::Ed25519)
--                .expect("failed to generate signing key");
-+#[tokio::test]
-+async fn exec_git_clone_fetch_and_push_round_trip() {
-+    subscribe();
-+    let world = World::new(Programs::System).await.unwrap();
-+    let (seed, sha) = seeded_repo(&world, "a.git", 0).await;
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("write"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
- 
--            let message = b"the quick brown fox";
--            let signature = signing_key.sign(message);
--            let verifying_key = verifier
--                .verifying_key(signing_key.public_key(), &PublicKeyAlgorithm::Ed25519)
--                .expect("failed to build verifying key");
-+    let url = client.url("a.git");
-+    let clone = world.base().join("clone");
-+    git_over_ssh(&client, &world.base(), &["clone", "-q", &url, clone.to_str().unwrap()]).await.unwrap();
-+    assert_eq!(git_output(&clone, &["rev-parse", "HEAD"]).await.unwrap(), sha);
-+    assert_eq!(fs::read_to_string(clone.join("hello.txt")).unwrap(), "hello oxish\n");
-+
-+    fs::write(clone.join("new.txt"), "pushed\n").unwrap();
-+    git(&clone, &["add", "new.txt"]).await.unwrap();
-+    git(&clone, &commit_args("push me")).await.unwrap();
-+    git_over_ssh(&client, &clone, &["push", "-q", "origin", "main"]).await.unwrap();
-+    let pushed = git_output(&clone, &["rev-parse", "HEAD"]).await.unwrap();
-+
-+    git_over_ssh(&client, &seed, &["pull", "-q", "--ff-only", &url, "main"]).await.unwrap();
-+    assert_eq!(git_output(&seed, &["rev-parse", "HEAD"]).await.unwrap(), pushed);
-+    let listing = git_over_ssh(&client, &world.base(), &["ls-remote", &url]).await.unwrap();
-+    assert!(listing.contains("refs/tags/v1"), "{listing}");
-+}
- 
--            verifying_key
--                .verify(message, &signature)
--                .expect("valid signature should verify");
-+#[tokio::test]
-+async fn exec_git_large_pack_is_byte_exact() {
-+    subscribe();
-+    let world = World::new(Programs::System).await.unwrap();
-+    let (seed, _) = seeded_repo(&world, "big.git", 24 * 1024 * 1024).await;
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let clone = world.base().join("big-clone");
-+    git_over_ssh(&client, &world.base(), &["clone", "-q", &client.url("big.git"), clone.to_str().unwrap()])
-+        .await
-+        .unwrap();
-+    assert_eq!(
-+        fs::read(clone.join("random.bin")).unwrap(),
-+        fs::read(seed.join("random.bin")).unwrap()
-+    );
-+}
- 
--            verifying_key
--                .verify(b"the quick brown cat", &signature)
--                .expect_err("signature over a different message must not verify");
--        }
--    }
-+#[tokio::test]
-+async fn exec_git_push_with_read_key_fails_with_a_diagnostic() {
-+    subscribe();
-+    let world = World::new(Programs::System).await.unwrap();
-+    world.bare_repo("a.git").await.unwrap();
-+    let (seed, _) = seeded_repo(&world, "b.git", 0).await;
-+    let (client, _guard) = world
-+        .serve(&PublicKeyAlgorithm::Ed25519, Some("read"), None, graviola::DEFAULT_PROVIDER)
-+        .await
-+        .unwrap();
-+    let error = git_over_ssh(&client, &seed, &["push", &client.url("b.git"), "main:other"])
-+        .await
-+        .unwrap_err();
-+    assert!(error.to_string().contains("access denied"), "{error}");
++    Ok(String::from_utf8(output.stdout)?.trim_end().to_owned())
  }
  
- #[test]
-@@ -562,7 +1026,7 @@ fn session_state_round_trip() {
-         },
-         read_buf: b"pipelined".to_vec(),
-         options: KeyOptions {
--            command: Some("/bin/true".to_owned()),
-+            git_access: Some(GitAccess::Read),
-         },
-     };
+-#[cfg(feature = "aws-lc")]
+-#[tokio::test]
+-async fn host_keys_from_files_aws_lc() {
+-    host_keys_from_files(aws_lc::DEFAULT_PROVIDER)
+-        .await
+-        .unwrap();
+-}
+-
+-#[cfg(feature = "graviola")]
+ #[tokio::test]
+ async fn host_keys_from_files_graviola() {
+     host_keys_from_files(graviola::DEFAULT_PROVIDER)
+@@ -494,9 +1136,6 @@ async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::
+ #[tokio::test]
+ async fn verify_keys() {
+     let providers = [
+-        #[cfg(feature = "aws-lc")]
+-        aws_lc::DEFAULT_PROVIDER,
+-        #[cfg(feature = "graviola")]
+         graviola::DEFAULT_PROVIDER,
+     ];
  
-@@ -582,69 +1046,120 @@ fn session_state_round_trip() {
-     assert_eq!(decoded.post_quantum_kx, state.post_quantum_kx);
-     assert_eq!(decoded.session_id.as_ref(), state.session_id.as_ref());
-     assert_eq!(decoded.read_buf, state.read_buf);
+@@ -523,130 +1162,6 @@ async fn verify_keys() {
+     }
+ }
+ 
+-#[test]
+-fn session_state_round_trip() {
+-    use crate::DEFAULT_PROVIDER;
+-    let (key, pkcs8) = DEFAULT_PROVIDER
+-        .generate_signing_key(&PublicKeyAlgorithm::Ed25519)
+-        .expect("failed to generate signing key");
+-    let pkcs8 = Zeroizing::new(pkcs8);
+-    let host_key = ServerHostKey::from((&pkcs8, &*key));
+-
+-    let state = SessionState {
+-        addr: SocketAddr::from(([192, 0, 2, 7], 22022)),
+-        identities: Identities {
+-            client: b"client-identity".to_vec(),
+-            server: b"server-identity".to_vec(),
+-        },
+-        post_quantum_kx: false,
+-        strict_kx: None,
+-        host_key,
+-        session_id: Digest::new(b"session-id"),
+-        read: SideState {
+-            source: KeySourceSide {
+-                algorithm: EncryptionAlgorithm::Aes128Gcm,
+-                initial_iv: vec![2; 12],
+-                encryption_key: vec![1; 16],
+-            },
+-            counter: 42,
+-            sequence_number: 17,
+-        },
+-        write: SideState {
+-            source: KeySourceSide {
+-                algorithm: EncryptionAlgorithm::Aes128Gcm,
+-                initial_iv: vec![4; 12],
+-                encryption_key: vec![3; 16],
+-            },
+-            counter: 7,
+-            sequence_number: 23,
+-        },
+-        read_buf: b"pipelined".to_vec(),
+-        options: KeyOptions {
+-            command: Some("/bin/true".to_owned()),
+-        },
+-    };
+-
+-    let mut buf = Vec::new();
+-    state.encode(&mut buf);
+-
+-    let Decoded {
+-        value: decoded,
+-        next,
+-    } = SessionState::decode(&buf, DEFAULT_PROVIDER).unwrap();
+-    assert!(next.is_empty());
+-
+-    assert_eq!(decoded.addr, state.addr);
+-    assert_eq!(decoded.identities.client, state.identities.client);
+-    assert_eq!(decoded.identities.server, state.identities.server);
+-    assert_eq!(decoded.strict_kx.is_some(), state.strict_kx.is_some());
+-    assert_eq!(decoded.post_quantum_kx, state.post_quantum_kx);
+-    assert_eq!(decoded.session_id.as_ref(), state.session_id.as_ref());
+-    assert_eq!(decoded.read_buf, state.read_buf);
 -    assert_eq!(
 -        decoded.read.source.algorithm,
 -        EncryptionAlgorithm::Aes128Gcm
 -    );
-+    assert_eq!(decoded.read.source.algorithm, EncryptionAlgorithm::Aes128Gcm);
-     assert_eq!(decoded.read.source.encryption_key, [1; 16]);
-     assert_eq!(decoded.read.source.initial_iv, [2; 12]);
+-    assert_eq!(decoded.read.source.encryption_key, [1; 16]);
+-    assert_eq!(decoded.read.source.initial_iv, [2; 12]);
 -    assert_eq!(
 -        decoded.write.source.algorithm,
 -        EncryptionAlgorithm::Aes128Gcm
 -    );
-+    assert_eq!(decoded.write.source.algorithm, EncryptionAlgorithm::Aes128Gcm);
-     assert_eq!(decoded.write.source.encryption_key, [3; 16]);
-     assert_eq!(decoded.write.source.initial_iv, [4; 12]);
-     assert_eq!(decoded.read.counter, 42);
-     assert_eq!(decoded.read.sequence_number, 17);
-     assert_eq!(decoded.write.counter, 7);
-     assert_eq!(decoded.write.sequence_number, 23);
+-    assert_eq!(decoded.write.source.encryption_key, [3; 16]);
+-    assert_eq!(decoded.write.source.initial_iv, [4; 12]);
+-    assert_eq!(decoded.read.counter, 42);
+-    assert_eq!(decoded.read.sequence_number, 17);
+-    assert_eq!(decoded.write.counter, 7);
+-    assert_eq!(decoded.write.sequence_number, 23);
 -    assert_eq!(decoded.options.command.as_deref(), Some("/bin/true"));
-+    assert_eq!(decoded.options.git_access, Some(GitAccess::Read));
- }
- 
+-}
+-
 -async fn store(
 -    algorithm: &PublicKeyAlgorithm<'_>,
 -    options: Option<&str>,
@@ -9422,86 +9616,20 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -        .args(["-C", "oxish-e2e"]) // key comment
 -        .arg("-f") // output file for the private key (public key gets a .pub suffix)
 -        .arg(&key_path)
-+const USER: &str = "oxish-e2e";
-+
-+async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<()> {
-+    let status = Command::new("git")
-+        .arg("-C")
-+        .arg(dir)
-+        .args(args)
-+        .env("GIT_CONFIG_NOSYSTEM", "1")
-+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-         .status()
-+        .await?;
-+    anyhow::ensure!(status.success(), "git {} failed", args.join(" "));
-+    Ok(())
-+}
-+
-+async fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-+    let output = Command::new("git")
-+        .arg("-C")
-+        .arg(dir)
-+        .args(args)
-+        .env("GIT_CONFIG_NOSYSTEM", "1")
-+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-+        .output()
-+        .await?;
-+    anyhow::ensure!(
-+        output.status.success(),
-+        "git {} failed: {}",
-+        args.join(" "),
-+        String::from_utf8_lossy(&output.stderr),
-+    );
-+    Ok(String::from_utf8(output.stdout)?.trim_end().to_owned())
-+}
-+
-+#[tokio::test]
-+async fn host_keys_from_files_graviola() {
-+    host_keys_from_files(graviola::DEFAULT_PROVIDER)
-         .await
+-        .status()
+-        .await
 -        .context("failed to run ssh-keygen")?;
 -    assert!(status.success(), "ssh-keygen failed");
-+        .unwrap();
-+}
- 
+-
 -    let authorized_key = fs::read_to_string(key_path.with_extension("pub"))?;
 -    let authorized_key = match options {
 -        Some(options) => format!("{options} {authorized_key}"),
 -        None => authorized_key,
 -    };
-+async fn host_keys_from_files(provider: &'static dyn CryptoProvider) -> anyhow::Result<()> {
-+    let dir = TempDir::new()?;
-+    let mut paths = Vec::new();
-+    for key_type in ["ed25519", "ecdsa", "rsa"] {
-+        let path = dir.path().join(format!("ssh_host_{key_type}_key"));
-+        let status = Command::new("ssh-keygen")
-+            .arg("-q")
-+            .args(["-t", key_type])
-+            .args(["-N", ""])
-+            .args(["-C", "oxish-e2e"])
-+            .arg("-f")
-+            .arg(&path)
-+            .status()
-+            .await
-+            .context("failed to run ssh-keygen")?;
-+        assert!(status.success(), "ssh-keygen failed");
-+        paths.push(path);
-+    }
-+
-+    let host_keys = HostKeys::from_files(paths.iter(), provider)?;
-+    let mut algorithms = Vec::new();
-+    for algorithm in host_keys.algorithms() {
-+        algorithms.push(algorithm);
-+    }
- 
+-
 -    let key = AuthorizedKey::from_str(&authorized_key, provider)
 -        .ok_or_else(|| anyhow::anyhow!("failed to parse generated public key"))?;
-+    assert_eq!(algorithms.len(), 2, "unexpected algorithms: {algorithms:?}");
-+    assert!(algorithms.contains(&PublicKeyAlgorithm::Ed25519));
-+    assert!(algorithms.contains(&PublicKeyAlgorithm::EcdsaSha2Nistp256));
- 
+-
 -    let user = User {
 -        name: Username::try_from(USER.to_string())?,
 -        id: 1000,
@@ -9509,40 +9637,13 @@ index a93a8ecbde3c072fbcbab751cbeb771ee9020fea..8234e80e0140e43212c65515ea23cd4b
 -        home_dir: PathBuf::from("/var/empty"),
 -        shell: PathBuf::from("/bin/sh"),
 -    };
-+    Ok(())
-+}
-+
-+#[tokio::test]
-+async fn verify_keys() {
-+    let providers = [
-+        graviola::DEFAULT_PROVIDER,
-+    ];
-+
-+    for signer in providers {
-+        for verifier in providers {
-+            let (signing_key, _) = signer
-+                .generate_signing_key(&PublicKeyAlgorithm::Ed25519)
-+                .expect("failed to generate signing key");
-+
-+            let message = b"the quick brown fox";
-+            let signature = signing_key.sign(message);
-+            let verifying_key = verifier
-+                .verifying_key(signing_key.public_key(), &PublicKeyAlgorithm::Ed25519)
-+                .expect("failed to build verifying key");
-+
-+            verifying_key
-+                .verify(message, &signature)
-+                .expect("valid signature should verify");
- 
+-
 -    Ok((dir, Box::new(SingleUser::with_keys(user, vec![key]))))
-+            verifying_key
-+                .verify(b"the quick brown cat", &signature)
-+                .expect_err("signature over a different message must not verify");
-+        }
-+    }
- }
- 
+-}
+-
  static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
+ 
+ /// Build and locate the `oxish-session` binary
 @@ -655,7 +1170,10 @@ static SESSION_BINARY: OnceCell<PathBuf> = OnceCell::const_new();
  /// binary here (a no-op when fresh). Unit tests run from `target/<profile>/deps/` (or
  /// `target/<profile>/build/<package>/<hash>/out/` with Cargo's newer build directory layout),
