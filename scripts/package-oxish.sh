@@ -8,7 +8,7 @@
 # <out_dir> changes unless the target passes.
 # The archive holds the executables scripts/oxish-bins.sh lists (bin/oxish, bin/oxish-sftp,
 # bin/oxish-scp, bin/oxish-server, bin/oxish-session, bin/oxish-keygen), the upstream licenses, and a
-# provenance.json naming the OxiSH revision, Graviola version, patch identity, toolchain, build
+# provenance.json naming the OxiSH revision, Graviola revision, patch identity, toolchain, build
 # commit, target, and the SHA-256 of each executable. No Git binary is included.
 set -eu
 
@@ -42,10 +42,11 @@ version=$(lock_field oxish version)
 oxish_rev=$(lock_field oxish rev)
 graviola_version=$(lock_field graviola version)
 graviola_sha256=$(lock_field graviola sha256)
+graviola_rev=$(lock_field graviola rev)
 crate_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$repo_root/vendor/oxish/oxish/Cargo.toml" | sed -n '1p')
 [ -n "$version" ] && [ "$version" = "$crate_version" ] \
     || fail "sources.lock.json oxish version '$version' does not match vendor/oxish/oxish/Cargo.toml '$crate_version'"
-patch_sha256=$(cat "$repo_root"/patches/oxish/*.patch "$repo_root"/patches/graviola/*.patch | sha256 | awk '{ print $1 }')
+patch_sha256=$(cat "$repo_root"/patches/oxish/*.patch | sha256 | awk '{ print $1 }')
 
 mkdir -p "$out_dir"
 out_dir=$(CDPATH= cd -- "$out_dir" && pwd -P)
@@ -97,8 +98,8 @@ cat > "$pkg/THIRD-PARTY.md" <<EOT
 
 - OxiSH ($oxish_rev, https://github.com/djc/oxish): Apache-2.0 OR MIT, see LICENSE-APACHE and
   LICENSE-MIT. Local patches: https://github.com/laputa-systems/ssh-build/tree/$build_commit/patches
-- Graviola $graviola_version (https://github.com/ctz/graviola): Apache-2.0 OR ISC OR MIT-0,
-  patched to add the OpenSSH chacha20-poly1305 packet construction.
+- Graviola $graviola_version ($graviola_rev, https://github.com/laputa-systems/graviola):
+  Apache-2.0 OR ISC OR MIT-0.
 - The OxiSH clients (oxish, oxish-sftp, oxish-scp) and oxish-keygen (client/ in https://github.com/laputa-systems/ssh-build):
   Apache-2.0 OR MIT.
 - Rust standard library and the crates in vendor/oxish/Cargo.lock and client/Cargo.lock under
@@ -112,12 +113,12 @@ executables=$(
 )
 jaq -n \
     --arg target "$triple" --arg oxish_rev "$oxish_rev" --arg graviola "$graviola_version" \
-    --arg graviola_sha256 "$graviola_sha256" --arg patch_sha256 "$patch_sha256" \
+    --arg graviola_rev "$graviola_rev" --arg graviola_sha256 "$graviola_sha256" --arg patch_sha256 "$patch_sha256" \
     --arg toolchain "$toolchain" --arg commit "$build_commit" --argjson dirty "$build_dirty" \
     --argjson executables "$executables" \
     '{product: "oxish", status: "experimental", target: $target,
       oxish: {repo: "https://github.com/djc/oxish", rev: $oxish_rev},
-      graviola: {version: $graviola, crate_sha256: $graviola_sha256},
+      graviola: {repo: "https://github.com/laputa-systems/graviola", rev: $graviola_rev, version: $graviola, archive_sha256: $graviola_sha256},
       patches_sha256: $patch_sha256, toolchain: $toolchain,
       build_commit: $commit, build_dirty: $dirty,
       cpu_floor: {x86_64: "Broadwell-class: AES-NI PCLMULQDQ BMI1 BMI2 ADX POPCNT AVX2", aarch64: "NEON with AES PMULL SHA2"},
@@ -133,12 +134,12 @@ jaq -n \
     --arg version "$version" --arg target "$triple" --arg commit "$build_commit" \
     --arg lock_sha256 "$lock_sha256" --argjson dirty "$build_dirty" \
     --arg oxish_rev "$oxish_rev" --arg graviola "$graviola_version" \
-    --arg graviola_sha256 "$graviola_sha256" --arg patch_sha256 "$patch_sha256" \
+    --arg graviola_rev "$graviola_rev" --arg graviola_sha256 "$graviola_sha256" --arg patch_sha256 "$patch_sha256" \
     --arg toolchain "$toolchain" --argjson executables "$(printf '%s\n' $bins | jaq -R -s 'split("\n") | map(select(length > 0))')" \
     '{schema_version: 1, product: "oxish", version: $version, target: $target, executables: $executables,
       source_revision: $commit, sources_lock_sha256: $lock_sha256, build_dirty: $dirty,
       upstream_oxish_rev: $oxish_rev, graviola_version: $graviola,
-      graviola_crate_sha256: $graviola_sha256, patches_sha256: $patch_sha256,
+      graviola_rev: $graviola_rev, graviola_archive_sha256: $graviola_sha256, patches_sha256: $patch_sha256,
       toolchain: $toolchain}' > "$stage/$name.manifest.json"
 
 rm -f "$out_dir/oxish-"*"-$triple.tar.xz" "$out_dir/oxish-"*"-$triple.manifest.json"

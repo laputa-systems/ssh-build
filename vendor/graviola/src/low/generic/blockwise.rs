@@ -15,6 +15,10 @@ impl<const N: usize> Blockwise<N> {
         }
     }
 
+    fn wipe(&mut self) {
+        crate::low::zeroise(&mut self.buffer);
+    }
+
     pub(crate) const fn used(&self) -> usize {
         self.used
     }
@@ -100,5 +104,31 @@ impl<const N: usize> AsRef<[u8]> for FinalBlocks<N> {
             Self::One(one) => &one[..],
             Self::Two(two) => two.as_flattened(),
         }
+    }
+}
+
+impl<const N: usize> Drop for Blockwise<N> {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+impl<const N: usize> Drop for FinalBlocks<N> {
+    fn drop(&mut self) {
+        match self {
+            Self::One(block) => crate::low::zeroise(block),
+            Self::Two(blocks) => crate::low::zeroise(blocks.as_flattened_mut()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wipe_clears_partial_buffer() {
+        let mut block = super::Blockwise::<16>::new();
+        block.add(b"secret");
+        block.wipe();
+        assert_eq!(block.buffer, [0; 16]);
     }
 }

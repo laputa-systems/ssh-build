@@ -6,6 +6,7 @@ RUN apk add --no-cache \
         binutils=2.45.1-r1 \
         gcc=15.2.0-r5 \
         make=4.4.1-r4 \
+        patch=2.8.1-r0 \
         musl-dev=1.2.6-r3 \
         linux-headers=7.0.0-r1 \
         zlib-dev=1.4-r0 \

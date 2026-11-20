@@ -52,7 +52,7 @@ check_workspace() {
     printf '%s\n' "$tree" | sed 's/ v[0-9].*$//' | check_release_graph
     check_lock < "$lock"
     printf '%s\n' "$tree" | grep -q '^graviola v.*vendor/graviola' \
-        || fail "$package: graviola does not resolve to the patched vendor/graviola"
+        || fail "$package: graviola does not resolve to vendor/graviola"
     graviola=$(sed -n '/^name = "graviola"$/{n;s/^version = "\(.*\)"$/\1/p;}' "$lock")
     [ -n "$graviola" ] || fail "$package: graviola is not in $lock"
     echo "crypto graph ok: $package uses graviola $graviola as the only provider (release graph and $lock)"

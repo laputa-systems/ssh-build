@@ -90,6 +90,7 @@ impl ChaCha20Poly1305 {
 
         // Now initialise Poly1305
         let mut poly = Poly1305::new(&polykey);
+        zeroise(&mut polykey);
 
         fn pad(poly: &mut Poly1305, len: usize) {
             let pad_buf = [0u8; 16];

@@ -1,8 +1,4 @@
 #!/bin/sh
-# Reproduce vendor/graviola from the pinned crates.io release plus patches/graviola.
-#   sh scripts/vendor-graviola.sh verify   rebuild in .work/graviola-check, diff against vendor/graviola
-#   sh scripts/vendor-graviola.sh export   regenerate patches/graviola from vendor/graviola (maintainers)
-# The pin is the graviola input (version and sha256 of the .crate file) in sources.lock.json.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -10,67 +6,58 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$script_dir/lock.sh"
 root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 work_dir=$root_dir/.work
-patch_dir=$root_dir/patches/graviola
 vendor_dir=$root_dir/vendor/graviola
 
 fail() { echo "vendor-graviola: $*" >&2; exit 1; }
 
-version=$(lock_field graviola version)
+rev=$(lock_field graviola rev)
 checksum=$(lock_field graviola sha256)
-[ "${#checksum}" -eq 64 ] || fail "no checksum pinned for graviola $version"
+[ "${#rev}" -eq 40 ] || fail "invalid graviola revision"
+[ "${#checksum}" -eq 64 ] || fail "no checksum pinned for graviola $rev"
+archive=$work_dir/sources/graviola-$rev.tar.gz
 
-crate=$work_dir/sources/graviola-$version.crate
 fetch() {
     mkdir -p "$work_dir/sources"
-    if [ ! -f "$crate" ]; then
-        curl -fsSL -o "$crate.tmp" "$(lock_field graviola url)"
-        mv "$crate.tmp" "$crate"
+    if [ ! -f "$archive" ]; then
+        curl -fsSL -o "$archive.tmp" "$(lock_field graviola url)"
+        mv "$archive.tmp" "$archive"
     fi
-    got=$(sha256 "$crate" | awk '{ print $1 }')
-    [ "$got" = "$checksum" ] || fail "graviola-$version.crate sha256 $got does not match the pin $checksum"
+    got=$(sha256 "$archive" | awk '{ print $1 }')
+    [ "$got" = "$checksum" ] || fail "graviola $rev sha256 $got does not match the pin $checksum"
 }
 
-materialize_base() {
+materialize() {
     dest=$1
     rm -rf "$dest"
     mkdir -p "$dest"
-    tar -xzf "$crate" -C "$dest" --strip-components=1
-    for entry in "$dest"/* "$dest"/.[!.]*; do
-        case ${entry##*/} in Cargo.toml|README.md|src) ;; *) rm -rf "$entry" ;; esac
-    done
+    tar -xzf "$archive" -C "$dest" --strip-components=2 \
+        "graviola-$rev/graviola/Cargo.toml" "graviola-$rev/graviola/src"
+    tar -xOzf "$archive" "graviola-$rev/README.md" > "$dest/README.md"
+    awk '
+        /^\[dev-dependencies\]$/ || /^\[target\..*\.dev-dependencies\]$/ { skip = 1; next }
+        /^\[/ { skip = 0 }
+        !skip { print }
+    ' "$dest/Cargo.toml" > "$dest/Cargo.toml.tmp"
+    mv "$dest/Cargo.toml.tmp" "$dest/Cargo.toml"
 }
 
 case ${1:-} in
     verify)
         fetch
         check=$work_dir/graviola-check
-        materialize_base "$check"
-        for patch in "$patch_dir"/*.patch; do
-            [ -f "$patch" ] || fail "no patches in $patch_dir"
-            (cd "$check" && patch -p1 -s -N -E < "$patch") || fail "patch $patch does not apply to graviola $version"
-        done
-        find "$check" -depth -type d -empty -exec rmdir {} \;
+        materialize "$check"
         diff -r "$check" "$vendor_dir" > "$work_dir/graviola-check.diff" || {
             head -n 20 "$work_dir/graviola-check.diff" >&2
-            fail "vendor/graviola differs from graviola $version plus patches/graviola"
+            fail "vendor/graviola differs from laputa-systems/graviola@$rev"
         }
-        echo "vendor/graviola == graviola $version (sha256 verified) + $(ls "$patch_dir"/*.patch | wc -l | tr -d ' ') patches"
+        echo "vendor/graviola == laputa-systems/graviola@$rev (sha256 verified)"
         ;;
     export)
         fetch
-        base=$work_dir/graviola-export
-        materialize_base "$base"
-        git -C "$base" init --quiet
-        git -C "$base" add -A
-        git -C "$base" -c user.name=vendor -c user.email=vendor@invalid commit --quiet -m base
-        rsync -a --delete --exclude .git "$vendor_dir/" "$base/"
-        git -C "$base" add -A
-        mkdir -p "$patch_dir"
-        rm -f "$patch_dir"/*.patch
-        out=$patch_dir/0001-ssh-chacha20-poly1305.patch
-        git -C "$base" diff --cached --binary --full-index --no-color > "$out"
-        [ -s "$out" ] || fail "vendor/graviola has no changes to export"
-        echo "wrote $out"
+        materialize "$work_dir/graviola-export"
+        rm -rf "$vendor_dir"
+        cp -R "$work_dir/graviola-export" "$vendor_dir"
+        echo "exported laputa-systems/graviola@$rev to vendor/graviola"
         ;;
     *) fail "usage: vendor-graviola.sh verify|export" ;;
 esac

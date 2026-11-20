@@ -39,8 +39,9 @@ impl Poly1305 {
     pub(crate) fn add_bytes(&mut self, bytes: &[u8]) {
         let bytes = self.bw.add_leading(bytes);
 
-        if let Some(block) = self.bw.take() {
+        if let Some(mut block) = self.bw.take() {
             self.process_whole_block(&block);
+            crate::low::zeroise(&mut block);
         }
 
         let (full_blocks, remainder) = bytes.as_chunks::<16>();
@@ -87,6 +88,14 @@ impl Poly1305 {
     fn process_block(&mut self, block: &[u64; 3]) {
         add(&mut self.h, block);
         mul(&mut self.h, &self.r);
+    }
+}
+
+impl Drop for Poly1305 {
+    fn drop(&mut self) {
+        crate::low::zeroise(&mut self.h);
+        crate::low::zeroise(&mut self.r);
+        crate::low::zeroise(&mut self.s);
     }
 }
 

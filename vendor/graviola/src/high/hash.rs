@@ -40,6 +40,12 @@ impl HashOutput {
     }
 }
 
+impl Drop for HashOutput {
+    fn drop(&mut self) {
+        crate::low::zeroise(self.as_mut());
+    }
+}
+
 impl PartialEq for HashOutput {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
