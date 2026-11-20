@@ -42,6 +42,7 @@ impl<H: Hash> Hmac<H> {
         }
         let mut outer = H::new();
         outer.update(&key_block);
+        crate::low::zeroise(&mut key_block);
 
         Self { inner, outer }
     }

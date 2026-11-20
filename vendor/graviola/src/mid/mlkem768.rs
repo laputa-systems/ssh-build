@@ -56,8 +56,11 @@ impl DecapKey {
     pub fn generate() -> Result<Self, Error> {
         let _entry = low::Entry::new_secret();
         let mut seed = [0u8; 64];
-        SystemRandom.fill(&mut seed)?;
-        Ok(Self::keygen_internal(&seed))
+        let result = SystemRandom
+            .fill(&mut seed)
+            .map(|()| Self::keygen_internal(&seed));
+        low::zeroise(&mut seed);
+        result
     }
 
     /// Decapsulate ciphertext `c`, yielding a [`SharedSecret`].

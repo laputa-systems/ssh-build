@@ -47,8 +47,17 @@ impl ChaCha20 {
             for (out, key) in block.iter_mut().zip(stream.iter()) {
                 *out ^= *key;
             }
+            crate::low::zeroise(&mut stream);
             self.nonce[0] = self.nonce[0].wrapping_add(1);
         }
+    }
+}
+
+impl Drop for ChaCha20 {
+    fn drop(&mut self) {
+        crate::low::zeroise(&mut self.key0);
+        crate::low::zeroise(&mut self.key1);
+        crate::low::zeroise(&mut self.nonce);
     }
 }
 
@@ -66,11 +75,14 @@ impl XChaCha20 {
         chacha_nonce[8..16].copy_from_slice(&nonce[16..24]);
         let chacha_nonce = four(&chacha_nonce);
 
-        Self(ChaCha20 {
+        let result = Self(ChaCha20 {
             key0,
             key1,
             nonce: chacha_nonce,
-        })
+        });
+        crate::low::zeroise(&mut key0);
+        crate::low::zeroise(&mut key1);
+        result
     }
 
     pub(crate) fn cipher(&mut self, buffer: &mut [u8]) {

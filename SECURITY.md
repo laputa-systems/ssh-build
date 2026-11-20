@@ -196,7 +196,7 @@ unreadable or malformed host key files were skipped with a warning (`host_keys::
 
 Graviola is the only provider in the release graph (`sh scripts/check-crypto-graph.sh`, which
 also scans `Cargo.lock` and rejects primitive crates). The SSH packet construction lives in a
-patched, checksum-pinned Graviola (`patches/graviola`), not in a second hand-written ChaCha20 or
+checksum-pinned Graviola fork, not in a second hand-written ChaCha20 or
 Poly1305. It is checked against 440 packets sealed by OpenSSH's own `chachapoly_crypt`, every
 single-bit modification of a packet and tag, sequence-number binding, and the per-key nonce limit;
 libFuzzer ran the open and round-trip targets for 4 minutes each (14.7 M and 8.1 M executions)

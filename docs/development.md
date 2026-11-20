@@ -81,7 +81,7 @@ client/fixture/ssh-fixture.sh exec cargo test --locked --manifest-path client/Ca
 SSH_BIN_DIR=... OXISH_BIN_DIR=... sh test/oxish-keygen.sh             # the same on the unpacked archives
 sh scripts/check-crypto-graph.sh [--selftest]      # Graviola is the only provider (server and client: graph and Cargo.lock)
 sh scripts/vendor-oxish.sh verify                  # vendor/oxish == pinned upstream + patches/oxish
-sh scripts/vendor-graviola.sh verify               # vendor/graviola == pinned crate + patches/graviola
+sh scripts/vendor-graviola.sh verify               # vendor/graviola == pinned fork revision
 cargo test --locked --manifest-path vendor/oxish/Cargo.toml
 make binaries PRODUCT=oxish TARGET=aarch64-apple-darwin   # dist/oxish/aarch64-apple-darwin/bin
 TARGET=aarch64-apple-darwin sh scripts/package-oxish.sh    # dist/release/oxish-<version>-<triple>.tar.xz + .manifest.json
@@ -154,16 +154,17 @@ are byte-identical.
 ## Vendored sources
 
 `vendor/oxish` is `https://github.com/djc/oxish` at the `oxish` input's `rev` plus `patches/oxish`, and
-`vendor/graviola` is the `graviola` crate from crates.io (SHA-256 pinned) plus `patches/graviola`.
+`vendor/graviola` is the `graviola/` crate from the SHA-256-pinned laputa-systems/graviola fork revision.
 Both are `Apache-2.0 OR MIT` or `Apache-2.0 OR ISC OR MIT-0` (SPDX headers and `Cargo.toml`);
 `vendor/oxish/LICENSE-*` are upstream's.
 
 - From OxiSH we carry the workspace, the crates, `fuzz/`, `deny.toml`, `README.md` and
   `openssh-vulnerabilities.md`; `.github`, `codecov.yml`, `dist-workspace.toml` and
   `CONTRIBUTING.md` are dropped.
-- Edit `vendor/` freely, then run both `export` scripts. The patches are what reviewers read and
-  `verify` is the gate. Never change `vendor/graviola` beyond the SSH packet module
-  (`vendor/graviola/src/mid/ssh_chacha20poly1305.rs`) and its manifest.
+- Edit `vendor/oxish`, then run its `export` script; patches are what reviewers read and `verify`
+  is the gate. Update Graviola in its fork, pin its revision and archive checksum, then run
+  `sh scripts/vendor-graviola.sh export`. Its vendored manifest omits dev-dependencies so Cargo
+  can use the existing offline lockfiles without pulling a second crypto provider.
 - Moving to a new revision is an explicit edit of the pin followed by a reviewed `export`.
 - `vendor/oxish/oxish-graviola/tests/openssh-chachapoly.vectors` holds packets sealed by OpenSSH's
   own `chachapoly_crypt`; `sh scripts/gen-chachapoly-vectors.sh` regenerates them from the pinned

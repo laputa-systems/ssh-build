@@ -26,10 +26,12 @@
     {
       "name": "graviola",
       "version": "0.4.5",
-      "url": "https://static.crates.io/crates/graviola/graviola-0.4.5.crate",
-      "sha256": "bc0377ccc5ef095424121430046e475cf06658e23475b1af526655cfad0b86b2",
+      "url": "https://codeload.github.com/laputa-systems/graviola/tar.gz/bbb6286c5bd312411a79feb165232b0b3a6b19fa",
+      "sha256": "c1a88cd34bf2efb0fa915439661883dbda88904bf36cda9c6cf22610353af989",
       "role": "source",
-      "note": "crates.io checksum; OxiSH workspace uses the vendored Graviola release"
+      "note": "pinned fork revision; sha256 is of its codeload archive",
+      "repo": "https://github.com/laputa-systems/graviola",
+      "rev": "bbb6286c5bd312411a79feb165232b0b3a6b19fa"
     }
   ]
 }

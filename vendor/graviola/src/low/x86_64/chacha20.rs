@@ -34,6 +34,13 @@ impl ChaCha20 {
     }
 }
 
+impl Drop for ChaCha20 {
+    fn drop(&mut self) {
+        crate::low::zeroise_value(&mut self.z07);
+        crate::low::zeroise_value(&mut self.z8f);
+    }
+}
+
 pub(crate) struct XChaCha20(ChaCha20);
 
 impl XChaCha20 {
@@ -463,6 +470,7 @@ fn core_2x(t07: __m256i, z8f: &mut __m256i, xor_out: &mut [u8]) {
         for (o, k) in xor_out.iter_mut().zip(ks.iter()) {
             *o ^= *k;
         }
+        crate::low::zeroise(&mut ks);
     }
 }
 
@@ -530,6 +538,10 @@ fn hchacha(key: &[u8; 32], nonce: &[u8; 24]) -> ChaCha20 {
         _mm_lddqu_si128(chacha_nonce.as_ptr().cast())
     });
 
+    crate::low::zeroise_value(&mut z03);
+    crate::low::zeroise_value(&mut z47);
+    crate::low::zeroise_value(&mut z8b);
+    crate::low::zeroise_value(&mut zcf);
     ChaCha20 { z07, z8f }
 }
 

@@ -38,8 +38,9 @@ impl Sha256Context {
 
         let bytes = self.blockwise.add_leading(bytes);
 
-        if let Some(block) = self.blockwise.take() {
+        if let Some(mut block) = self.blockwise.take() {
             self.update_blocks(&block);
+            crate::low::zeroise(&mut block);
         }
 
         let (whole_blocks, remainder) = {
@@ -88,12 +89,6 @@ impl Sha256Context {
     pub const OUTPUT_SZ: usize = 32;
 }
 
-impl Drop for Sha256Context {
-    fn drop(&mut self) {
-        crate::low::zeroise_value(self);
-    }
-}
-
 /// A context for incremental computation of SHA384.
 #[derive(Clone)]
 pub struct Sha384Context {
@@ -128,9 +123,10 @@ impl Sha384Context {
 
     /// Complete the SHA384 computation, returning the hash output.
     pub fn finish(self) -> [u8; Self::OUTPUT_SZ] {
-        let inner = self.inner.finish();
-        // SAFETY: 48 is less than 64.
-        inner[..Self::OUTPUT_SZ].try_into().unwrap()
+        let mut inner = self.inner.finish();
+        let output = inner[..Self::OUTPUT_SZ].try_into().unwrap();
+        crate::low::zeroise(&mut inner);
+        output
     }
 
     /// The output size of SHA384.
@@ -173,8 +169,9 @@ impl Sha512Context {
 
         let bytes = self.blockwise.add_leading(bytes);
 
-        if let Some(block) = self.blockwise.take() {
+        if let Some(mut block) = self.blockwise.take() {
             self.update_blocks(&block);
+            crate::low::zeroise(&mut block);
         }
 
         let (whole_blocks, remainder) = {
@@ -221,9 +218,15 @@ impl Sha512Context {
     pub const OUTPUT_SZ: usize = 64;
 }
 
+impl Drop for Sha256Context {
+    fn drop(&mut self) {
+        crate::low::zeroise(&mut self.h);
+    }
+}
+
 impl Drop for Sha512Context {
     fn drop(&mut self) {
-        crate::low::zeroise_value(self);
+        crate::low::zeroise(&mut self.h);
     }
 }
 

@@ -232,6 +232,7 @@ impl Shake256 {
                 *ch = s.to_le_bytes();
             }
         }
+        crate::low::zeroise(states.as_flattened_mut());
     }
 }
 
@@ -244,6 +245,10 @@ pub(crate) struct SqueezingSponge<const R: usize> {
 }
 
 impl<const R: usize> SqueezingSponge<R> {
+    fn wipe(&mut self) {
+        crate::low::zeroise(&mut self.s);
+    }
+
     /// Resume squeezing from `s`, which is owed a keccak-f.
     pub(crate) fn from_owed_state(s: [u64; 25]) -> Self {
         Self { s }
@@ -425,8 +430,9 @@ impl<const R: usize, const PAD: u8> Sponge<R, PAD> {
     pub(crate) fn absorb(&mut self, bytes: &[u8]) {
         let bytes = self.buffer.add_leading(bytes);
 
-        if let Some(block) = self.buffer.take() {
+        if let Some(mut block) = self.buffer.take() {
             self.absorb_block(&block);
+            crate::low::zeroise(&mut block);
         }
 
         let (blocks, remainder) = bytes.as_chunks();
@@ -469,8 +475,9 @@ impl<const R: usize, const PAD: u8> Sponge<R, PAD> {
                 self.buffer.add_leading(&[0x80]);
             }
         }
-        let padded = self.buffer.take().unwrap();
+        let mut padded = self.buffer.take().unwrap();
         self.xor_block(&padded);
+        crate::low::zeroise(&mut padded);
     }
 
     fn absorb_block(&mut self, block: &[u8; R]) {
@@ -541,11 +548,42 @@ const SHA_PAD_BYTE: u8 = 0b0000_0110;
 /// padding bit.
 pub(crate) const SHAKE_PAD_BYTE: u8 = 0b0001_1111;
 
+impl Drop for SqueezingSponge4xShake128 {
+    fn drop(&mut self) {
+        crate::low::zeroise(self.states.as_flattened_mut());
+    }
+}
+
+impl<const R: usize> Drop for SqueezingSponge<R> {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+impl Drop for Shake128 {
+    fn drop(&mut self) {
+        crate::low::zeroise(&mut self.buffer);
+    }
+}
+
+impl Drop for Shake256 {
+    fn drop(&mut self) {
+        crate::low::zeroise(&mut self.buffer);
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::test::*;
+
+    #[test]
+    fn wipe_clears_sponge_state() {
+        let mut sponge = Shake128Sponge::new_for_message(&[b"secret"]);
+        sponge.wipe();
+        assert_eq!(sponge.s, [0; 25]);
+    }
 
     #[test]
     fn hello() {
