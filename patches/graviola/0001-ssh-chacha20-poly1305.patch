@@ -123,7 +123,7 @@ index 575c8cbe3578c299aa9060c7f934ee681838f205..c29addb9efd6b642150ef90cc0e8e7f8
  mod tests {
 diff --git a/src/mid/ssh_chacha20poly1305.rs b/src/mid/ssh_chacha20poly1305.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..982cd1c003165f169f62cfd0f3927d77b64783a1
+index 0000000000000000000000000000000000000000..b0e6fd54012d6b75f831e58942f22405fc4933d6
 --- /dev/null
 +++ b/src/mid/ssh_chacha20poly1305.rs
 @@ -0,0 +1,152 @@
@@ -205,7 +205,7 @@ index 0000000000000000000000000000000000000000..982cd1c003165f169f62cfd0f3927d77
 +        self.payload_cipher(sequence_number).cipher(payload);
 +
 +        let mut poly = Poly1305::new(&poly_key);
-+        poly_key.iter_mut().for_each(|b| *b = 0);
++        crate::low::zeroise(&mut poly_key);
 +        poly.add_bytes(length);
 +        poly.add_bytes(payload);
 +        tag_out.copy_from_slice(&poly.finish());
@@ -229,7 +229,7 @@ index 0000000000000000000000000000000000000000..982cd1c003165f169f62cfd0f3927d77
 +
 +        let mut poly_key = self.poly_key(sequence_number);
 +        let mut poly = Poly1305::new(&poly_key);
-+        poly_key.iter_mut().for_each(|b| *b = 0);
++        crate::low::zeroise(&mut poly_key);
 +        poly.add_bytes(packet);
 +        let expected = poly.finish();
 +
