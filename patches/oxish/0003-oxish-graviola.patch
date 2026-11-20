@@ -1,5 +1,5 @@
 diff --git a/oxish-graviola/src/lib.rs b/oxish-graviola/src/lib.rs
-index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..b25cf6debbf7ca3d5ceaf54d06b19ff89234d86c 100644
+index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..beac1d2c5753f71f91c63f7aec68edca2a691568 100644
 --- a/oxish-graviola/src/lib.rs
 +++ b/oxish-graviola/src/lib.rs
 @@ -1,7 +1,9 @@
@@ -153,19 +153,6 @@ index 7cccdbf6ac7f1a1c775f8efacaeadd4de3f612cb..b25cf6debbf7ca3d5ceaf54d06b19ff8
  /// Shared AES-128-GCM state: the key and the current 12-byte nonce
  struct GcmState {
      key: AesGcm,
-@@ -465,8 +577,10 @@ impl HashContext for Sha256Context {
-         Box::new(Self(self.0.clone()))
-     }
- 
--    fn finish(self: Box<Self>) -> Digest {
--        Digest::new(self.0.finish().as_ref())
-+    fn finish(mut self: Box<Self>) -> Digest {
-+        // Moving the context out of its box would free the box's copy unwiped.
-+        let context = core::mem::replace(&mut self.0, GSha256::new());
-+        Digest::new(context.finish().as_ref())
-     }
- }
- 
 diff --git a/oxish-graviola/tests/chacha20_poly1305_openssh.rs b/oxish-graviola/tests/chacha20_poly1305_openssh.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..07f5224c3be9fd4bf3fec476993bbed0534b9d6f

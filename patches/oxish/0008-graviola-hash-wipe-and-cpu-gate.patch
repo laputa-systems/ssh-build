@@ -1,0 +1,35 @@
+--- a/oxish-graviola/src/lib.rs
++++ b/oxish-graviola/src/lib.rs
+@@ -577,8 +577,10 @@ impl HashContext for Sha256Context {
+         Box::new(Self(self.0.clone()))
+     }
+ 
+-    fn finish(self: Box<Self>) -> Digest {
+-        Digest::new(self.0.finish().as_ref())
++    fn finish(mut self: Box<Self>) -> Digest {
++        // Moving the context out of its box would free the box's copy unwiped.
++        let context = core::mem::replace(&mut self.0, GSha256::new());
++        Digest::new(context.finish().as_ref())
+     }
+ }
+ 
+--- a/oxish/src/cpu.rs
++++ b/oxish/src/cpu.rs
+@@ -14,7 +14,7 @@ impl fmt::Display for MissingCpuFeature {
+         write!(
+             f,
+             "this CPU lacks `{}`, which Graviola requires (x86-64 needs a Broadwell-class core: \
+-             AES-NI, PCLMULQDQ, BMI1, ADX, AVX2; aarch64 needs NEON with the AES, PMULL and SHA2 \
++             AES-NI, PCLMULQDQ, BMI1, BMI2, ADX, POPCNT, AVX2; aarch64 needs NEON with the AES, PMULL and SHA2 \
+              extensions)",
+             self.0
+         )
+@@ -31,6 +31,8 @@ pub fn require_supported_cpu() -> Result<(), MissingCpuFeature> {
+             ("aes", is_x86_feature_detected!("aes")),
+             ("pclmulqdq", is_x86_feature_detected!("pclmulqdq")),
+             ("bmi1", is_x86_feature_detected!("bmi1")),
++            ("bmi2", is_x86_feature_detected!("bmi2")),
++            ("popcnt", is_x86_feature_detected!("popcnt")),
+             ("adx", is_x86_feature_detected!("adx")),
+             ("avx", is_x86_feature_detected!("avx")),
+             ("avx2", is_x86_feature_detected!("avx2")),
