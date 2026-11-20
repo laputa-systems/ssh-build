@@ -9,7 +9,7 @@ license = "Apache-2.0 OR MIT"
 
 [dependencies]
 data-encoding = "2.10"
-graviola = "0.4"
+graviola = "0.4.5"
 libc = "0.2"
 oxish-graviola = { path = "../vendor/oxish/oxish-graviola" }
 oxish-proto = { path = "../vendor/oxish/oxish-proto" }

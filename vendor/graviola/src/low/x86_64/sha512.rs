@@ -216,7 +216,8 @@ fn sha512_compress_4_blocks(state: &mut [u64; 8], block4: *const u64) {
     let mut f = _mm256_extract_epi64(save_efgh, 1) as u64;
     let mut g = _mm256_extract_epi64(save_efgh, 2) as u64;
     let mut h = _mm256_extract_epi64(save_efgh, 3) as u64;
-    for w_t in w.chunks_exact(8) {
+    let (chunks, _) = w.as_chunks::<8>();
+    for w_t in chunks {
         round!(a, b, c, d, e, f, g, h, _mm256_extract_epi64(w_t[0], 0));
         round!(h, a, b, c, d, e, f, g, _mm256_extract_epi64(w_t[1], 0));
         round!(g, h, a, b, c, d, e, f, _mm256_extract_epi64(w_t[2], 0));
@@ -246,7 +247,8 @@ fn sha512_compress_4_blocks(state: &mut [u64; 8], block4: *const u64) {
     let mut g = _mm256_extract_epi64(save_efgh, 2) as u64;
     let mut h = _mm256_extract_epi64(save_efgh, 3) as u64;
 
-    for w_t in w.chunks_exact(8) {
+    let (chunks, _) = w.as_chunks::<8>();
+    for w_t in chunks {
         round!(a, b, c, d, e, f, g, h, _mm256_extract_epi64(w_t[0], 1));
         round!(h, a, b, c, d, e, f, g, _mm256_extract_epi64(w_t[1], 1));
         round!(g, h, a, b, c, d, e, f, _mm256_extract_epi64(w_t[2], 1));
@@ -276,7 +278,8 @@ fn sha512_compress_4_blocks(state: &mut [u64; 8], block4: *const u64) {
     let mut g = _mm256_extract_epi64(save_efgh, 2) as u64;
     let mut h = _mm256_extract_epi64(save_efgh, 3) as u64;
 
-    for w_t in w.chunks_exact(8) {
+    let (chunks, _) = w.as_chunks::<8>();
+    for w_t in chunks {
         round!(a, b, c, d, e, f, g, h, _mm256_extract_epi64(w_t[0], 2));
         round!(h, a, b, c, d, e, f, g, _mm256_extract_epi64(w_t[1], 2));
         round!(g, h, a, b, c, d, e, f, _mm256_extract_epi64(w_t[2], 2));
@@ -306,7 +309,8 @@ fn sha512_compress_4_blocks(state: &mut [u64; 8], block4: *const u64) {
     let mut g = _mm256_extract_epi64(save_efgh, 2) as u64;
     let mut h = _mm256_extract_epi64(save_efgh, 3) as u64;
 
-    for w_t in w.chunks_exact(8) {
+    let (chunks, _) = w.as_chunks::<8>();
+    for w_t in chunks {
         round!(a, b, c, d, e, f, g, h, _mm256_extract_epi64(w_t[0], 3));
         round!(h, a, b, c, d, e, f, g, _mm256_extract_epi64(w_t[1], 3));
         round!(g, h, a, b, c, d, e, f, _mm256_extract_epi64(w_t[2], 3));
@@ -466,15 +470,15 @@ pub(in crate::low) fn sha512_compress_blocks(
     blocks: &[u8],
     _token: super::cpu::HaveBmi2,
 ) {
-    let mut iter4 = blocks.chunks_exact(512);
-    for block4 in iter4.by_ref() {
+    let (iter4, remainder) = blocks.as_chunks::<512>();
+    for block4 in iter4 {
         // SAFETY: `_token` proves caller checked cpu features for `bmi2`;
         // `avx` and `avx2` required by crate.
         unsafe { sha512_compress_4_blocks(state, block4.as_ptr().cast()) };
     }
-    let blocks = iter4.remainder();
 
-    for block in blocks.chunks_exact(128) {
+    let (chunks, _) = remainder.as_chunks::<128>();
+    for block in chunks {
         // SAFETY: caller checks cpu features for `bmi2`; `avx` and `avx2` required by crate.
         unsafe { sha512_compress_block(state, block) }
     }

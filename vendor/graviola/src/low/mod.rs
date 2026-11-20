@@ -11,41 +11,53 @@ pub mod inline_assembly_safety;
 
 mod generic {
     pub(super) mod blockwise;
-    #[cfg(target_arch = "aarch64")]
-    pub(crate) mod chacha20;
     pub(super) mod ct_copy;
     pub(super) mod ct_equal;
     #[cfg(test)]
     pub(crate) mod ghash;
     #[cfg(target_arch = "aarch64")]
     pub(crate) mod mlkem;
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) mod mlkem768;
     pub(crate) mod poly1305;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(not(target_arch = "aarch64"))]
     pub(super) mod sha256;
+    pub(super) mod sha3;
     pub(super) mod sha512;
-    pub(super) mod zeroise;
+
+    full_platform! {
+        pub(super) mod zeroise;
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    pub(super) mod ct_compare;
 }
 
-mod entry;
-mod posint;
-
-pub(crate) use entry::Entry;
 pub(crate) use generic::blockwise::Blockwise;
 pub(crate) use generic::ct_copy::{ct_copy, ct_select_i16};
 pub(crate) use generic::ct_equal::ct_equal;
 pub(crate) use generic::poly1305;
-pub(crate) use generic::zeroise::{zeroise, zeroise_value};
-pub(crate) use posint::{PosInt, SecretPosInt};
+pub(crate) use generic::sha3::KECCAK_RC;
 
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests;
+full_platform! {
+    mod entry;
+    mod posint;
+
+    pub(crate) use entry::Entry;
+    pub(crate) use generic::zeroise::{zeroise, zeroise_value};
+    pub(crate) use posint::{PosInt, SecretPosInt};
+
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    mod tests;
+}
 
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
         mod x86_64;
 
         pub(in crate::low) use x86_64::cpu::{enter_cpu_state, zero_bytes, ct_compare_bytes, leave_cpu_state, verify_cpu_features};
+        pub(crate) use x86_64::cpu::is_cpu_supported;
         pub(crate) use x86_64::chacha20;
         pub(crate) use x86_64::aes::AesKey;
         pub(crate) use x86_64::aes_gcm;
@@ -114,6 +126,8 @@ cfg_if::cfg_if! {
         pub(crate) use x86_64::mlkem_tobytes::mlkem_tobytes;
         pub(crate) use x86_64::mlkem_tomont::mlkem_tomont;
         pub(crate) use x86_64::mlkem_unpack::mlkem_unpack;
+        pub(crate) use x86_64::mlkem768_sample_poly_ntt_8x::mlkem768_sample_poly_ntt_8x;
+
         pub(crate) use x86_64::p256_montjadd::p256_montjadd;
         pub(crate) use x86_64::p256_montjdouble::p256_montjdouble;
         pub(crate) use x86_64::p256_montjmixadd::p256_montjmixadd;
@@ -121,13 +135,16 @@ cfg_if::cfg_if! {
         pub(crate) use x86_64::p384_montjdouble::p384_montjdouble;
         pub(crate) use x86_64::sha256_mux::sha256_compress_blocks;
         pub(crate) use x86_64::sha512_mux::sha512_compress_blocks;
-        pub(crate) use x86_64::sha3_keccak_f1600::sha3_keccak_f1600;
+        pub(crate) use x86_64::sha3_keccak_f1600_mux::{sha3_keccak_f1600, sha3_keccak2_f1600};
         pub(crate) use x86_64::sha3_keccak4_f1600_shim::sha3_keccak4_f1600;
-        pub(crate) use x86_64::sha3_keccak2of4_f1600::sha3_keccak2of4_f1600;
+        pub(crate) use x86_64::sha3_keccak8_f1600_mux::{sha3_keccak6of8_f1600, sha3_keccak8_f1600};
+        pub(crate) use x86_64::sha3_shake256_8x_one_block::sha3_shake256_8x_one_block;
+
     } else if #[cfg(target_arch = "aarch64")] {
         mod aarch64;
 
         pub(in crate::low) use aarch64::cpu::{enter_cpu_state, zero_bytes, ct_compare_bytes, leave_cpu_state, verify_cpu_features};
+        pub(crate) use aarch64::cpu::is_cpu_supported;
         pub(crate) use aarch64::aes::AesKey;
         pub(crate) use aarch64::aes_gcm;
         pub(crate) use aarch64::bignum_add::bignum_add;
@@ -199,14 +216,18 @@ cfg_if::cfg_if! {
         pub(crate) use aarch64::p384_montjadd::p384_montjadd;
         pub(crate) use aarch64::p384_montjdouble::p384_montjdouble;
         pub(crate) use aarch64::sha256::sha256_compress_blocks;
-        pub(crate) use aarch64::sha3_keccak_f1600_mux::sha3_keccak_f1600;
+        pub(crate) use aarch64::sha3_keccak_f1600_mux::{sha3_keccak_f1600, sha3_keccak2_f1600};
         pub(crate) use aarch64::sha3_keccak4_f1600_mux::sha3_keccak4_f1600;
-        pub(crate) use aarch64::sha3_keccak2of4_f1600::sha3_keccak2of4_f1600;
+        pub(crate) use aarch64::sha3_keccak8_f1600_mux::{sha3_keccak6of8_f1600, sha3_keccak8_f1600};
+        pub(crate) use aarch64::sha3_shake256_8x_one_block::sha3_shake256_8x_one_block;
 
-        pub(crate) use generic::chacha20;
+        pub(crate) use aarch64::chacha20;
         pub(crate) use generic::sha512::sha512_compress_blocks;
         pub(crate) use generic::mlkem::{mlkem_frombytes, mlkem_unpack};
+        pub(crate) use generic::mlkem768::mlkem768_sample_poly_ntt_8x;
     } else {
-        compile_error!("This crate only supports x86_64 or aarch64");
+        pub(in crate::low) use generic::ct_compare::ct_compare_bytes;
+        pub(crate) use generic::sha256::sha256_compress_blocks;
+        pub(crate) use generic::sha512::sha512_compress_blocks;
     }
 }

@@ -25,11 +25,11 @@
     },
     {
       "name": "graviola",
-      "version": "0.4.1",
-      "url": "https://static.crates.io/crates/graviola/graviola-0.4.1.crate",
-      "sha256": "e8596c4fa98466aae2fcf4c72a665bc0e021c0aaab1e47d82044d3dc3e309a76",
+      "version": "0.4.5",
+      "url": "https://static.crates.io/crates/graviola/graviola-0.4.5.crate",
+      "sha256": "bc0377ccc5ef095424121430046e475cf06658e23475b1af526655cfad0b86b2",
       "role": "source",
-      "note": "crates.io checksum as locked in OxiSH Cargo.lock; OxiSH workspace requires graviola 0.4"
+      "note": "crates.io checksum; OxiSH workspace uses the vendored Graviola release"
     }
   ]
 }
