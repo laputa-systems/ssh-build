@@ -14,7 +14,7 @@ impl fmt::Display for MissingCpuFeature {
         write!(
             f,
             "this CPU lacks `{}`, which Graviola requires (x86-64 needs a Broadwell-class core: \
-             AES-NI, PCLMULQDQ, BMI1, ADX, AVX2; aarch64 needs NEON with the AES, PMULL and SHA2 \
+             AES-NI, PCLMULQDQ, BMI1, BMI2, ADX, POPCNT, AVX2; aarch64 needs NEON with the AES, PMULL and SHA2 \
              extensions)",
             self.0
         )
@@ -31,6 +31,8 @@ pub fn require_supported_cpu() -> Result<(), MissingCpuFeature> {
             ("aes", is_x86_feature_detected!("aes")),
             ("pclmulqdq", is_x86_feature_detected!("pclmulqdq")),
             ("bmi1", is_x86_feature_detected!("bmi1")),
+            ("bmi2", is_x86_feature_detected!("bmi2")),
+            ("popcnt", is_x86_feature_detected!("popcnt")),
             ("adx", is_x86_feature_detected!("adx")),
             ("avx", is_x86_feature_detected!("avx")),
             ("avx2", is_x86_feature_detected!("avx2")),

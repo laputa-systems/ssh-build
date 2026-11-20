@@ -3,6 +3,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use graviola::hashing::{Hash, HashContext, Sha256, Sha512};
+use oxish_proto::named::KeyExchangeAlgorithm;
 
 const SECRET: &[u8] = b"xsh-shared-secret-wipe-sentinel";
 
@@ -45,4 +46,32 @@ fn sha_contexts_wipe_buffered_secrets_on_drop() {
     drop(sha512);
     WATCHING.with(|watching| watching.set(false));
     assert_eq!(UNWIPED.load(Ordering::Relaxed), 0, "freed hash contexts held the shared secret");
+}
+
+fn unwiped_after(run: impl FnOnce()) -> usize {
+    let before = UNWIPED.load(Ordering::Relaxed);
+    WATCHING.with(|watching| watching.set(true));
+    run();
+    WATCHING.with(|watching| watching.set(false));
+    UNWIPED.load(Ordering::Relaxed) - before
+}
+
+#[test]
+fn provider_hash_contexts_wipe_buffered_secrets_when_finished_or_forked() {
+    let hash = oxish_graviola::DEFAULT_PROVIDER
+        .hash(&KeyExchangeAlgorithm::MlKem768X25519Sha256)
+        .expect("SHA-256 for the hybrid exchange");
+    let finished = unwiped_after(|| {
+        let mut context = hash.start();
+        context.update(SECRET);
+        drop(context.finish());
+    });
+    let forked = unwiped_after(|| {
+        let mut context = hash.start();
+        context.update(SECRET);
+        let fork = context.fork();
+        drop(fork.finish());
+        drop(context.finish());
+    });
+    assert_eq!((finished, forked), (0, 0), "finished hash contexts freed the shared secret unwiped");
 }

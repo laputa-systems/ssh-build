@@ -120,7 +120,7 @@ jaq -n \
       graviola: {version: $graviola, crate_sha256: $graviola_sha256},
       patches_sha256: $patch_sha256, toolchain: $toolchain,
       build_commit: $commit, build_dirty: $dirty,
-      cpu_floor: {x86_64: "Broadwell-class: AES-NI PCLMULQDQ BMI1 ADX AVX2", aarch64: "NEON with AES PMULL SHA2"},
+      cpu_floor: {x86_64: "Broadwell-class: AES-NI PCLMULQDQ BMI1 BMI2 ADX POPCNT AVX2", aarch64: "NEON with AES PMULL SHA2"},
       executables: $executables}' > "$pkg/provenance.json"
 
 name=oxish-$version-$triple
