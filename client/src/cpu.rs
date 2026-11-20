@@ -1,7 +1,7 @@
 use crate::error::Error;
 
 #[cfg(target_arch = "x86_64")]
-const REQUIRED: &[&str] = &["aes", "pclmulqdq", "bmi1", "adx", "avx", "avx2"];
+const REQUIRED: &[&str] = &["aes", "pclmulqdq", "bmi1", "bmi2", "adx", "popcnt", "avx", "avx2"];
 #[cfg(target_arch = "aarch64")]
 const REQUIRED: &[&str] = &["neon", "aes", "pmull", "sha2"];
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -13,6 +13,8 @@ fn detected(feature: &str) -> bool {
         "aes" => std::arch::is_x86_feature_detected!("aes"),
         "pclmulqdq" => std::arch::is_x86_feature_detected!("pclmulqdq"),
         "bmi1" => std::arch::is_x86_feature_detected!("bmi1"),
+        "bmi2" => std::arch::is_x86_feature_detected!("bmi2"),
+        "popcnt" => std::arch::is_x86_feature_detected!("popcnt"),
         "adx" => std::arch::is_x86_feature_detected!("adx"),
         "avx" => std::arch::is_x86_feature_detected!("avx"),
         "avx2" => std::arch::is_x86_feature_detected!("avx2"),

@@ -577,8 +577,10 @@ impl HashContext for Sha256Context {
         Box::new(Self(self.0.clone()))
     }
 
-    fn finish(self: Box<Self>) -> Digest {
-        Digest::new(self.0.finish().as_ref())
+    fn finish(mut self: Box<Self>) -> Digest {
+        // Moving the context out of its box would free the box's copy unwiped.
+        let context = core::mem::replace(&mut self.0, GSha256::new());
+        Digest::new(context.finish().as_ref())
     }
 }
 

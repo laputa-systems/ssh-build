@@ -130,7 +130,7 @@ with no running command (1 h with one), 60 s for a peer that stops reading, TCP 
 `max-sessions`, `max-unauthenticated-per-ip`, `max-sessions-per-ip` and, in login mode,
 `max-sessions-per-account` (default 8).
 
-**Hardware.** Graviola needs x86-64 Broadwell-class cores (AES-NI, PCLMULQDQ, BMI1, ADX, AVX2) or
+**Hardware.** Graviola needs x86-64 Broadwell-class cores (AES-NI, PCLMULQDQ, BMI1, BMI2, ADX, POPCNT, AVX2) or
 aarch64 with NEON, AES, PMULL and SHA2. Both executables check this at startup and exit with a
 message.
 
