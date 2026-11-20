@@ -53,6 +53,7 @@ fn a_connection_end_between_the_exit_status_and_channel_eof_is_not_a_complete_re
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "resets and reads the peak resident size through /proc/self, which only Linux has")]
 fn requests_held_before_the_exec_reply_stay_within_the_memory_budget() {
     let _guard = exclusive();
     let peer = spawn(Behavior::default(), |link| {

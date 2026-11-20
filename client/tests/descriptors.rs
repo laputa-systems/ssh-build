@@ -6,7 +6,8 @@ use support::*;
 use oxish_client::{ExecOptions, StreamOptions};
 
 fn open_descriptors() -> usize {
-    std::fs::read_dir("/proc/self/fd").expect("fd directory").count()
+    let directory = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+    std::fs::read_dir(directory).expect("fd directory").count()
 }
 
 #[test]

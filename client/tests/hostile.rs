@@ -110,6 +110,7 @@ fn output_sent_to_a_file_is_not_limited_and_not_captured() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "resets and reads the peak resident size through /proc/self, which only Linux has")]
 fn traffic_queued_before_a_rekey_is_bounded_by_the_window() {
     let _guard = exclusive();
     let peer = serve_exec(Behavior::default(), 1 << 20, |link, channel| {
@@ -158,6 +159,7 @@ fn the_server_may_not_send_connection_layer_traffic_after_its_kexinit() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "resets and reads the peak resident size through /proc/self, which only Linux has")]
 fn a_stalled_write_does_not_buffer_the_peers_traffic_without_bound() {
     let _guard = exclusive();
     let peer = serve_exec(Behavior::default(), u32::MAX / 2, |link, channel| {
@@ -224,6 +226,7 @@ fn reads_do_not_reset_the_deadline_of_a_stalled_write() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "resets and reads the peak resident size through /proc/self, which only Linux has")]
 fn replies_to_a_flood_of_requests_are_not_queued_while_the_peer_does_not_read() {
     let _guard = exclusive();
     let peer = serve_exec(Behavior::default(), 1 << 20, |link, _| {
@@ -253,6 +256,7 @@ fn replies_to_a_flood_of_requests_are_not_queued_while_the_peer_does_not_read() 
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "resets and reads the peak resident size through /proc/self, which only Linux has")]
 fn channel_request_replies_are_not_queued_while_the_peer_does_not_read() {
     let _guard = exclusive();
     let peer = serve_exec(Behavior::default(), 1 << 20, |link, channel| {
