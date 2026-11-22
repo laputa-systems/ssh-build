@@ -23,7 +23,7 @@ OPENSSH_SHA256 := $(shell jaq -r '.inputs[] | select(.name == "openssh") | .sha2
 
 export TARGET
 
-.PHONY: fetch build binaries binaries-ssh binaries-oxish package verify lint clean check-target
+.PHONY: fetch build binaries binaries-ssh binaries-oxish package test verify lint clean check-target
 
 check-target:
 	@set -eu; \
@@ -97,6 +97,11 @@ package: check-target
 				oxish) sh scripts/package-oxish.sh "$(OUT_DIR)" ;; \
 			esac; \
 		done
+
+test:
+	mkdir -p .work/tmp
+	TMPDIR="$(CURDIR)/.work/tmp" CARGO_TARGET_DIR="$(CURDIR)/.work/target-oxish" cargo test --locked --manifest-path vendor/oxish/Cargo.toml
+	TMPDIR="$(CURDIR)/.work/tmp" CARGO_TARGET_DIR="$(CURDIR)/.work/target-oxish-client" cargo test --locked --manifest-path client/Cargo.toml --test keygen
 
 verify: check-target
 	@sh scripts/verify-release.sh "$(OUT_DIR)"

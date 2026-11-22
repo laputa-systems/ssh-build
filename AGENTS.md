@@ -8,6 +8,7 @@ Graviola-only OxiSH tools (a server with Git and login modes, the interactive `o
 
 ```sh
 make build TARGET=<triple> [PRODUCT=ssh|oxish]   # build and package into dist/release
+make test                                        # server tests and key generation interop
 make verify TARGET=<triple>                       # unpack the archives, run runtime and e2e tests
 make fetch | package | lint | clean
 SSH_BIN_DIR=dist/ssh/<triple>/bin sh test/runtime.sh                # client qualification
