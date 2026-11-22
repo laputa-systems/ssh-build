@@ -5,3 +5,4 @@ out/
 stage/
 /vendor/oxish/target/
 /client/target/
+target/
