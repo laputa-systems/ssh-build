@@ -7,6 +7,8 @@ OpenSSH 10.6p1 client built `--without-openssl` (macOS arm64, static-musl Linux 
 Graviola-only OxiSH tools (a server with Git and login modes, the interactive `oxish` client, the
 `oxish-sftp` and `oxish-scp` SFTP clients and `oxish-keygen`), shipped as separate `.tar.xz` archives. Users read `README.md`.
 
+The roadmap, [docs/roadmap.md](docs/roadmap.md), holds all current and future work; its Status is the resume point.
+
 ## Commands
 
 ```sh
