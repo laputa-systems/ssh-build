@@ -38,7 +38,7 @@ for b in $bins; do
     if [ "$flavour" = "macos" ]; then
         non_sys=$(otool -L "$f" | sed '1d' | awk '$1 !~ /^\/(usr\/lib|System\/Library)\// { print $1 }')
         [ -z "$non_sys" ]; chk $? "$b: system-only dylibs"
-        undef=$(nm -u "$f" 2>/dev/null | grep -ci "evp\|_RSA\|_EC_KEY\|_BN_new\|libcrypto" || true)
+        undef=$(nm -u "$f" 2>/dev/null | grep -Eci "evp|_RSA|_EC_KEY|_BN_new|libcrypto" || true)
         [ "$undef" -eq 0 ]; chk $? "$b: no libcrypto symbols ($undef)"
         file_out=$(file -b "$f")
         echo "$file_out" | grep -q "$arch"; chk $? "$b: arch $arch"
@@ -46,14 +46,23 @@ for b in $bins; do
         codesign -v "$f" 2>/dev/null; chk $? "$b: valid signature"
         minos=$(otool -l "$f" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
         floor=${MACOS_FLOOR:-14.0}
-        [ -n "$minos" ] && [ "$(printf '%s\n%s\n' "$minos" "$floor" | sort -V | tail -n 1)" = "$floor" ]; chk $? "$b: deployment target $minos within the documented floor $floor"
+        [ -n "$minos" ] && awk -v minos="$minos" -v floor="$floor" 'BEGIN {
+            m_count = split(minos, m, "\\.")
+            f_count = split(floor, f, "\\.")
+            count = m_count > f_count ? m_count : f_count
+            for (i = 1; i <= count; i++) {
+                if (m[i] + 0 > f[i] + 0) exit 1
+                if (m[i] + 0 < f[i] + 0) exit 0
+            }
+            exit 0
+        }'; chk $? "$b: deployment target $minos within the documented floor $floor"
     else
         interp=$(readelf -l "$f" 2>/dev/null | grep -c "INTERP" || true)
         [ "$interp" -eq 0 ]; chk $? "$b: static, no PT_INTERP"
         readelf -h "$f" 2>/dev/null | grep -q "Type:.*DYN"; chk $? "$b: position independent (static-pie)"
         needed=$(readelf -d "$f" 2>/dev/null | grep -c "NEEDED" || true)
         [ "$needed" -eq 0 ]; chk $? "$b: static, no DT_NEEDED"
-        undef=$(nm -D "$f" 2>/dev/null | grep -ci "evp\|RSA_\|EC_KEY\|BN_new\|libcrypto\|libssl" || true)
+        undef=$(nm -D "$f" 2>/dev/null | grep -Eci "evp|RSA_|EC_KEY|BN_new|libcrypto|libssl" || true)
         [ "$undef" -eq 0 ]; chk $? "$b: no libcrypto symbols ($undef)"
         segments=$(readelf -lW "$f" 2>/dev/null)
         flags_of() { printf '%s\n' "$segments" | awk -v kind="$1" '$1 == kind { f = ""; for (i = 7; i < NF; i++) f = f $i; print f }'; }
@@ -61,7 +70,7 @@ for b in $bins; do
         [ -n "$stack" ]; chk $? "$b: has a GNU_STACK header"
         case $stack in *E*) false ;; *) true ;; esac; chk $? "$b: non-executable stack ($stack)"
         [ -n "$(flags_of GNU_RELRO)" ]; chk $? "$b: has a GNU_RELRO segment"
-        wx=$(flags_of LOAD | grep -c 'W.*E\|E.*W' || true)
+        wx=$(flags_of LOAD | grep -Ec 'W.*E|E.*W' || true)
         [ "$wx" -eq 0 ]; chk $? "$b: no writable and executable load segment"
         readelf -dW "$f" 2>/dev/null | grep -q TEXTREL; [ $? -ne 0 ]; chk $? "$b: no text relocations"
         readelf -S "$f" | grep -q "\.note\.gnu\.property" && echo "ok: $b: property notes present" || echo "note: $b: no property notes"
