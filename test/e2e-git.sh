@@ -126,7 +126,7 @@ $(ssh_opts rw) -v -p "$port" -o KexAlgorithms=mlkem768x25519-sha256 -o Ciphers=c
     git@127.0.0.1 "git-upload-pack 'a.git'" < /dev/null > /dev/null 2> "$work/negotiation.log" || true
 grep -q 'kex: algorithm: mlkem768x25519-sha256' "$work/negotiation.log" || fail "hybrid post-quantum key exchange was not negotiated"
 grep -q 'cipher: chacha20-poly1305@openssh.com' "$work/negotiation.log" || fail "chacha20-poly1305@openssh.com was not negotiated"
-grep -q 'Authenticated to 127.0.0.1.*publickey\|Authentication succeeded (publickey)' "$work/negotiation.log" || fail "public-key authentication did not succeed"
+grep -Eq 'Authenticated to 127.0.0.1.*publickey|Authentication succeeded \(publickey\)' "$work/negotiation.log" || fail "public-key authentication did not succeed"
 grep -q 'host key.*ssh-ed25519' "$work/negotiation.log" || fail "host key was not ssh-ed25519"
 ok "ed25519 auth, mlkem768x25519-sha256 kex, chacha20-poly1305@openssh.com cipher"
 
@@ -170,7 +170,7 @@ g rw -C "$seed" checkout -q main
 g rw -C "$seed" -c user.name=e2e -c user.email=e2e@example.invalid commit -q --allow-empty -m "moves main on"
 g rw -C "$seed" push -q "$(url a.git)" main
 must_fail "non-fast-forward push" g rw -C "$work/clients/diverge" push origin HEAD:main
-grep -q 'rejected\|non-fast-forward\|fetch first' "$work/last.err" || fail "rejected push gave no diagnostic"
+grep -Eq 'rejected|non-fast-forward|fetch first' "$work/last.err" || fail "rejected push gave no diagnostic"
 ok "rejected push relays git's diagnostic and exit status"
 
 ls "$work/repos" > "$work/repos.before"
@@ -203,14 +203,14 @@ must_fail "unauthorized key" rssh stranger "git-upload-pack 'a.git'"
 grep -qi 'permission denied' "$work/last.err" || fail "stranger was not told permission denied"
 code=0
 $(ssh_opts rw "$work/known_hosts.decoy") -p "$port" git@127.0.0.1 "git-upload-pack 'a.git'" < /dev/null > /dev/null 2> "$work/last.err" || code=$?
-[ "$code" -ne 0 ] && grep -q 'Host key verification failed\|REMOTE HOST IDENTIFICATION HAS CHANGED' "$work/last.err" || fail "client accepted an unexpected host key"
+[ "$code" -ne 0 ] && grep -E -q 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' "$work/last.err" || fail "client accepted an unexpected host key"
 ok "unknown host key refused by the client"
 for request in "-tt" "-N -L 0:127.0.0.1:1" "-W 127.0.0.1:22" "-A" "-X"; do
     code=0
     # shellcheck disable=SC2086
     rssh rw $request "git-upload-pack 'a.git'" < /dev/null > "$work/last.out" 2> "$work/last.err" || code=$?
     case $request in
-        "-tt"|"-A"|"-X") grep -qi 'request failed\|not supported\|refused' "$work/last.err" || [ "$code" -ne 0 ] || fail "ssh $request was silently honored" ;;
+        "-tt"|"-A"|"-X") grep -Eqi 'request failed|not supported|refused' "$work/last.err" || [ "$code" -ne 0 ] || fail "ssh $request was silently honored" ;;
         *) [ "$code" -ne 0 ] || fail "ssh $request succeeded" ;;
     esac
 done
