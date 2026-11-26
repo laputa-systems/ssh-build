@@ -147,7 +147,7 @@ the remote status 0 and the local terminal attributes are byte-identical to befo
 stand-in mode shares the harness but restarts the OpenSSH client itself, so it does not exercise the
 reconnect assertions that are specific to `oxish --attach`.
 
-`Dockerfile.oxish` links Rust with Alpine's gcc and musl rather than Rust's bundled start files:
+`Dockerfile.oxish` links Rust with the owned clang and Alpine's musl rather than Rust's bundled start files:
 the bundled ones crash static-PIE binaries at startup. Two clean builds of the Linux arm64 server
 are byte-identical.
 

@@ -2,9 +2,12 @@
 
 FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS build
 
+COPY --from=oci.17166969.xyz/owned-tools@sha256:aaec19e7a44cbc53b40db2d22093600ee888689b89be94da90e5398ed02f1883 /opt/laputa /opt/laputa
+ENV PATH=$PATH:/opt/laputa/bin
+
 RUN apk add --no-cache \
         binutils=2.45.1-r1 \
-        gcc=15.2.0-r5 \
+        libgcc=15.2.0-r5 \
         make=4.4.1-r4 \
         patch=2.8.1-r0 \
         musl-dev=1.2.6-r3 \
@@ -12,6 +15,10 @@ RUN apk add --no-cache \
         zlib-dev=1.4-r0 \
         zlib-static=1.4-r0 \
         file=5.47-r2
+
+# libgcc supplies the -lgcc_s runtime and its symlink; the owned clang drives C compilation.
+RUN ln -s libgcc_s.so.1 /usr/lib/libgcc_s.so \
+    && ln -s /opt/laputa/bin/clang /usr/local/bin/cc
 
 RUN case "$(apk --print-arch)" in \
         aarch64|x86_64) ;; \
@@ -36,7 +43,7 @@ COPY patches/openssh/0001-owned-help-footer.patch /tmp/owned-help-footer.patch
 RUN patch -p1 < /tmp/owned-help-footer.patch
 
 RUN set -eux; \
-    ./configure --without-openssl --with-ldflags="-static" --disable-strip; \
+    ./configure --without-openssl --with-ldflags="-static-pie" --disable-strip; \
     make -j"$(getconf _NPROCESSORS_ONLN)" SSH_PROGRAM=ssh ssh ssh-keygen ssh-agent ssh-add sftp scp; \
     ./ssh -V 2>&1; \
     strip ssh ssh-keygen ssh-agent ssh-add sftp scp; \
